@@ -1,13 +1,15 @@
 {
-  "name": "video-catelog",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "video-catalog",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs"
+    "build": "npm run build --workspace apps/web && npm run build --workspace apps/server",
+    "start": "npm run start --workspace apps/server",
+    "dev:server": "npm run dev --workspace apps/server",
+    "dev:web": "npm run dev --workspace apps/web",
+    "typecheck": "npm run typecheck --workspace apps/server && npm run typecheck --workspace apps/web"
+  }
 }

@@ -1,0 +1,19 @@
+[Unit]
+Description=Video Catalog App
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKING_DIRECTORY__
+EnvironmentFile=__WORKING_DIRECTORY__/.env
+Environment=NODE_ENV=production
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env npm run start
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

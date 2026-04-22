@@ -1,0 +1,232 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #10131a;
+  color: #e6edf7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  min-height: 100vh;
+  background: linear-gradient(180deg, #0f141d 0%, #111827 100%);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.lock-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+}
+
+.lock-card {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 0.9rem;
+  padding: 2rem;
+  border-radius: 18px;
+  background: rgba(17, 24, 39, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+}
+
+.lock-card input,
+.panel input {
+  width: 100%;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: #0b1220;
+  color: #e6edf7;
+  border-radius: 10px;
+  padding: 0.8rem 0.9rem;
+}
+
+.lock-card button,
+.sidebar button,
+.panel button,
+.section-heading button {
+  border: 0;
+  border-radius: 10px;
+  padding: 0.8rem 1rem;
+  background: #3b82f6;
+  color: white;
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 220px 1fr;
+}
+
+.sidebar {
+  padding: 1.2rem;
+  background: rgba(5, 10, 18, 0.88);
+  border-right: 1px solid rgba(148, 163, 184, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.sidebar button {
+  background: #162032;
+  text-align: left;
+}
+
+.sidebar button.active {
+  background: #2563eb;
+}
+
+.sidebar-spacer {
+  flex: 1;
+}
+
+.content {
+  padding: 1.2rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.2rem;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.82);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.status-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+.pill {
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  background: #233147;
+  color: #c7d2fe;
+}
+
+.pill.ok {
+  background: #14532d;
+  color: #d1fae5;
+}
+
+.section-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: end;
+  margin-bottom: 1rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 1rem;
+}
+
+.card,
+.panel,
+.empty-state {
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.84);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.card {
+  padding: 0.9rem;
+}
+
+.card h4 {
+  margin: 0.9rem 0 0.7rem;
+  font-size: 1rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.card dl {
+  margin: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.card dt {
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+
+.card dd {
+  margin: 0.1rem 0 0;
+}
+
+.thumbnail-placeholder {
+  aspect-ratio: 16 / 9;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #334155 0%, #1e293b 100%);
+  color: #cbd5e1;
+  font-weight: 600;
+}
+
+.card:hover .thumbnail-placeholder {
+  outline: 1px solid #60a5fa;
+}
+
+.panel {
+  padding: 1.2rem;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.empty-state {
+  padding: 1.2rem;
+}
+
+.muted {
+  color: #94a3b8;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  }
+
+  .topbar,
+  .section-heading {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
