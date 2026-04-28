@@ -77,6 +77,7 @@ export type MediaProbeInfo = {
   audioPresent: boolean | null;
   videoCodec: string | null;
   audioCodec: string | null;
+  audioCodecs?: string[];
   pixelFormat: string | null;
   containerFormat: string | null;
   estimatedFrameCount: number | null;

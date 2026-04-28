@@ -27,6 +27,10 @@ export type AppConfig = {
   wsAllowedOrigins: string[];
   maxUploadBytes: number;
   ffmpegCommand: string;
+  ffmpegRetentionRemuxArgs: string[];
+  ffmpegRetentionTranscodeVideoArgs: string[];
+  ffmpegRetentionTranscodeCompatibleAudioArgs: string[];
+  ffmpegRetentionTranscodeIncompatibleAudioArgs: string[];
   ffprobeCommand: string;
   ytDlpCommand: string;
   webDistRoot: string;
@@ -66,6 +70,107 @@ function parseCommaSeparatedList(value: string | undefined): string[] {
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
 }
+
+function parseShellLikeArguments(value: string): string[] {
+  const args: string[] = [];
+  let current = '';
+  let quote: 'single' | 'double' | null = null;
+  let escaped = false;
+  let hasToken = false;
+
+  for (const character of value) {
+    if (escaped) {
+      current += character;
+      hasToken = true;
+      escaped = false;
+      continue;
+    }
+
+    if (character === '\\' && quote !== 'single') {
+      escaped = true;
+      hasToken = true;
+      continue;
+    }
+
+    if (character === "'" && quote !== 'double') {
+      quote = quote === 'single' ? null : 'single';
+      hasToken = true;
+      continue;
+    }
+
+    if (character === '"' && quote !== 'single') {
+      quote = quote === 'double' ? null : 'double';
+      hasToken = true;
+      continue;
+    }
+
+    if (/\s/.test(character) && quote === null) {
+      if (hasToken) {
+        args.push(current);
+        current = '';
+        hasToken = false;
+      }
+      continue;
+    }
+
+    current += character;
+    hasToken = true;
+  }
+
+  if (escaped) {
+    current += '\\';
+  }
+
+  if (quote !== null) {
+    throw new Error('Unterminated quote in FFmpeg argument environment setting.');
+  }
+
+  if (hasToken) {
+    args.push(current);
+  }
+
+  return args;
+}
+
+function parseArgumentList(value: string | undefined, fallback: string[]): string[] {
+  if (value === undefined || value.trim() === '') {
+    return [...fallback];
+  }
+
+  return parseShellLikeArguments(value);
+}
+
+const DEFAULT_FFMPEG_RETENTION_REMUX_ARGS = ['-map', '0', '-c', 'copy', '-movflags', '+faststart'];
+
+const DEFAULT_FFMPEG_RETENTION_TRANSCODE_VIDEO_ARGS = [
+  '-map',
+  '0:v:0',
+  '-map_metadata',
+  '0',
+  '-map_chapters',
+  '0',
+  '-c:v',
+  'libx264',
+  '-preset',
+  'slow',
+  '-crf',
+  '18',
+  '-pix_fmt',
+  'yuv420p',
+  '-movflags',
+  '+faststart'
+];
+
+const DEFAULT_FFMPEG_RETENTION_TRANSCODE_COMPATIBLE_AUDIO_ARGS = ['-map', '0:a?', '-c:a', 'copy'];
+
+const DEFAULT_FFMPEG_RETENTION_TRANSCODE_INCOMPATIBLE_AUDIO_ARGS = [
+  '-map',
+  '0:a?',
+  '-c:a',
+  'aac',
+  '-b:a',
+  '320k'
+];
 
 function stripMatchingQuotes(value: string): string {
   if (value.length >= 2) {
@@ -174,6 +279,22 @@ export function loadConfig(): AppConfig {
     wsAllowedOrigins: parseCommaSeparatedList(readSetting(env, dotEnv, 'WS_ALLOWED_ORIGINS')),
     maxUploadBytes: parseInteger(readSetting(env, dotEnv, 'MAX_UPLOAD_BYTES'), 1024 * 1024 * 1024),
     ffmpegCommand: readSetting(env, dotEnv, 'FFMPEG_PATH') ?? 'ffmpeg',
+    ffmpegRetentionRemuxArgs: parseArgumentList(
+      readSetting(env, dotEnv, 'FFMPEG_RETENTION_REMUX_ARGS'),
+      DEFAULT_FFMPEG_RETENTION_REMUX_ARGS
+    ),
+    ffmpegRetentionTranscodeVideoArgs: parseArgumentList(
+      readSetting(env, dotEnv, 'FFMPEG_RETENTION_TRANSCODE_VIDEO_ARGS'),
+      DEFAULT_FFMPEG_RETENTION_TRANSCODE_VIDEO_ARGS
+    ),
+    ffmpegRetentionTranscodeCompatibleAudioArgs: parseArgumentList(
+      readSetting(env, dotEnv, 'FFMPEG_RETENTION_TRANSCODE_COMPATIBLE_AUDIO_ARGS'),
+      DEFAULT_FFMPEG_RETENTION_TRANSCODE_COMPATIBLE_AUDIO_ARGS
+    ),
+    ffmpegRetentionTranscodeIncompatibleAudioArgs: parseArgumentList(
+      readSetting(env, dotEnv, 'FFMPEG_RETENTION_TRANSCODE_INCOMPATIBLE_AUDIO_ARGS'),
+      DEFAULT_FFMPEG_RETENTION_TRANSCODE_INCOMPATIBLE_AUDIO_ARGS
+    ),
     ffprobeCommand: readSetting(env, dotEnv, 'FFPROBE_PATH') ?? 'ffprobe',
     ytDlpCommand: readSetting(env, dotEnv, 'YTDLP_PATH') ?? 'yt-dlp',
     webDistRoot

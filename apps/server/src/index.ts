@@ -1803,7 +1803,20 @@ function isRemuxSafeVideoCodec(codec: string | null): boolean {
 }
 
 function isRemuxSafeAudioCodec(codec: string | null): boolean {
-  return codec === null || codec === 'aac' || codec === 'mp3';
+  return codec === 'aac' || codec === 'mp3';
+}
+
+function hasRemuxSafeAudio(probe: MediaProbeInfo): boolean {
+  if (probe.audioPresent === false) {
+    return true;
+  }
+
+  if (probe.audioPresent !== true) {
+    return false;
+  }
+
+  const audioCodecs = probe.audioCodecs ?? (probe.audioCodec ? [probe.audioCodec] : []);
+  return audioCodecs.length > 0 && audioCodecs.every((codec) => isRemuxSafeAudioCodec(codec));
 }
 
 function isSafePixelFormat(pixelFormat: string | null): boolean {
@@ -1812,7 +1825,7 @@ function isSafePixelFormat(pixelFormat: string | null): boolean {
 
 function createMediaRetentionPlan(item: CatalogItem, probe: MediaProbeInfo): MediaRetentionPlan {
   const remuxSafeVideo = isRemuxSafeVideoCodec(probe.videoCodec);
-  const remuxSafeAudio = isRemuxSafeAudioCodec(probe.audioCodec);
+  const remuxSafeAudio = hasRemuxSafeAudio(probe);
   const safePixelFormat = isSafePixelFormat(probe.pixelFormat);
   const browserSafeForDirectRetention = remuxSafeVideo && remuxSafeAudio && safePixelFormat;
   const currentExtension = path.extname(item.storedName).toLowerCase();
@@ -1838,7 +1851,7 @@ function createMediaRetentionPlan(item: CatalogItem, probe: MediaProbeInfo): Med
   return {
     decision: 'transcode',
     outputExtension: '.mp4',
-    description: 'Input does not match the retained browser-safe target; transcoding to MP4/H.264/AAC.',
+    description: 'Input does not match the retained browser-safe target; transcoding to a quality-prioritized MP4/H.264 retained asset.',
     inputIsBrowserSafe: false
   };
 }
@@ -1853,7 +1866,11 @@ function parseFfprobeResult(raw: string): MediaProbeInfo {
     throw new Error('ffprobe did not find a video stream in the retained media file.');
   }
 
-  const audioStream = streams.find((stream) => readString(stream.codec_type) === 'audio') ?? null;
+  const audioStreams = streams.filter((stream) => readString(stream.codec_type) === 'audio');
+  const audioStream = audioStreams[0] ?? null;
+  const audioCodecs = audioStreams
+    .map((stream) => readString(stream.codec_name))
+    .filter((codec): codec is string => codec !== null);
 
   const durationSeconds =
     parseNumericText(format ? readString(format.duration) : null) ??
@@ -1874,6 +1891,7 @@ function parseFfprobeResult(raw: string): MediaProbeInfo {
     audioPresent: audioStream !== null,
     videoCodec: readString(videoStream.codec_name),
     audioCodec: audioStream ? readString(audioStream.codec_name) : null,
+    audioCodecs,
     pixelFormat: readString(videoStream.pix_fmt),
     containerFormat: format ? readString(format.format_name) : null,
     estimatedFrameCount,
@@ -2394,12 +2412,7 @@ async function applyRetentionPlan(
           'pipe:1',
           '-i',
           currentPath,
-          '-map',
-          '0',
-          '-c',
-          'copy',
-          '-movflags',
-          '+faststart',
+          ...config.ffmpegRetentionRemuxArgs,
           temporaryOutputPath
         ],
         inputProbe.durationSeconds,
@@ -2417,6 +2430,9 @@ async function applyRetentionPlan(
     }
 
     case 'transcode': {
+      const transcodeAudioArgs = hasRemuxSafeAudio(inputProbe)
+        ? config.ffmpegRetentionTranscodeCompatibleAudioArgs
+        : config.ffmpegRetentionTranscodeIncompatibleAudioArgs;
       const transcodeArgs = [
         '-y',
         '-nostdin',
@@ -2428,33 +2444,15 @@ async function applyRetentionPlan(
         'pipe:1',
         '-i',
         currentPath,
-        '-map',
-        '0:v:0',
-        '-map',
-        '0:a?',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'medium',
-        '-crf',
-        '22',
-        '-pix_fmt',
-        'yuv420p',
-        '-movflags',
-        '+faststart',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '192k',
-        '-ac',
-        '2',
+        ...config.ffmpegRetentionTranscodeVideoArgs,
+        ...transcodeAudioArgs,
         temporaryOutputPath
       ];
 
       await runFfmpegStage(
         item,
         'transcoding',
-        'Transcoding retained video to MP4/H.264/AAC.',
+        'Transcoding retained video to quality-prioritized MP4/H.264.',
         'Transcoding retained video',
         'ffmpeg transcode',
         transcodeArgs,
