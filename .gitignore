@@ -17,3 +17,6 @@ logs/
 # OS/editor noise
 .DS_Store
 __MACOSX/
+
+# Local/server-only operational scripts
+ops/local/
