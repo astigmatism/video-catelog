@@ -565,7 +565,7 @@ const DEFAULT_VIEWER_VISUAL_ADJUSTMENTS: ViewerVisualAdjustments = {
   saturation: 1,
   enabled: false
 };
-const VIEWER_TOOLBAR_AUTO_HIDE_DELAY_MS = 1500000;
+const VIEWER_TOOLBAR_AUTO_HIDE_DELAY_MS = 1500;
 const TAG_LABEL_MAX_LENGTH = 80;
 const DEFAULT_VISIBLE_TAG_LIST_LIMIT = 10;
 const VISIBLE_TAG_LIST_SETTINGS_STORAGE_KEY = 'sugar-spice.visible-tag-list-settings';
