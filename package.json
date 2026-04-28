@@ -8,6 +8,15 @@
   "scripts": {
     "build": "npm run build --workspace apps/web && npm run build --workspace apps/server",
     "start": "npm run start --workspace apps/server",
+    "start:prod": "pm2 startOrRestart ecosystem.config.cjs --env production",
+    "restart:prod": "pm2 startOrRestart ecosystem.config.cjs --env production --update-env",
+    "stop:prod": "pm2 stop video-catalog",
+    "delete:prod": "pm2 delete video-catalog",
+    "logs:prod": "pm2 logs video-catalog",
+    "status:prod": "pm2 status video-catalog",
+    "save:prod": "pm2 save",
+    "deploy:prod": "npm run build && npm run start:prod && npm run save:prod",
+    "dev": "npm run dev:web & npm run dev:server",
     "dev:server": "npm run dev --workspace apps/server",
     "dev:web": "npm run dev --workspace apps/web",
     "typecheck": "npm run typecheck --workspace apps/server && npm run typecheck --workspace apps/web"

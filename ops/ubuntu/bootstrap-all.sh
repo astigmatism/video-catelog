@@ -11,6 +11,7 @@ fi
 
 bash ops/ubuntu/install-system-packages.sh
 bash ops/ubuntu/install-node-user.sh
+bash ops/ubuntu/install-pm2-user.sh
 bash ops/ubuntu/install-yt-dlp-user.sh
 bash ops/ubuntu/setup-postgres-local.sh
 APP_PASSWORD="${APP_PASSWORD:-}" bash ops/ubuntu/create-env.sh
@@ -21,11 +22,16 @@ if [[ ! -f storage/catalog/items.json ]]; then
   printf '[]\n' > storage/catalog/items.json
 fi
 
-npm install
+if [[ -f package-lock.json ]]; then
+  npm ci
+else
+  npm install
+fi
 npm run build
 bash ops/ubuntu/install-user-service.sh
 
 echo
 echo "Bootstrap complete."
-echo "Use: systemctl --user status video-catalog.service"
-echo "Logs: journalctl --user -u video-catalog.service -f"
+echo "Use: pm2 status video-catalog"
+echo "Logs: pm2 logs video-catalog"
+echo "Boot service: systemctl status pm2-$(whoami).service"

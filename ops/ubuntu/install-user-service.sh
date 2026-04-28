@@ -2,20 +2,28 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
-TEMPLATE="$ROOT_DIR/ops/systemd/video-catalog.service.template"
-TARGET="$SYSTEMD_USER_DIR/video-catalog.service"
+cd "$ROOT_DIR"
 
-mkdir -p "$SYSTEMD_USER_DIR"
-sed "s|__WORKING_DIRECTORY__|$ROOT_DIR|g" "$TEMPLATE" > "$TARGET"
-
-if command -v loginctl >/dev/null 2>&1; then
-  sudo loginctl enable-linger "$(whoami)"
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "Run this script as your normal Ubuntu user, not as root."
+  exit 1
 fi
 
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-systemctl --user daemon-reload
-systemctl --user enable --now video-catalog.service
-systemctl --user restart video-catalog.service
+export PATH="$HOME/.local/bin:$PATH"
 
-echo "User service installed and started: $TARGET"
+if ! command -v pm2 >/dev/null 2>&1; then
+  bash ops/ubuntu/install-pm2-user.sh
+fi
+
+if [[ ! -f apps/server/dist/index.js || ! -f apps/web/dist/index.html ]]; then
+  echo "Build output was not found. Run npm run build before installing the PM2 service."
+  exit 1
+fi
+
+sudo env PATH="$PATH" PM2_HOME="$HOME/.pm2" pm2 startup systemd -u "$(whoami)" --hp "$HOME"
+npm run start:prod
+pm2 save
+
+echo "PM2 process installed and saved."
+echo "Check it with: pm2 status video-catalog"
+echo "Check boot integration with: systemctl status pm2-$(whoami).service"

@@ -11,7 +11,9 @@ export class SessionStore {
     const session: SessionRecord = {
       id: randomUUID(),
       createdAt: now,
-      lastSeenAt: now
+      lastSeenAt: now,
+      expiresAt: now + this.getTtlMs(),
+      lockedAt: null
     };
 
     this.sessions.set(session.id, session);
@@ -20,6 +22,18 @@ export class SessionStore {
   }
 
   get(sessionId: string | undefined): SessionRecord | undefined {
+    const session = this.peek(sessionId);
+    if (!session) {
+      return undefined;
+    }
+
+    const now = Date.now();
+    session.lastSeenAt = now;
+    session.expiresAt = now + this.getTtlMs();
+    return session;
+  }
+
+  peek(sessionId: string | undefined): SessionRecord | undefined {
     if (!sessionId) {
       return undefined;
     }
@@ -29,13 +43,11 @@ export class SessionStore {
       return undefined;
     }
 
-    const ttlMs = this.ttlMinutes * 60 * 1000;
-    if (Date.now() - session.lastSeenAt > ttlMs) {
+    if (session.lockedAt !== null || Date.now() > session.expiresAt) {
       this.sessions.delete(sessionId);
       return undefined;
     }
 
-    session.lastSeenAt = Date.now();
     return session;
   }
 
@@ -48,13 +60,16 @@ export class SessionStore {
   }
 
   cleanup(): void {
-    const ttlMs = this.ttlMinutes * 60 * 1000;
-    const cutoff = Date.now() - ttlMs;
+    const now = Date.now();
 
     for (const [sessionId, session] of this.sessions.entries()) {
-      if (session.lastSeenAt < cutoff) {
+      if (session.lockedAt !== null || now > session.expiresAt) {
         this.sessions.delete(sessionId);
       }
     }
+  }
+
+  private getTtlMs(): number {
+    return this.ttlMinutes * 60 * 1000;
   }
 }

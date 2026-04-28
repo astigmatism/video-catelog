@@ -31,9 +31,12 @@ DB_HOST=/var/run/postgresql
 DB_PORT=5432
 DB_NAME=video_catalog
 DB_USER=$(whoami)
-TRUST_PROXY=true
+TRUST_PROXY=false
 WS_HEARTBEAT_MS=30000
+WS_ALLOWED_ORIGINS=
+MAX_UPLOAD_BYTES=1073741824
 CONFIG
 
 chmod 600 "$ENV_FILE"
 echo "Created $ENV_FILE"
+echo "If you put the app behind a reverse proxy, set TRUST_PROXY=true and WS_ALLOWED_ORIGINS to the public origin, then restart PM2."

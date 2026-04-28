@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+apps/server/dist/
+apps/web/dist/
+
+# Local runtime state
+.env
+storage/
+logs/
+*.log
+
+# PM2/local process-manager state
+.pm2/
+
+# OS/editor noise
+.DS_Store
+__MACOSX/

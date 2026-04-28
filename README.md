@@ -1,58 +1,72 @@
-# Video Catalog Scaffold
+# Video Catalog
 
-This is a runnable bootstrap scaffold for the private video catalog application.
+Video Catalog is a Fastify + TypeScript backend with a React + TypeScript + Vite web client.
 
-What it already includes:
-- Fastify + TypeScript backend
-- React + TypeScript + Vite frontend
-- WebSocket connection between client and server
-- Password gate UI
-- Panic Escape logout behavior
-- Idle auto-lock baseline
-- Single-screen shell layout with sidebar, catalog area, upload panel, and settings panel
-- Multipart upload endpoint that stores incoming files on disk
-- Filesystem-backed placeholder catalog index
-- User-level systemd service files and Ubuntu bootstrap scripts
+The production runtime is intentionally a single Node.js server process:
 
-What is intentionally still placeholder-level:
-- PostgreSQL persistence wiring
-- FFmpeg thumbnail generation
-- Hover-preview generation
-- yt-dlp ingest UI/workflow
-- Protected media streaming and real viewer controls
-- duplicate checksum detection
+1. `apps/web` is built with Vite into `apps/web/dist`.
+2. `apps/server` is built with TypeScript into `apps/server/dist`.
+3. The Fastify backend serves the built frontend, API routes, media routes, and WebSocket endpoint from one port.
+4. PM2 manages that backend process in production and PM2's systemd startup integration brings it back after reboot.
 
-The goal is to give you a cloned repository that can start immediately and already matches the deployment shape of the final project.
+Development still uses two processes: Vite for the web client and `tsx watch` for the backend.
 
-## Quick start
+## Quick start on Ubuntu Server
 
-1. Extract this scaffold into the root of your repository.
-2. From the repo root, run:
-
-   ```bash
-   APP_PASSWORD='set-a-strong-password-here' bash ops/ubuntu/bootstrap-all.sh
-   ```
-
-3. Check the service:
-
-   ```bash
-   systemctl --user status video-catalog.service
-   ```
-
-4. Open `http://YOUR_SERVER_IP:3000`.
-
-## Useful commands
+From the repository root, run as your normal Ubuntu user, not as root:
 
 ```bash
-journalctl --user -u video-catalog.service -f
-systemctl --user restart video-catalog.service
-systemctl --user stop video-catalog.service
-systemctl --user start video-catalog.service
-npm run build
+APP_PASSWORD='set-a-strong-password-here' bash ops/ubuntu/bootstrap-all.sh
 ```
 
-## Notes
+Then open:
 
-- The scaffold is designed to live in your Ubuntu user's home directory and run under that same user.
-- The bootstrap script installs Node.js and yt-dlp into `~/.local/bin`.
-- The bootstrap script enables a user-level systemd service so the app comes up at boot.
+```text
+http://YOUR_SERVER_IP:3000
+```
+
+Check runtime status and logs:
+
+```bash
+pm2 status video-catalog
+pm2 logs video-catalog
+systemctl status pm2-$(whoami).service
+```
+
+For full deployment and operations steps, see [`docs/ubuntu-production.md`](docs/ubuntu-production.md).
+
+## Production commands
+
+```bash
+npm run build
+npm run start:prod
+npm run save:prod
+npm run restart:prod
+npm run stop:prod
+npm run logs:prod
+npm run status:prod
+```
+
+`npm run deploy:prod` runs the build, starts or restarts the PM2 process, and saves the PM2 process list.
+
+## Development commands
+
+```bash
+npm install
+npm run dev
+npm run typecheck
+```
+
+The existing development flow is preserved:
+
+- `npm run dev:web` starts Vite for the client.
+- `npm run dev:server` starts the backend with `tsx watch`.
+- `npm run dev` starts both development processes.
+
+## Runtime notes
+
+- `APP_PASSWORD` is required when `NODE_ENV=production`.
+- The generated `.env` binds the app to `0.0.0.0:3000` and stores media under `./storage`.
+- Vite is not run in production; only the compiled static frontend is served.
+- PM2 runs one backend instance because the app keeps sessions, WebSocket state, and media processing queue state in-process.
+- If you put the app behind a reverse proxy, set `TRUST_PROXY=true` and set `WS_ALLOWED_ORIGINS` to the public browser origin, for example `https://catalog.example.com`.
