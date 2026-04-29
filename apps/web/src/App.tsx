@@ -5,10 +5,12 @@ import type {
   JSX,
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent,
+  PointerEvent as ReactPointerEvent,
   ReactNode,
   Ref
 } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { LOCK_SCREEN_BACKGROUND_STYLE } from './lock-screen-background';
 
 type ToolAvailability = {
   ffmpeg: boolean;
@@ -7034,9 +7036,9 @@ export default function App(): JSX.Element {
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const socketCommandIdRef = useRef(0);
+  const passwordInputRef = useRef<HTMLInputElement | null>(null);
   const shouldReconnectRef = useRef(false);
   const lastInteractionRef = useRef<number>(Date.now());
-  const passwordInputRef = useRef<HTMLInputElement | null>(null);
   const isAddVideoModalOpenRef = useRef(false);
   const viewerCloseRequestedRef = useRef(false);
 
@@ -7054,6 +7056,19 @@ export default function App(): JSX.Element {
   const isAnyModalOpen =
     isAddVideoModalOpen || isSettingsModalOpen || viewerItem !== null || detailsItemId !== null;
   const isToolUpdateRunning = toolUpdateState.status === 'running';
+
+  function focusPasswordInputFromLockScreen(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (event.target instanceof HTMLElement) {
+      const interactiveTarget = event.target.closest(
+        'a, button, input, select, textarea, [tabindex]'
+      );
+      if (interactiveTarget !== null && interactiveTarget !== event.currentTarget) {
+        return;
+      }
+    }
+
+    passwordInputRef.current?.focus();
+  }
 
   const filteredCatalog = useMemo(() => {
     const normalizedSearch = filters.search.trim().toLowerCase();
@@ -9183,15 +9198,14 @@ export default function App(): JSX.Element {
     return (
       <div
         className="lock-screen"
-        onPointerDown={() => {
-          passwordInputRef.current?.focus();
-        }}
+        style={LOCK_SCREEN_BACKGROUND_STYLE}
+        onPointerDown={focusPasswordInputFromLockScreen}
       >
         <form className="lock-card" onSubmit={login}>
           <div className="lock-row">
             <input
-              ref={passwordInputRef}
               autoFocus
+              ref={passwordInputRef}
               id="password"
               name="password"
               type="password"
@@ -9203,6 +9217,7 @@ export default function App(): JSX.Element {
                 }
               }}
               placeholder="Enter password"
+              aria-label="Password"
               aria-describedby={message ? 'lock-message' : undefined}
             />
             <button type="submit">Go</button>

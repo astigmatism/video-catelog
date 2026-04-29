@@ -1,28 +1,34 @@
 /*
   Lock screen background image placeholder.
 
-  Create this folder at the project root, as a sibling of src/:
-    public/images/
+  Place your background image in the client source tree at:
+    src/assets/lock-screen/google-homepage-lock-background.jpg
 
-  Then place your Google-homepage-style background image at:
-    public/images/google-homepage-lock-background.png
+  This is intentionally no longer a /public or /images root URL. Vite will
+  bundle the image into the production app's compiled assets, which avoids
+  relying on a reverse proxy to serve /images/... from the domain root.
 
-  Vite serves files from public/ at the site root, so the CSS path below
-  resolves in the browser to /images/google-homepage-lock-background.png.
+  Supported image filenames in src/assets/lock-screen/ include:
+    google-homepage-lock-background.png
+    google-homepage-lock-background.jpg
+    google-homepage-lock-background.jpeg
+    google-homepage-lock-background.webp
+    google.com.jpg
 
-  To use a different filename or location, update only this custom property.
+  You can also override the bundled image at build time with:
+    VITE_LOCK_SCREEN_BACKGROUND_IMAGE_URL=https://example.com/background.jpg
 */
 :root {
-  --lock-screen-background-image: url('/images/google.com.jpg');
+  --lock-screen-background-image: none;
   --lock-screen-background-position: center center;
   --lock-screen-background-size: contain;
   --lock-screen-controls-width: min(584px, calc(100vw - 2rem));
   --lock-screen-controls-y-offset: clamp(-1.5rem, -3vh, 0rem);
 
   /*
-    Keep the password form mounted, focusable, clickable, and submittable,
-    but visually hidden. Do not replace this with display: none or
-    visibility: hidden, because those would make the controls inactive.
+    Keep the password form mounted and active, but visually hidden.
+    Temporarily set this to 1 if you want to see the invisible click target
+    while fine-tuning its alignment over your background image.
   */
   --lock-screen-controls-opacity: 0;
 }
@@ -41,10 +47,10 @@
   background-position: var(--lock-screen-background-position);
   background-repeat: no-repeat;
   background-size: var(--lock-screen-background-size);
-  cursor: default;
 }
 
 .lock-card {
+  position: relative;
   width: var(--lock-screen-controls-width);
   display: grid;
   gap: 0.85rem;
@@ -54,7 +60,6 @@
   background: transparent;
   box-shadow: none;
   opacity: var(--lock-screen-controls-opacity);
-  pointer-events: auto;
   transform: translateY(var(--lock-screen-controls-y-offset));
 }
 
@@ -92,7 +97,6 @@
   background: transparent;
   color: #202124;
   box-shadow: none;
-  cursor: default;
 }
 
 .lock-row input[type='password']::placeholder {
@@ -120,7 +124,6 @@
   font-size: 0.875rem;
   font-weight: 500;
   box-shadow: none;
-  cursor: default;
 }
 
 .lock-row button:hover {
@@ -134,15 +137,16 @@
 }
 
 .lock-message {
-  justify-self: center;
-  max-width: 100%;
-  margin: 0;
-  padding: 0.4rem 0.75rem;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.9);
-  color: #3c4043;
-  text-align: center;
-  box-shadow: 0 1px 4px rgba(32, 33, 36, 0.14);
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  border: 0;
+  white-space: nowrap;
 }
 
 .lock-message.is-error {
