@@ -1,142 +1,292 @@
-/*
-  Lock screen background image placeholder.
-
-  Place your background image in the client source tree at:
-    src/assets/lock-screen/google-homepage-lock-background.jpg
-
-  This is intentionally no longer a /public or /images root URL. Vite will
-  bundle the image into the production app's compiled assets, which avoids
-  relying on a reverse proxy to serve /images/... from the domain root.
-
-  Supported image filenames in src/assets/lock-screen/ include:
-    google-homepage-lock-background.png
-    google-homepage-lock-background.jpg
-    google-homepage-lock-background.jpeg
-    google-homepage-lock-background.webp
-    google.com.jpg
-
-  You can also override the bundled image at build time with:
-    VITE_LOCK_SCREEN_BACKGROUND_IMAGE_URL=https://example.com/background.jpg
-*/
 :root {
-  --lock-screen-background-image: none;
-  --lock-screen-background-position: center center;
-  --lock-screen-background-size: contain;
-  --lock-screen-controls-width: min(584px, calc(100vw - 2rem));
-  --lock-screen-controls-y-offset: clamp(-1.5rem, -3vh, 0rem);
-
-  /*
-    Keep the password form mounted and active, but visually hidden.
-    Temporarily set this to 1 if you want to see the invisible click target
-    while fine-tuning its alignment over your background image.
-  */
-  --lock-screen-controls-opacity: 0;
+  --google-lock-text: #202124;
+  --google-lock-muted: #5f6368;
+  --google-lock-border: #dfe1e5;
+  --google-lock-button-bg: #f8f9fa;
+  --google-lock-footer-bg: #f2f2f2;
+  --google-lock-blue: #4285f4;
+  --google-lock-red: #ea4335;
+  --google-lock-yellow: #fbbc05;
+  --google-lock-green: #34a853;
 }
 
-.lock-screen {
-  position: relative;
+.google-lock-screen {
   min-height: 100vh;
   min-height: 100svh;
   width: 100%;
-  display: grid;
-  place-items: center;
-  padding: clamp(1rem, 4vw, 2rem);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
-  background-color: #efefef;
-  background-image: var(--lock-screen-background-image);
-  background-position: var(--lock-screen-background-position);
-  background-repeat: no-repeat;
-  background-size: var(--lock-screen-background-size);
+  background: #fff;
+  color: var(--google-lock-text);
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 14px;
 }
 
-.lock-card {
-  position: relative;
-  width: var(--lock-screen-controls-width);
-  display: grid;
-  gap: 0.85rem;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  opacity: var(--lock-screen-controls-opacity);
-  transform: translateY(var(--lock-screen-controls-y-offset));
+.google-lock-screen a {
+  color: inherit;
+  text-decoration: none;
 }
 
-.lock-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+.google-lock-screen a:hover {
+  text-decoration: underline;
+}
+
+.google-lock-header {
+  flex: 0 0 60px;
+  min-height: 60px;
+  display: flex;
   align-items: center;
-  gap: 0.7rem;
-  width: 100%;
-  min-height: 46px;
-  padding: 0.35rem 0.45rem 0.35rem 1rem;
-  border: 1px solid rgba(223, 225, 229, 0.98);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 1px 6px rgba(32, 33, 36, 0.18);
-  outline: 2px solid transparent;
-  outline-offset: 2px;
+  justify-content: space-between;
+  padding: 6px 14px 6px 30px;
 }
 
-.lock-row:focus-within,
-.lock-row:hover {
-  box-shadow: 0 1px 8px rgba(32, 33, 36, 0.24);
+.google-lock-nav {
+  display: flex;
+  align-items: center;
+  color: var(--google-lock-text);
+  line-height: 24px;
+  white-space: nowrap;
 }
 
-.lock-row:focus-within {
-  outline-color: #1a73e8;
+.google-lock-nav-left {
+  gap: 24px;
+  font-size: 14px;
 }
 
-.lock-row input[type='password'] {
-  min-width: 0;
-  height: 36px;
-  border: 0;
-  border-radius: 999px;
-  padding: 0 0.25rem;
-  background: transparent;
-  color: #202124;
-  box-shadow: none;
+.google-lock-nav-right {
+  gap: 15px;
+  font-size: 13px;
 }
 
-.lock-row input[type='password']::placeholder {
+.google-lock-apps-button {
+  width: 40px;
+  height: 40px;
+  margin-left: 3px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
   color: #5f6368;
-  opacity: 1;
 }
 
-.lock-row input[type='password']:hover,
-.lock-row input[type='password']:focus {
-  border-color: transparent;
-  background: transparent;
+.google-lock-apps-button:hover {
+  background: rgba(60, 64, 67, 0.08);
+  text-decoration: none;
 }
 
-.lock-row input[type='password']:focus-visible {
-  outline: none;
-}
-
-.lock-row button {
-  min-height: 36px;
-  border: 1px solid #f8f9fa;
-  border-radius: 4px;
-  padding: 0 1rem;
-  background: #f8f9fa;
-  color: #3c4043;
-  font-size: 0.875rem;
-  font-weight: 500;
-  box-shadow: none;
-}
-
-.lock-row button:hover {
-  border-color: #dadce0;
-  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.1);
-}
-
-.lock-row button:focus-visible {
+.google-lock-apps-button:focus-visible,
+.google-lock-sign-in-button:focus-visible,
+.google-lock-search-buttons button:focus-visible {
   outline: 2px solid #1a73e8;
   outline-offset: 2px;
 }
 
-.lock-message {
+.google-lock-apps-icon {
+  width: 24px;
+  height: 24px;
+  display: block;
+  fill: currentColor;
+}
+
+.google-lock-sign-in-button {
+  min-width: 96px;
+  height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 24px;
+  padding: 0 22px;
+  background: #0b57d0;
+  color: #fff;
+  font-family: "Google Sans", Arial, Helvetica, sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.1px;
+}
+
+.google-lock-sign-in-button:hover {
+  background: #1b66d8;
+  box-shadow: 0 1px 2px rgba(66, 64, 67, 0.3), 0 1px 3px 1px rgba(66, 64, 67, 0.15);
+  text-decoration: none;
+}
+
+.google-lock-main {
+  flex: 1 1 auto;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: clamp(128px, 17.6vh, 194px) 20px 120px;
+}
+
+.google-lock-search-cluster {
+  width: min(100%, 584px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.google-lock-logo {
+  margin: 0 0 42px;
+  font-family: "Product Sans", "Google Sans", Futura, Arial, Helvetica, sans-serif;
+  font-size: clamp(74px, 5.9vw, 92px);
+  font-weight: 500;
+  line-height: 0.8;
+  letter-spacing: -0.075em;
+  text-rendering: geometricPrecision;
+}
+
+.google-lock-logo span {
+  display: inline-block;
+}
+
+.google-lock-logo span + span {
+  margin-left: 0.018em;
+}
+
+.google-lock-logo-blue {
+  color: var(--google-lock-blue);
+}
+
+.google-lock-logo-red {
+  color: var(--google-lock-red);
+}
+
+.google-lock-logo-yellow {
+  color: var(--google-lock-yellow);
+}
+
+.google-lock-logo-green {
+  color: var(--google-lock-green);
+}
+
+.google-lock-search-form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.google-lock-search-box {
+  width: 100%;
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 0 14px 0 18px;
+  border: 1px solid var(--google-lock-border);
+  border-radius: 24px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.google-lock-search-box:hover,
+.google-lock-search-box:focus-within {
+  border-color: rgba(223, 225, 229, 0);
+  box-shadow: 0 1px 6px rgba(32, 33, 36, 0.28);
+}
+
+.google-lock-search-icon {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  fill: #9aa0a6;
+}
+
+#google-lock-search,
+.google-lock-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 44px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--google-lock-text);
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 16px;
+  line-height: 22px;
+  outline: none;
+  box-shadow: none;
+}
+
+.google-lock-search-input:disabled {
+  color: var(--google-lock-text);
+  opacity: 1;
+}
+
+.google-lock-search-input::-ms-reveal,
+.google-lock-search-input::-ms-clear {
+  display: none;
+}
+
+.google-lock-search-action {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+}
+
+.google-lock-action-icon {
+  width: 24px;
+  height: 24px;
+  display: block;
+}
+
+.google-lock-mic-blue,
+.google-lock-lens-blue {
+  fill: var(--google-lock-blue);
+}
+
+.google-lock-mic-red,
+.google-lock-lens-red {
+  fill: var(--google-lock-red);
+}
+
+.google-lock-mic-yellow,
+.google-lock-lens-yellow {
+  fill: var(--google-lock-yellow);
+}
+
+.google-lock-mic-green,
+.google-lock-lens-green {
+  fill: var(--google-lock-green);
+}
+
+.google-lock-search-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 11px;
+  margin-top: 29px;
+}
+
+.google-lock-search-buttons button {
+  min-width: 54px;
+  height: 36px;
+  border: 1px solid var(--google-lock-button-bg);
+  border-radius: 4px;
+  padding: 0 16px;
+  background: var(--google-lock-button-bg);
+  color: #3c4043;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 14px;
+  line-height: 27px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.google-lock-search-buttons button:hover {
+  border-color: #dadce0;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.1);
+  color: #202124;
+}
+
+.google-lock-search-buttons button:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.google-lock-submit-status {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -149,38 +299,156 @@
   white-space: nowrap;
 }
 
-.lock-message.is-error {
-  color: #b3261e;
+.google-lock-footer {
+  flex: 0 0 auto;
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 24px;
+  padding: 0 30px;
+  background: var(--google-lock-footer-bg);
+  color: #1f1f1f;
+  font-size: 14px;
+}
+
+.google-lock-footer-links {
+  display: flex;
+  align-items: center;
+  gap: 30px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.google-lock-footer-left {
+  justify-content: flex-start;
+}
+
+.google-lock-footer-right {
+  justify-content: flex-end;
+}
+
+.google-lock-footer-center {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.google-lock-leaf-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.google-lock-leaf-icon path:first-child {
+  fill: #34a853;
+}
+
+.google-lock-leaf-icon path:last-child {
+  fill: none;
+  stroke: #1e8e3e;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+@media (max-width: 920px) {
+  .google-lock-footer {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    gap: 14px;
+    padding: 18px 24px;
+  }
+
+  .google-lock-footer-left,
+  .google-lock-footer-right {
+    justify-content: center;
+    flex-wrap: wrap;
+    row-gap: 12px;
+  }
+
+  .google-lock-footer-center {
+    order: -1;
+    white-space: normal;
+  }
 }
 
 @media (max-width: 640px) {
-  :root {
-    --lock-screen-controls-width: min(100%, 584px);
-    --lock-screen-controls-y-offset: clamp(-1rem, -2vh, 0rem);
+  .google-lock-screen {
+    overflow-y: auto;
   }
 
-  .lock-row {
-    gap: 0.5rem;
-    padding-left: 0.85rem;
+  .google-lock-header {
+    padding: 6px 12px 6px 18px;
   }
 
-  .lock-row button {
-    padding-inline: 0.85rem;
+  .google-lock-nav-left {
+    gap: 14px;
+  }
+
+  .google-lock-nav-right {
+    gap: 10px;
+  }
+
+  .google-lock-sign-in-button {
+    min-width: 78px;
+    height: 40px;
+    padding: 0 16px;
+  }
+
+  .google-lock-main {
+    padding-top: clamp(92px, 15vh, 132px);
+    padding-bottom: 88px;
+  }
+
+  .google-lock-logo {
+    margin-bottom: 35px;
+  }
+
+  .google-lock-search-box {
+    padding-left: 15px;
+    padding-right: 13px;
   }
 }
 
-@media (max-width: 420px) {
-  .lock-row {
-    grid-template-columns: 1fr;
-    border-radius: 24px;
-    padding: 0.6rem;
+@media (max-width: 520px) {
+  .google-lock-header {
+    align-items: flex-start;
+    min-height: 96px;
   }
 
-  .lock-row input[type='password'] {
-    padding-inline: 0.25rem;
+  .google-lock-nav-left,
+  .google-lock-nav-right {
+    flex-wrap: wrap;
   }
 
-  .lock-row button {
-    width: 100%;
+  .google-lock-nav-right {
+    justify-content: flex-end;
+  }
+
+  .google-lock-main {
+    padding-inline: 14px;
+    padding-top: 72px;
+  }
+
+  .google-lock-search-buttons {
+    display: none;
+  }
+
+  .google-lock-footer-links {
+    gap: 18px;
+  }
+}
+
+@media (max-width: 380px) {
+  .google-lock-nav-left {
+    display: none;
+  }
+
+  .google-lock-header {
+    justify-content: flex-end;
   }
 }

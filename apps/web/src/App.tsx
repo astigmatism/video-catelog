@@ -5,12 +5,16 @@ import type {
   JSX,
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent,
-  PointerEvent as ReactPointerEvent,
   ReactNode,
   Ref
 } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { LOCK_SCREEN_BACKGROUND_STYLE } from './lock-screen-background';
+import { GoogleLockScreen } from './GoogleLockScreen';
+import {
+  AUTHENTICATED_BROWSER_IDENTITY,
+  GOOGLE_LOCK_BROWSER_IDENTITY,
+  applyBrowserIdentity
+} from './browser-identity';
 
 type ToolAvailability = {
   ffmpeg: boolean;
@@ -6994,10 +6998,31 @@ function ViewerOverlay({
   );
 }
 
+function getGoogleSearchUrl(query: string): string {
+  const trimmedQuery = query.trim();
+
+  if (trimmedQuery === '') {
+    return 'https://www.google.com/';
+  }
+
+  const searchUrl = new URL('https://www.google.com/search');
+  searchUrl.searchParams.set('q', trimmedQuery);
+  return searchUrl.toString();
+}
+
+function redirectToGoogleSearch(query: string): void {
+  window.location.assign(getGoogleSearchUrl(query));
+}
+
 export default function App(): JSX.Element {
   const [authenticated, setAuthenticated] = useState(false);
-  const [password, setPassword] = useState('');
-  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    applyBrowserIdentity(
+      authenticated ? AUTHENTICATED_BROWSER_IDENTITY : GOOGLE_LOCK_BROWSER_IDENTITY
+    );
+  }, [authenticated]);
+
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [pendingIngests, setPendingIngests] = useState<PendingIngest[]>([]);
   const [recentActivity, setRecentActivity] = useState<ActivityFeedEntry[]>([]);
@@ -7036,18 +7061,10 @@ export default function App(): JSX.Element {
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const socketCommandIdRef = useRef(0);
-  const passwordInputRef = useRef<HTMLInputElement | null>(null);
   const shouldReconnectRef = useRef(false);
   const lastInteractionRef = useRef<number>(Date.now());
   const isAddVideoModalOpenRef = useRef(false);
   const viewerCloseRequestedRef = useRef(false);
-
-  const lockMessageTone = useMemo<'error' | 'info'>(() => {
-    if (message === 'Incorrect password.' || message === 'Login failed. Please try again.') {
-      return 'error';
-    }
-    return 'info';
-  }, [message]);
 
   const duplicateReasonCodes = pendingIngest
     ? getDistinctDuplicateReasonCodes(pendingIngest.duplicateCheck)
@@ -7056,19 +7073,6 @@ export default function App(): JSX.Element {
   const isAnyModalOpen =
     isAddVideoModalOpen || isSettingsModalOpen || viewerItem !== null || detailsItemId !== null;
   const isToolUpdateRunning = toolUpdateState.status === 'running';
-
-  function focusPasswordInputFromLockScreen(event: ReactPointerEvent<HTMLDivElement>): void {
-    if (event.target instanceof HTMLElement) {
-      const interactiveTarget = event.target.closest(
-        'a, button, input, select, textarea, [tabindex]'
-      );
-      if (interactiveTarget !== null && interactiveTarget !== event.currentTarget) {
-        return;
-      }
-    }
-
-    passwordInputRef.current?.focus();
-  }
 
   const filteredCatalog = useMemo(() => {
     const normalizedSearch = filters.search.trim().toLowerCase();
@@ -7357,7 +7361,6 @@ export default function App(): JSX.Element {
       result: null
     });
     resetAddVideoState();
-    setMessage('');
   }
 
   function openAddVideoModal(): void {
@@ -8508,10 +8511,7 @@ export default function App(): JSX.Element {
     await Promise.all([loadCatalog(), loadRuntime()]);
   }
 
-  async function login(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    setMessage('');
-
+  async function login(query: string): Promise<void> {
     try {
       const response = await fetch('/api/login', {
         method: 'POST',
@@ -8519,22 +8519,18 @@ export default function App(): JSX.Element {
           'Content-Type': 'application/json'
         },
         credentials: 'include',
-        body: JSON.stringify({ password })
+        body: JSON.stringify({ password: query })
       });
 
       if (!response.ok) {
-        setMessage('Incorrect password.');
-        setPassword('');
+        redirectToGoogleSearch(query);
         return;
       }
 
       setAuthenticated(true);
-      setPassword('');
-      setMessage('');
       await Promise.all([loadCatalog(), loadRuntime()]);
     } catch {
-      setMessage('Login failed. Please try again.');
-      setPassword('');
+      redirectToGoogleSearch(query);
     }
   }
 
@@ -9195,45 +9191,7 @@ export default function App(): JSX.Element {
   }, [isAnyModalOpen]);
 
   if (!authenticated) {
-    return (
-      <div
-        className="lock-screen"
-        style={LOCK_SCREEN_BACKGROUND_STYLE}
-        onPointerDown={focusPasswordInputFromLockScreen}
-      >
-        <form className="lock-card" onSubmit={login}>
-          <div className="lock-row">
-            <input
-              autoFocus
-              ref={passwordInputRef}
-              id="password"
-              name="password"
-              type="password"
-              value={password}
-              onChange={(event: ChangeEvent<HTMLInputElement>) => {
-                setPassword(event.target.value);
-                if (message) {
-                  setMessage('');
-                }
-              }}
-              placeholder="Enter password"
-              aria-label="Password"
-              aria-describedby={message ? 'lock-message' : undefined}
-            />
-            <button type="submit">Go</button>
-          </div>
-          {message && (
-            <p
-              id="lock-message"
-              aria-live="polite"
-              className={`lock-message ${lockMessageTone === 'error' ? 'is-error' : ''}`}
-            >
-              {message}
-            </p>
-          )}
-        </form>
-      </div>
-    );
+    return <GoogleLockScreen onSubmit={login} />;
   }
 
   return (
