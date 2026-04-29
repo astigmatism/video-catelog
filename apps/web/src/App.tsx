@@ -6825,7 +6825,7 @@ function ViewerOverlay({
                       : 'Set loop start at the current playback position (L)'
                   }
                 >
-                  Start Loop
+                  Start (L)oop
                 </button>
                 <button
                   type="button"
@@ -7036,6 +7036,7 @@ export default function App(): JSX.Element {
   const socketCommandIdRef = useRef(0);
   const shouldReconnectRef = useRef(false);
   const lastInteractionRef = useRef<number>(Date.now());
+  const passwordInputRef = useRef<HTMLInputElement | null>(null);
   const isAddVideoModalOpenRef = useRef(false);
   const viewerCloseRequestedRef = useRef(false);
 
@@ -9180,10 +9181,16 @@ export default function App(): JSX.Element {
 
   if (!authenticated) {
     return (
-      <div className="lock-screen">
+      <div
+        className="lock-screen"
+        onPointerDown={() => {
+          passwordInputRef.current?.focus();
+        }}
+      >
         <form className="lock-card" onSubmit={login}>
           <div className="lock-row">
             <input
+              ref={passwordInputRef}
               autoFocus
               id="password"
               name="password"
