@@ -728,6 +728,7 @@ label {
   overflow: visible;
   display: grid;
   align-content: start;
+  min-width: 284px;
 }
 
 .card.is-tag-popover-open {
@@ -2280,11 +2281,19 @@ label {
   overflow: visible;
 }
 
-.viewer-bookmark-actions {
+.viewer-left-footer-actions {
   position: absolute;
   top: 50%;
   right: calc(100% + 1rem);
   transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  z-index: 5;
+}
+
+.viewer-bookmark-actions,
+.viewer-loop-actions {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
@@ -2294,7 +2303,11 @@ label {
   background: rgba(10, 16, 27, 0.72);
   border: 1px solid rgba(148, 163, 184, 0.14);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
-  z-index: 5;
+}
+
+.viewer-loop-actions.is-active {
+  border-color: rgba(96, 165, 250, 0.34);
+  background: rgba(15, 23, 42, 0.82);
 }
 
 .viewer-bookmarks-control {
@@ -2311,7 +2324,8 @@ label {
   flex: 0 0 auto;
 }
 
-.viewer-bookmark-action-button {
+.viewer-bookmark-action-button,
+.viewer-loop-action-button {
   border: 0;
   border-radius: 999px;
   background: rgba(15, 23, 42, 0.9);
@@ -2327,13 +2341,29 @@ label {
     transform 0.18s ease;
 }
 
-.viewer-bookmark-action-button:hover {
+.viewer-bookmark-action-button:hover,
+.viewer-loop-action-button:hover {
   background: rgba(30, 41, 59, 0.95);
   color: #f8fafc;
   transform: translateY(-1px);
 }
 
-.viewer-bookmark-action-button[aria-expanded='true'] {
+.viewer-bookmark-action-button:disabled,
+.viewer-loop-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.54;
+  transform: none;
+}
+
+.viewer-bookmark-action-button:disabled:hover,
+.viewer-loop-action-button:disabled:hover {
+  background: rgba(15, 23, 42, 0.9);
+  color: #e2e8f0;
+  transform: none;
+}
+
+.viewer-bookmark-action-button[aria-expanded='true'],
+.viewer-loop-action-button[aria-pressed='true'] {
   background: var(--blue-soft);
   color: #bfdbfe;
 }
@@ -2908,10 +2938,53 @@ label {
   min-width: 0;
 }
 
+.viewer-timeline-loop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.viewer-timeline-loop-region {
+  position: absolute;
+  top: 50%;
+  left: var(--viewer-timeline-loop-start);
+  width: var(--viewer-timeline-loop-width);
+  height: 0.42rem;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(191, 219, 254, 0.18);
+  transform: translateY(-50%);
+}
+
+.viewer-timeline-loop-overlay.is-active .viewer-timeline-loop-region {
+  background: rgba(96, 165, 250, 0.28);
+}
+
+.viewer-timeline-loop-marker {
+  position: absolute;
+  top: 50%;
+  width: 0.16rem;
+  height: 1.05rem;
+  border-radius: 999px;
+  background: #bfdbfe;
+  box-shadow: 0 0 0 1px rgba(2, 6, 12, 0.35), 0 0 12px rgba(96, 165, 250, 0.32);
+  transform: translate(-50%, -50%);
+}
+
+.viewer-timeline-loop-marker.is-start {
+  left: var(--viewer-timeline-loop-start);
+}
+
+.viewer-timeline-loop-marker.is-end {
+  left: var(--viewer-timeline-loop-end);
+  background: #93c5fd;
+}
+
 .viewer-timeline-bookmarks {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: 4;
   pointer-events: none;
 }
 
@@ -3018,6 +3091,8 @@ label {
 }
 
 .viewer-timeline-range {
+  position: relative;
+  z-index: 1;
   width: 100%;
   margin: 0;
   padding: 0;
@@ -3293,7 +3368,7 @@ label {
     width: min(86%, 40rem);
   }
 
-  .viewer-bookmark-actions,
+  .viewer-left-footer-actions,
   .viewer-volume-group {
     position: static;
     left: auto;
@@ -3304,7 +3379,7 @@ label {
     margin-top: 0.2rem;
   }
 
-  .viewer-bookmark-actions {
+  .viewer-left-footer-actions {
     justify-self: start;
   }
 
@@ -3450,18 +3525,26 @@ label {
     gap: 0.45rem;
   }
 
-  .viewer-bookmark-actions {
+  .viewer-left-footer-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .viewer-bookmark-actions,
+  .viewer-loop-actions {
     width: 100%;
     justify-content: stretch;
   }
 
   .viewer-bookmark-action-button,
+  .viewer-loop-action-button,
   .viewer-bookmarks-control,
   .viewer-adjustments-control {
     flex: 1 1 auto;
   }
 
   .viewer-bookmarks-control .viewer-bookmark-action-button,
+  .viewer-loop-action-button,
   .viewer-adjustments-control .viewer-adjustments-button {
     width: 100%;
   }

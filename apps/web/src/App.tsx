@@ -349,6 +349,18 @@ type ViewerPan = {
   y: number;
 };
 
+type ViewerLoopState = {
+  startSeconds: number | null;
+  endSeconds: number | null;
+};
+
+type ViewerLoopRange = {
+  startSeconds: number;
+  endSeconds: number;
+};
+
+type ViewerLoopShortcutPhase = 'start' | 'end' | 'reset';
+
 type PipelineStepState = 'complete' | 'active' | 'waiting' | 'failed';
 
 type ProcessingPipelineStep = {
@@ -557,6 +569,8 @@ const VIEWER_PAN_STEP_FRACTION = 0.08;
 const VIEWER_PAN_STEP_MIN_PX = 24;
 const VIEWER_PAN_STEP_MAX_PX = 96;
 const VIEWER_SEEK_SECONDS = 5;
+const VIEWER_LOOP_MIN_DURATION_SECONDS = 0.1;
+const VIEWER_LOOP_BOUNDARY_EPSILON_SECONDS = 0.035;
 const VIEWER_FALLBACK_FRAME_RATE = 30;
 const VIEWER_PLAYBACK_RATE_MIN = 0.25;
 const VIEWER_PLAYBACK_RATE_MAX = 4;
@@ -1409,6 +1423,90 @@ function getViewerTimelinePercent(currentTime: number, duration: number | null):
   }
 
   return Math.max(0, Math.min(100, (currentTime / duration) * 100));
+}
+
+function createEmptyViewerLoopState(): ViewerLoopState {
+  return {
+    startSeconds: null,
+    endSeconds: null
+  };
+}
+
+function getViewerLoopMinimumDuration(duration: number | null): number {
+  if (duration !== null && Number.isFinite(duration) && duration > 0) {
+    return Math.min(VIEWER_LOOP_MIN_DURATION_SECONDS, duration);
+  }
+
+  return VIEWER_LOOP_MIN_DURATION_SECONDS;
+}
+
+function normalizeViewerLoopTime(value: number, duration: number | null): number {
+  return Number(clampViewerTime(value, duration).toFixed(3));
+}
+
+function getViewerLoopRange(
+  loopState: ViewerLoopState,
+  duration: number | null
+): ViewerLoopRange | null {
+  if (loopState.startSeconds === null || loopState.endSeconds === null) {
+    return null;
+  }
+
+  const safeStart = normalizeViewerLoopTime(loopState.startSeconds, duration);
+  const safeEnd = normalizeViewerLoopTime(loopState.endSeconds, duration);
+  const startSeconds = Math.min(safeStart, safeEnd);
+  const endSeconds = Math.max(safeStart, safeEnd);
+
+  if (endSeconds - startSeconds < getViewerLoopMinimumDuration(duration)) {
+    return null;
+  }
+
+  return {
+    startSeconds,
+    endSeconds
+  };
+}
+
+function createViewerLoopRange(
+  startSeconds: number,
+  endSeconds: number,
+  duration: number | null
+): ViewerLoopRange | null {
+  return getViewerLoopRange(
+    {
+      startSeconds,
+      endSeconds
+    },
+    duration
+  );
+}
+
+function areViewerLoopStatesEqual(left: ViewerLoopState, right: ViewerLoopState): boolean {
+  return left.startSeconds === right.startSeconds && left.endSeconds === right.endSeconds;
+}
+
+function constrainViewerTimeToLoopRange(
+  value: number,
+  loopRange: ViewerLoopRange,
+  duration: number | null,
+  options: { loopAtEnd: boolean; endToleranceSeconds?: number }
+): number {
+  const safeValue = normalizeViewerLoopTime(value, duration);
+  const endToleranceSeconds = Math.max(0, options.endToleranceSeconds ?? 0);
+
+  if (safeValue < loopRange.startSeconds) {
+    return loopRange.startSeconds;
+  }
+
+  if (safeValue > loopRange.endSeconds) {
+    return loopRange.startSeconds;
+  }
+
+  if (options.loopAtEnd && safeValue >= loopRange.endSeconds - endToleranceSeconds) {
+    return loopRange.startSeconds;
+  }
+
+  return safeValue;
 }
 
 function seekViewerVideo(videoElement: HTMLVideoElement, deltaSeconds: number): void {
@@ -4093,6 +4191,7 @@ function ViewerOverlay({
   const viewerStageRef = useRef<HTMLDivElement | null>(null);
   const controlsHideTimerRef = useRef<number | null>(null);
   const playbackProgressTimerRef = useRef<number | null>(null);
+  const loopEnforcementFrameRef = useRef<number | null>(null);
   const focusRestoreFrameRef = useRef<number | null>(null);
   const isTimelineScrubbingRef = useRef(false);
   const lastNonZeroVolumeRef = useRef(VIEWER_MUTED_RESTORE_VOLUME);
@@ -4107,6 +4206,8 @@ function ViewerOverlay({
   const isSavingViewerVisualAdjustmentsRef = useRef(false);
   const pendingViewerVisualAdjustmentsRef = useRef<ViewerVisualAdjustments | null>(null);
   const viewerVisualAdjustmentsRef = useRef<ViewerVisualAdjustments>(getInitialViewerVisualAdjustments(item));
+  const viewerLoopStateRef = useRef<ViewerLoopState>(createEmptyViewerLoopState());
+  const viewerLoopShortcutPhaseRef = useRef<ViewerLoopShortcutPhase>('start');
   const [videoCandidateIndex, setVideoCandidateIndex] = useState(0);
   const [viewerError, setViewerError] = useState<string>('');
   const [fitMode, setFitMode] = useState<ViewerFitMode>('fit');
@@ -4141,6 +4242,7 @@ function ViewerOverlay({
   const [areControlsVisible, setAreControlsVisible] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState<number | null>(item.probe?.durationSeconds ?? null);
+  const [viewerLoopState, setViewerLoopState] = useState<ViewerLoopState>(() => createEmptyViewerLoopState());
   const [isTimelineScrubbing, setIsTimelineScrubbing] = useState(false);
   const [scrubTime, setScrubTime] = useState<number | null>(null);
 
@@ -4156,6 +4258,18 @@ function ViewerOverlay({
   const playbackRateLabel = useMemo(() => formatViewerPlaybackRate(playbackRate), [playbackRate]);
   const zoomLabel = useMemo(() => formatViewerZoomLabel(zoom), [zoom]);
   const resolvedDuration = duration ?? item.probe?.durationSeconds ?? null;
+  const viewerLoopRange = useMemo(
+    () => getViewerLoopRange(viewerLoopState, resolvedDuration),
+    [resolvedDuration, viewerLoopState.endSeconds, viewerLoopState.startSeconds]
+  );
+  const isViewerLoopActive = viewerLoopRange !== null;
+  const viewerLoopStartLabel = formatViewerClockTime(viewerLoopState.startSeconds);
+  const viewerLoopEndLabel = formatViewerClockTime(viewerLoopState.endSeconds);
+  const viewerLoopStatusLabel = viewerLoopRange
+    ? `Loop active from ${formatViewerClockTime(viewerLoopRange.startSeconds)} to ${formatViewerClockTime(viewerLoopRange.endSeconds)}`
+    : viewerLoopState.startSeconds !== null
+      ? `Loop start set at ${viewerLoopStartLabel}. Set an end point to activate looping.`
+      : 'No loop is set.';
   const displayedTimelineTime = isTimelineScrubbing && scrubTime !== null ? scrubTime : currentTime;
   const timelinePercent = useMemo(
     () => getViewerTimelinePercent(displayedTimelineTime, resolvedDuration),
@@ -4165,6 +4279,50 @@ function ViewerOverlay({
     () => ({ '--viewer-timeline-progress': `${timelinePercent}%` } as CSSProperties),
     [timelinePercent]
   );
+  const timelineLoopMarkers = useMemo(() => {
+    if (resolvedDuration === null || !Number.isFinite(resolvedDuration) || resolvedDuration <= 0) {
+      return null;
+    }
+
+    const loopRange = getViewerLoopRange(viewerLoopState, resolvedDuration);
+    const startSeconds = loopRange?.startSeconds ?? viewerLoopState.startSeconds;
+    const endSeconds = loopRange?.endSeconds ?? null;
+
+    if (startSeconds === null) {
+      return null;
+    }
+
+    const startPercent = getViewerTimelinePercent(
+      normalizeViewerLoopTime(startSeconds, resolvedDuration),
+      resolvedDuration
+    );
+    const endPercent =
+      endSeconds === null
+        ? null
+        : getViewerTimelinePercent(normalizeViewerLoopTime(endSeconds, resolvedDuration), resolvedDuration);
+
+    return {
+      isActive: loopRange !== null,
+      startLabel: formatViewerClockTime(startSeconds),
+      endLabel: endSeconds === null ? null : formatViewerClockTime(endSeconds),
+      startStyle: {
+        '--viewer-timeline-loop-start': `${startPercent}%`
+      } as CSSProperties,
+      endStyle:
+        endPercent === null
+          ? null
+          : ({
+              '--viewer-timeline-loop-end': `${endPercent}%`
+            } as CSSProperties),
+      rangeStyle:
+        loopRange === null || endPercent === null
+          ? null
+          : ({
+              '--viewer-timeline-loop-start': `${startPercent}%`,
+              '--viewer-timeline-loop-width': `${Math.max(0, endPercent - startPercent)}%`
+            } as CSSProperties)
+    };
+  }, [resolvedDuration, viewerLoopState.endSeconds, viewerLoopState.startSeconds]);
   const timelineBookmarkMarkers = useMemo(() => {
     if (resolvedDuration === null || !Number.isFinite(resolvedDuration) || resolvedDuration <= 0) {
       return [];
@@ -4347,6 +4505,13 @@ function ViewerOverlay({
     }
   }
 
+  function clearLoopEnforcementFrame(): void {
+    if (loopEnforcementFrameRef.current !== null) {
+      window.cancelAnimationFrame(loopEnforcementFrameRef.current);
+      loopEnforcementFrameRef.current = null;
+    }
+  }
+
   function clearFocusRestoreFrame(): void {
     if (focusRestoreFrameRef.current !== null) {
       window.cancelAnimationFrame(focusRestoreFrameRef.current);
@@ -4426,6 +4591,215 @@ function ViewerOverlay({
     scheduleVideoFocusRestore();
   }
 
+  function updateViewerLoopState(nextState: ViewerLoopState): void {
+    const startSeconds =
+      nextState.startSeconds === null ? null : normalizeViewerLoopTime(nextState.startSeconds, resolvedDuration);
+    const endSeconds =
+      startSeconds === null || nextState.endSeconds === null
+        ? null
+        : normalizeViewerLoopTime(nextState.endSeconds, resolvedDuration);
+    const nextLoopState: ViewerLoopState =
+      startSeconds === null
+        ? createEmptyViewerLoopState()
+        : endSeconds === null
+          ? {
+              startSeconds,
+              endSeconds: null
+            }
+          : getViewerLoopRange({ startSeconds, endSeconds }, resolvedDuration) ?? {
+              startSeconds,
+              endSeconds: null
+            };
+
+    viewerLoopStateRef.current = nextLoopState;
+    setViewerLoopState((currentValue) =>
+      areViewerLoopStatesEqual(currentValue, nextLoopState) ? currentValue : nextLoopState
+    );
+
+    if (getViewerLoopRange(nextLoopState, resolvedDuration) === null) {
+      clearLoopEnforcementFrame();
+      return;
+    }
+
+    const videoElement = videoRef.current;
+    if (videoElement && !videoElement.paused && !videoElement.ended) {
+      startLoopEnforcementFrame();
+    }
+  }
+
+  function setViewerLoopShortcutPhase(nextPhase: ViewerLoopShortcutPhase): void {
+    viewerLoopShortcutPhaseRef.current = nextPhase;
+  }
+
+  function resetViewerLoop(
+    options: { restoreFocus?: boolean; noteActivity?: boolean } = {}
+  ): void {
+    updateViewerLoopState(createEmptyViewerLoopState());
+    setViewerLoopShortcutPhase('start');
+    clearLoopEnforcementFrame();
+
+    if (options.noteActivity !== false) {
+      noteViewerActivity();
+    }
+
+    if (options.restoreFocus !== false) {
+      scheduleVideoFocusRestore();
+    }
+  }
+
+  function getCurrentViewerPlaybackTime(): number {
+    const videoElement = videoRef.current;
+    const rawCurrentTime =
+      videoElement && Number.isFinite(videoElement.currentTime) ? videoElement.currentTime : currentTime;
+
+    return normalizeViewerLoopTime(rawCurrentTime, resolvedDuration);
+  }
+
+  function constrainTimeToActiveViewerLoop(
+    nextTime: number,
+    options: { loopAtEnd: boolean; endToleranceSeconds?: number }
+  ): number {
+    const activeLoopRange = getViewerLoopRange(viewerLoopStateRef.current, resolvedDuration);
+
+    if (activeLoopRange === null) {
+      return normalizeViewerLoopTime(nextTime, resolvedDuration);
+    }
+
+    return constrainViewerTimeToLoopRange(nextTime, activeLoopRange, resolvedDuration, options);
+  }
+
+  function enforceActiveViewerLoop(
+    options: { loopAtEnd: boolean; endToleranceSeconds?: number }
+  ): boolean {
+    const videoElement = videoRef.current;
+    const activeLoopRange = getViewerLoopRange(viewerLoopStateRef.current, resolvedDuration);
+
+    if (!videoElement || activeLoopRange === null) {
+      return false;
+    }
+
+    const currentVideoTime = Number.isFinite(videoElement.currentTime)
+      ? videoElement.currentTime
+      : currentTime;
+    const constrainedTime = constrainViewerTimeToLoopRange(
+      currentVideoTime,
+      activeLoopRange,
+      resolvedDuration,
+      options
+    );
+
+    if (Math.abs(constrainedTime - currentVideoTime) < 0.001) {
+      return false;
+    }
+
+    videoElement.currentTime = constrainedTime;
+    setCurrentTime(constrainedTime);
+
+    if (isTimelineScrubbingRef.current) {
+      setScrubTime(constrainedTime);
+    }
+
+    return true;
+  }
+
+  function startLoopEnforcementFrame(): void {
+    clearLoopEnforcementFrame();
+
+    const tick = (): void => {
+      loopEnforcementFrameRef.current = null;
+
+      const videoElement = videoRef.current;
+      if (
+        !videoElement ||
+        videoElement.paused ||
+        videoElement.ended ||
+        getViewerLoopRange(viewerLoopStateRef.current, resolvedDuration) === null
+      ) {
+        return;
+      }
+
+      enforceActiveViewerLoop({
+        loopAtEnd: true,
+        endToleranceSeconds: VIEWER_LOOP_BOUNDARY_EPSILON_SECONDS
+      });
+      loopEnforcementFrameRef.current = window.requestAnimationFrame(tick);
+    };
+
+    loopEnforcementFrameRef.current = window.requestAnimationFrame(tick);
+  }
+
+  function setViewerLoopStartAtCurrentTime(): void {
+    if (videoUrl === null) {
+      return;
+    }
+
+    const startSeconds = getCurrentViewerPlaybackTime();
+    updateViewerLoopState({
+      startSeconds,
+      endSeconds: null
+    });
+    setViewerLoopShortcutPhase('end');
+    noteViewerActivity();
+    scheduleVideoFocusRestore();
+  }
+
+  function setViewerLoopEndAtCurrentTime(): void {
+    if (videoUrl === null) {
+      return;
+    }
+
+    const currentLoopStart = viewerLoopStateRef.current.startSeconds;
+    if (currentLoopStart === null) {
+      setViewerLoopStartAtCurrentTime();
+      return;
+    }
+
+    const endSeconds = getCurrentViewerPlaybackTime();
+    const loopRange = createViewerLoopRange(currentLoopStart, endSeconds, resolvedDuration);
+
+    if (loopRange === null) {
+      updateViewerLoopState({
+        startSeconds: currentLoopStart,
+        endSeconds: null
+      });
+      setViewerLoopShortcutPhase('reset');
+      noteViewerActivity();
+      scheduleVideoFocusRestore();
+      return;
+    }
+
+    updateViewerLoopState(loopRange);
+    setViewerLoopShortcutPhase('reset');
+
+    const videoElement = videoRef.current;
+    if (videoElement && !videoElement.paused && !videoElement.ended) {
+      enforceActiveViewerLoop({
+        loopAtEnd: true,
+        endToleranceSeconds: VIEWER_LOOP_BOUNDARY_EPSILON_SECONDS
+      });
+      startLoopEnforcementFrame();
+    }
+
+    noteViewerActivity();
+    scheduleVideoFocusRestore();
+  }
+
+  function handleViewerLoopShortcut(): void {
+    switch (viewerLoopShortcutPhaseRef.current) {
+      case 'start':
+        setViewerLoopStartAtCurrentTime();
+        return;
+      case 'end':
+        setViewerLoopEndAtCurrentTime();
+        return;
+      case 'reset':
+        resetViewerLoop();
+        return;
+      default:
+        resetViewerLoop();
+    }
+  }
+
   function stopVideoPlaybackForViewerClose(): void {
     const videoElement = videoRef.current;
 
@@ -4436,6 +4810,10 @@ function ViewerOverlay({
     setIsAttemptingPlayback(false);
     setIsVideoPlaying(false);
     stopPlaybackProgressTimer();
+    resetViewerLoop({
+      restoreFocus: false,
+      noteActivity: false
+    });
   }
 
   function finalizeViewerClose(): void {
@@ -4446,7 +4824,9 @@ function ViewerOverlay({
     hasClosedRef.current = true;
     clearControlsHideTimer();
     clearFocusRestoreFrame();
+    clearLoopEnforcementFrame();
     stopPlaybackProgressTimer();
+    updateViewerLoopState(createEmptyViewerLoopState());
     onClose();
   }
 
@@ -4459,11 +4839,22 @@ function ViewerOverlay({
     );
   }
 
-  function syncPlaybackTimeFromVideo(videoElement: HTMLVideoElement | null = videoRef.current): void {
+  function syncPlaybackTimeFromVideo(
+    videoElement: HTMLVideoElement | null = videoRef.current,
+    options: { enforceLoop?: boolean; loopAtEnd?: boolean; endToleranceSeconds?: number } = {}
+  ): void {
     const nextDuration =
       videoElement && Number.isFinite(videoElement.duration) && videoElement.duration > 0
         ? videoElement.duration
         : item.probe?.durationSeconds ?? null;
+
+    if (options.enforceLoop === true) {
+      enforceActiveViewerLoop({
+        loopAtEnd: options.loopAtEnd ?? false,
+        endToleranceSeconds: options.endToleranceSeconds
+      });
+    }
+
     const nextCurrentTime =
       videoElement && Number.isFinite(videoElement.currentTime) ? videoElement.currentTime : 0;
 
@@ -4476,7 +4867,11 @@ function ViewerOverlay({
   function startPlaybackProgressTimer(): void {
     stopPlaybackProgressTimer();
     playbackProgressTimerRef.current = window.setInterval(() => {
-      syncPlaybackTimeFromVideo();
+      syncPlaybackTimeFromVideo(videoRef.current, {
+        enforceLoop: true,
+        loopAtEnd: true,
+        endToleranceSeconds: VIEWER_LOOP_BOUNDARY_EPSILON_SECONDS
+      });
     }, 100);
   }
 
@@ -4624,8 +5019,10 @@ function ViewerOverlay({
     setVideoPlaybackRate(changeViewerPlaybackRate(currentPlaybackRate, delta));
   }
 
-  function seekVideoTo(nextTime: number): void {
-    const safeNextTime = clampViewerTime(nextTime, resolvedDuration);
+  function seekVideoTo(nextTime: number): number {
+    const safeNextTime = constrainTimeToActiveViewerLoop(nextTime, {
+      loopAtEnd: true
+    });
     const videoElement = videoRef.current;
 
     if (videoElement) {
@@ -4633,6 +5030,7 @@ function ViewerOverlay({
     }
 
     setCurrentTime(safeNextTime);
+    return safeNextTime;
   }
 
   function seekVideoBy(deltaSeconds: number): void {
@@ -4641,8 +5039,12 @@ function ViewerOverlay({
       return;
     }
 
-    seekViewerVideo(videoElement, deltaSeconds);
-    syncPlaybackTimeFromVideo(videoElement);
+    const currentVideoTime = Number.isFinite(videoElement.currentTime) ? videoElement.currentTime : currentTime;
+    seekVideoTo(currentVideoTime + deltaSeconds);
+    syncPlaybackTimeFromVideo(videoElement, {
+      enforceLoop: true,
+      loopAtEnd: true
+    });
   }
 
   function jumpToBookmarkShortcut(shortcutIndex: number): void {
@@ -4669,15 +5071,18 @@ function ViewerOverlay({
     isTimelineScrubbingRef.current = false;
     setIsTimelineScrubbing(false);
     setScrubTime(null);
-    syncPlaybackTimeFromVideo();
+    syncPlaybackTimeFromVideo(videoRef.current, {
+      enforceLoop: true,
+      loopAtEnd: true
+    });
     noteViewerActivity();
     scheduleVideoFocusRestore();
   }
 
   function handleTimelineChange(event: ChangeEvent<HTMLInputElement>): void {
     const nextTime = clampViewerTime(Number(event.target.value), resolvedDuration);
-    setScrubTime(nextTime);
-    seekVideoTo(nextTime);
+    const safeNextTime = seekVideoTo(nextTime);
+    setScrubTime(safeNextTime);
     noteViewerActivity();
   }
 
@@ -4852,7 +5257,22 @@ function ViewerOverlay({
       return;
     }
 
-    if (videoElement.ended && Number.isFinite(videoElement.duration)) {
+    const activeLoopRange = getViewerLoopRange(viewerLoopStateRef.current, resolvedDuration);
+    if (activeLoopRange !== null) {
+      const currentVideoTime = Number.isFinite(videoElement.currentTime) ? videoElement.currentTime : currentTime;
+      const safeLoopTime = constrainViewerTimeToLoopRange(
+        currentVideoTime,
+        activeLoopRange,
+        resolvedDuration,
+        {
+          loopAtEnd: true
+        }
+      );
+      if (Math.abs(safeLoopTime - currentVideoTime) >= 0.001 || videoElement.ended) {
+        videoElement.currentTime = safeLoopTime;
+        setCurrentTime(safeLoopTime);
+      }
+    } else if (videoElement.ended && Number.isFinite(videoElement.duration)) {
       videoElement.currentTime = 0;
     }
 
@@ -5202,14 +5622,14 @@ function ViewerOverlay({
       >
         <div className="viewer-bookmarks-drawer-header">
           <div>
-            <h3>Bookmarks</h3>
+            <h3>Moments</h3>
             <p>{bookmarks.length === 1 ? '1 saved moment' : `${bookmarks.length} saved moments`}</p>
           </div>
           <button
             type="button"
             className="viewer-bookmarks-drawer-close"
             onClick={closeBookmarksDrawer}
-            aria-label="Close bookmarks"
+            aria-label="Close moments"
             tabIndex={isBookmarksDrawerOpen ? 0 : -1}
           >
             ×
@@ -5218,11 +5638,11 @@ function ViewerOverlay({
         <div className="viewer-bookmarks-drawer-body">
           {isLoadingBookmarks ? (
             <div className="viewer-bookmarks-empty" role="status">
-              Loading bookmarks…
+              Loading moments…
             </div>
           ) : bookmarks.length === 0 ? (
             <div className="viewer-bookmarks-empty">
-              No bookmarks saved yet. Use Save Bookmark to capture the current moment.
+              No moments saved yet. Use Save Moment to capture the current moment.
             </div>
           ) : (
             <div className="viewer-bookmark-list">
@@ -5538,6 +5958,10 @@ function ViewerOverlay({
     setDuration(item.probe?.durationSeconds ?? null);
     setIsTimelineScrubbing(false);
     setScrubTime(null);
+    resetViewerLoop({
+      restoreFocus: false,
+      noteActivity: false
+    });
     isTimelineScrubbingRef.current = false;
     lastNonZeroVolumeRef.current = VIEWER_MUTED_RESTORE_VOLUME;
     closeInProgressRef.current = false;
@@ -5551,6 +5975,7 @@ function ViewerOverlay({
     return () => {
       clearControlsHideTimer();
       clearFocusRestoreFrame();
+      clearLoopEnforcementFrame();
       stopPlaybackProgressTimer();
     };
   }, [item.id, item.probe?.durationSeconds, videoCandidates.join('|')]);
@@ -5648,6 +6073,28 @@ function ViewerOverlay({
   }, [item.id]);
 
   useEffect(() => {
+    const activeLoopRange = getViewerLoopRange(viewerLoopStateRef.current, resolvedDuration);
+
+    if (activeLoopRange === null) {
+      clearLoopEnforcementFrame();
+      return;
+    }
+
+    const videoElement = videoRef.current;
+    if (!videoElement) {
+      return;
+    }
+
+    enforceActiveViewerLoop({
+      loopAtEnd: false
+    });
+
+    if (!videoElement.paused && !videoElement.ended) {
+      startLoopEnforcementFrame();
+    }
+  }, [resolvedDuration, videoUrl, viewerLoopState.endSeconds, viewerLoopState.startSeconds]);
+
+  useEffect(() => {
     const handlePointerUp = (): void => {
       endTimelineScrubbing();
     };
@@ -5686,6 +6133,10 @@ function ViewerOverlay({
     }
 
     setViewerError('');
+    resetViewerLoop({
+      restoreFocus: false,
+      noteActivity: false
+    });
     videoElement.load();
     syncPlaybackRateFromVideo(videoElement);
     syncPlaybackTimeFromVideo(videoElement);
@@ -5723,6 +6174,8 @@ function ViewerOverlay({
         !hasShortcutModifier && (event.key.toLowerCase() === 'f' || event.code === 'KeyF');
       const isDownloadKey =
         !hasShortcutModifier && (event.key.toLowerCase() === 'd' || event.code === 'KeyD');
+      const isLoopKey =
+        !hasShortcutModifier && (event.key.toLowerCase() === 'l' || event.code === 'KeyL');
       const isCloseKey =
         !hasShortcutModifier &&
         (event.key.toLowerCase() === 'c' ||
@@ -5787,6 +6240,14 @@ function ViewerOverlay({
         claimViewerKeyboardShortcut(event);
         if (!event.repeat) {
           triggerViewerDownload();
+        }
+        return;
+      }
+
+      if (isLoopKey && !isTextEditableTarget) {
+        claimViewerKeyboardShortcut(event);
+        if (!event.repeat) {
+          handleViewerLoopShortcut();
         }
         return;
       }
@@ -6238,32 +6699,69 @@ function ViewerOverlay({
                   }
                 }}
                 onDurationChange={() => {
-                  syncPlaybackTimeFromVideo();
+                  syncPlaybackTimeFromVideo(videoRef.current, {
+                    enforceLoop: true,
+                    loopAtEnd: false
+                  });
                 }}
                 onTimeUpdate={() => {
-                  syncPlaybackTimeFromVideo();
+                  syncPlaybackTimeFromVideo(videoRef.current, {
+                    enforceLoop: true,
+                    loopAtEnd: true,
+                    endToleranceSeconds: VIEWER_LOOP_BOUNDARY_EPSILON_SECONDS
+                  });
                 }}
                 onSeeking={() => {
-                  syncPlaybackTimeFromVideo();
+                  syncPlaybackTimeFromVideo(videoRef.current, {
+                    enforceLoop: true,
+                    loopAtEnd: true
+                  });
                 }}
                 onSeeked={() => {
-                  syncPlaybackTimeFromVideo();
+                  syncPlaybackTimeFromVideo(videoRef.current, {
+                    enforceLoop: true,
+                    loopAtEnd: true
+                  });
                 }}
                 onPlay={() => {
                   setIsVideoPlaying(true);
                   setViewerError('');
-                  syncPlaybackTimeFromVideo();
+                  syncPlaybackTimeFromVideo(videoRef.current, {
+                    enforceLoop: true,
+                    loopAtEnd: true,
+                    endToleranceSeconds: VIEWER_LOOP_BOUNDARY_EPSILON_SECONDS
+                  });
                   startPlaybackProgressTimer();
+                  if (getViewerLoopRange(viewerLoopStateRef.current, resolvedDuration) !== null) {
+                    startLoopEnforcementFrame();
+                  }
                 }}
                 onPause={() => {
                   setIsVideoPlaying(false);
-                  syncPlaybackTimeFromVideo();
+                  syncPlaybackTimeFromVideo(videoRef.current, {
+                    enforceLoop: true,
+                    loopAtEnd: false
+                  });
                   stopPlaybackProgressTimer();
+                  clearLoopEnforcementFrame();
                 }}
                 onEnded={() => {
+                  if (getViewerLoopRange(viewerLoopStateRef.current, resolvedDuration) !== null) {
+                    setIsVideoPlaying(false);
+                    stopPlaybackProgressTimer();
+                    clearLoopEnforcementFrame();
+                    enforceActiveViewerLoop({
+                      loopAtEnd: true,
+                      endToleranceSeconds: VIEWER_LOOP_BOUNDARY_EPSILON_SECONDS
+                    });
+                    void attemptPlayback();
+                    return;
+                  }
+
                   setIsVideoPlaying(false);
                   syncPlaybackTimeFromVideo();
                   stopPlaybackProgressTimer();
+                  clearLoopEnforcementFrame();
                 }}
                 onRateChange={() => {
                   syncPlaybackRateFromVideo();
@@ -6282,37 +6780,109 @@ function ViewerOverlay({
           className={`viewer-footer${areControlsVisible ? '' : ' is-hidden'}`}
         >
           <div className="viewer-footer-inner">
-            <div className="viewer-bookmark-actions" aria-label="Moment controls">
-              <button
-                type="button"
-                className="viewer-bookmark-action-button"
-                onClick={() => {
-                  void requestCreateBookmark();
-                }}
-                disabled={!videoUrl || isCreatingBookmark}
-                title="Save moment at the current playback position"
-              >
-                {isCreatingBookmark ? 'Saving…' : 'Save Moment'}
-              </button>
-              <span className="viewer-bookmarks-control">
-                {renderBookmarksDrawer()}
+            <div className="viewer-left-footer-actions">
+              <div className="viewer-bookmark-actions" aria-label="Moment controls">
                 <button
                   type="button"
                   className="viewer-bookmark-action-button"
-                  onClick={toggleBookmarksDrawer}
-                  aria-expanded={isBookmarksDrawerOpen}
-                  title="Show saved moments"
+                  onClick={() => {
+                    void requestCreateBookmark();
+                  }}
+                  disabled={!videoUrl || isCreatingBookmark}
+                  title="Save moment at the current playback position"
                 >
-                  {isBookmarksDrawerOpen
-                    ? 'Hide Moments'
-                    : `Moments${bookmarks.length > 0 ? ` (${bookmarks.length})` : ''}`}
+                  {isCreatingBookmark ? 'Saving…' : 'Save Moment'}
                 </button>
-              </span>
+                <span className="viewer-bookmarks-control">
+                  {renderBookmarksDrawer()}
+                  <button
+                    type="button"
+                    className="viewer-bookmark-action-button"
+                    onClick={toggleBookmarksDrawer}
+                    aria-expanded={isBookmarksDrawerOpen}
+                    title="Show saved moments"
+                  >
+                    {isBookmarksDrawerOpen
+                      ? 'Hide Moments'
+                      : `Moments${bookmarks.length > 0 ? ` (${bookmarks.length})` : ''}`}
+                  </button>
+                </span>
+              </div>
+              <div
+                className={`viewer-loop-actions${isViewerLoopActive ? ' is-active' : ''}`}
+                aria-label="Loop controls"
+                title={viewerLoopStatusLabel}
+              >
+                <button
+                  type="button"
+                  className="viewer-loop-action-button"
+                  onClick={setViewerLoopStartAtCurrentTime}
+                  disabled={videoUrl === null}
+                  aria-pressed={viewerLoopState.startSeconds !== null}
+                  title={
+                    viewerLoopState.startSeconds !== null
+                      ? `Loop start set at ${viewerLoopStartLabel}`
+                      : 'Set loop start at the current playback position (L)'
+                  }
+                >
+                  Start Loop
+                </button>
+                <button
+                  type="button"
+                  className="viewer-loop-action-button"
+                  onClick={setViewerLoopEndAtCurrentTime}
+                  disabled={videoUrl === null || viewerLoopState.startSeconds === null}
+                  aria-pressed={viewerLoopState.endSeconds !== null && isViewerLoopActive}
+                  title={
+                    viewerLoopState.startSeconds === null
+                      ? 'Set a loop start point first'
+                      : viewerLoopState.endSeconds !== null && isViewerLoopActive
+                        ? `Loop end set at ${viewerLoopEndLabel}`
+                        : 'Set loop end at the current playback position (L)'
+                  }
+                >
+                  End Loop
+                </button>
+                <button
+                  type="button"
+                  className="viewer-loop-action-button"
+                  onClick={() => resetViewerLoop()}
+                  disabled={
+                    videoUrl === null ||
+                    (viewerLoopState.startSeconds === null && viewerLoopState.endSeconds === null)
+                  }
+                  title="Clear loop start and loop end (L)"
+                >
+                  Reset Loop
+                </button>
+              </div>
             </div>
             <div className="viewer-timeline-time" aria-label="Current time and total duration">
               {`${formatViewerClockTime(displayedTimelineTime)} / ${formatViewerClockTime(resolvedDuration)}`}
             </div>
             <div className="viewer-timeline-range-wrap">
+              {videoUrl !== null && timelineLoopMarkers !== null && (
+                <div
+                  className={`viewer-timeline-loop-overlay${timelineLoopMarkers.isActive ? ' is-active' : ''}`}
+                  aria-hidden="true"
+                >
+                  {timelineLoopMarkers.rangeStyle !== null && (
+                    <span className="viewer-timeline-loop-region" style={timelineLoopMarkers.rangeStyle} />
+                  )}
+                  <span
+                    className="viewer-timeline-loop-marker is-start"
+                    style={timelineLoopMarkers.startStyle}
+                    title={`Loop start ${timelineLoopMarkers.startLabel}`}
+                  />
+                  {timelineLoopMarkers.endStyle !== null && timelineLoopMarkers.endLabel !== null && (
+                    <span
+                      className="viewer-timeline-loop-marker is-end"
+                      style={timelineLoopMarkers.endStyle}
+                      title={`Loop end ${timelineLoopMarkers.endLabel}`}
+                    />
+                  )}
+                </div>
+              )}
               {videoUrl !== null && timelineBookmarkMarkers.length > 0 && (
                 <div className="viewer-timeline-bookmarks" role="group" aria-label="Saved moment markers">
                   {timelineBookmarkMarkers.map((marker) => (
