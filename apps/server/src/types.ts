@@ -171,6 +171,14 @@ export type SessionRecord = {
   lockedAt: number | null;
 };
 
+export type StorageUsageInfo = {
+  storagePath: string;
+  filesystemPath: string;
+  usedBytes: number;
+  totalBytes: number;
+  percentUsed: number;
+};
+
 export type RuntimeStatePayload = {
   toolAvailability: ToolAvailability;
   config: {
@@ -178,6 +186,7 @@ export type RuntimeStatePayload = {
     wsHeartbeatMs: number;
     port?: number;
   };
+  storageUsage: StorageUsageInfo | null;
 };
 
 export type CatalogQuerySort = 'newest' | 'oldest' | 'name_asc' | 'name_desc';

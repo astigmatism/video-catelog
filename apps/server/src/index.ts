@@ -36,6 +36,7 @@ import type {
   ProcessingSnapshot,
   RuntimeStatePayload,
   SocketAckData,
+  StorageUsageInfo,
   SocketCommandMessage,
   SocketErrorCode,
   SocketMessage,
@@ -149,6 +150,7 @@ const WS_MAX_MESSAGE_BYTES = 64 * 1024;
 const WS_RATE_WINDOW_MS = 10_000;
 const WS_MAX_COMMANDS_PER_WINDOW = 120;
 const SESSION_SWEEP_MS = 15_000;
+const STORAGE_USAGE_CACHE_TTL_MS = 30_000;
 
 const socketsBySessionId = new Map<string, Map<string, SessionSocketState>>();
 
@@ -302,6 +304,94 @@ function getToolCommandConfig(): {
   };
 }
 
+let cachedStorageUsage: { expiresAt: number; value: StorageUsageInfo | null } | null = null;
+let lastStorageUsageWarningKey: string | null = null;
+
+function resolveExistingPathForFilesystemStats(targetPath: string): string {
+  let candidatePath = path.resolve(targetPath);
+
+  while (!fs.existsSync(candidatePath)) {
+    const parentPath = path.dirname(candidatePath);
+    if (parentPath === candidatePath) {
+      return candidatePath;
+    }
+
+    candidatePath = parentPath;
+  }
+
+  return candidatePath;
+}
+
+function createStorageUsagePayload(): StorageUsageInfo | null {
+  const now = Date.now();
+  if (cachedStorageUsage && cachedStorageUsage.expiresAt > now) {
+    return cachedStorageUsage.value;
+  }
+
+  const storagePath = path.resolve(config.mediaStoreRoot);
+  const filesystemPath = resolveExistingPathForFilesystemStats(storagePath);
+
+  try {
+    if (typeof fs.statfsSync !== 'function') {
+      throw new Error('fs.statfsSync is not available in this Node.js runtime.');
+    }
+
+    const stats = fs.statfsSync(filesystemPath);
+    const blockSize = Number(stats.bsize);
+    const totalBlocks = Number(stats.blocks);
+    const freeBlocks = Number(stats.bfree);
+    const totalBytes = totalBlocks * blockSize;
+    const usedBytes = Math.max(0, (totalBlocks - freeBlocks) * blockSize);
+
+    if (
+      !Number.isFinite(blockSize) ||
+      !Number.isFinite(totalBlocks) ||
+      !Number.isFinite(freeBlocks) ||
+      !Number.isFinite(totalBytes) ||
+      !Number.isFinite(usedBytes) ||
+      blockSize <= 0 ||
+      totalBlocks <= 0
+    ) {
+      throw new Error('Filesystem statistics were incomplete or invalid.');
+    }
+
+    const value: StorageUsageInfo = {
+      storagePath,
+      filesystemPath,
+      usedBytes,
+      totalBytes,
+      percentUsed: Math.max(0, Math.min(100, (usedBytes / totalBytes) * 100))
+    };
+
+    cachedStorageUsage = {
+      expiresAt: now + STORAGE_USAGE_CACHE_TTL_MS,
+      value
+    };
+    lastStorageUsageWarningKey = null;
+    return value;
+  } catch (error) {
+    const warningKey = error instanceof Error ? error.message : String(error);
+    if (warningKey !== lastStorageUsageWarningKey) {
+      app.log.warn(
+        {
+          event: 'storage.usage.unavailable',
+          storagePath,
+          filesystemPath,
+          err: error
+        },
+        'Unable to determine media storage filesystem usage.'
+      );
+      lastStorageUsageWarningKey = warningKey;
+    }
+
+    cachedStorageUsage = {
+      expiresAt: now + STORAGE_USAGE_CACHE_TTL_MS,
+      value: null
+    };
+    return null;
+  }
+}
+
 function createRuntimeStatePayload(includePort: boolean = true): RuntimeStatePayload {
   return {
     toolAvailability: detectToolAvailability(getToolCommandConfig()),
@@ -309,7 +399,8 @@ function createRuntimeStatePayload(includePort: boolean = true): RuntimeStatePay
       idleLockMinutes: config.idleLockMinutes,
       wsHeartbeatMs: config.wsHeartbeatMs,
       ...(includePort ? { port: config.port } : {})
-    }
+    },
+    storageUsage: createStorageUsagePayload()
   };
 }
 

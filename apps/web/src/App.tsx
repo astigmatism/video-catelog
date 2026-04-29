@@ -173,6 +173,14 @@ type PendingIngest = {
 
 type DuplicateResolutionAction = 'continue' | 'cancel';
 
+type StorageUsageInfo = {
+  storagePath: string;
+  filesystemPath: string;
+  usedBytes: number;
+  totalBytes: number;
+  percentUsed: number;
+};
+
 type RuntimeInfo = {
   toolAvailability: ToolAvailability;
   config: {
@@ -180,6 +188,7 @@ type RuntimeInfo = {
     wsHeartbeatMs: number;
     port: number | null;
   };
+  storageUsage: StorageUsageInfo | null;
 };
 
 
@@ -421,6 +430,7 @@ const APPLICATION_WEBSOCKET_PATH = '/api/ws';
 const LEGACY_WEBSOCKET_PATH = '/ws';
 const APPLICATION_SOCKET_OPEN_TIMEOUT_MS = 4000;
 const APPLICATION_SOCKET_FIRST_MESSAGE_TIMEOUT_MS = 2500;
+const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
 
 const DEFAULT_UPLOAD_MESSAGE =
   'Choose a local video file. After staging, you can confirm or edit the catalog title before finalizing.';
@@ -836,6 +846,37 @@ function formatBytes(value: number): string {
 
 function formatOptionalBytes(value: number | null): string {
   return value === null ? 'Unknown size' : formatBytes(value);
+}
+
+function formatStorageBytes(value: number): string {
+  const safeValue = Math.max(0, value);
+  const units = [
+    { label: 'TB', bytes: 1024 ** 4 },
+    { label: 'GB', bytes: 1024 ** 3 },
+    { label: 'MB', bytes: 1024 ** 2 },
+    { label: 'KB', bytes: 1024 }
+  ];
+  const unit = units.find((candidate) => safeValue >= candidate.bytes);
+
+  if (!unit) {
+    return `${Math.round(safeValue).toLocaleString()} B`;
+  }
+
+  const amount = safeValue / unit.bytes;
+  const maximumFractionDigits = amount >= 100 ? 0 : 1;
+  return `${amount.toLocaleString(undefined, {
+    maximumFractionDigits
+  })} ${unit.label}`;
+}
+
+function formatStorageUsagePercent(value: number): string {
+  return `${Math.max(0, Math.min(100, value)).toFixed(1)}%`;
+}
+
+function formatStorageUsageSummary(storageUsage: StorageUsageInfo): string {
+  return `${formatStorageBytes(storageUsage.usedBytes)} used of ${formatStorageBytes(
+    storageUsage.totalBytes
+  )} available (${formatStorageUsagePercent(storageUsage.percentUsed)})`;
 }
 
 function formatTimestamp(value: string): string {
@@ -1873,6 +1914,38 @@ function hydratePendingIngest(value: unknown): PendingIngest | null {
   };
 }
 
+function hydrateStorageUsageInfo(value: unknown): StorageUsageInfo | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const storagePath = readString(value.storagePath);
+  const filesystemPath = readString(value.filesystemPath);
+  const usedBytes = readNumber(value.usedBytes);
+  const totalBytes = readNumber(value.totalBytes);
+  const percentUsed = readNumber(value.percentUsed);
+
+  if (
+    !storagePath ||
+    !filesystemPath ||
+    usedBytes === null ||
+    totalBytes === null ||
+    percentUsed === null ||
+    usedBytes < 0 ||
+    totalBytes <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    storagePath,
+    filesystemPath,
+    usedBytes,
+    totalBytes,
+    percentUsed: Math.max(0, Math.min(100, percentUsed))
+  };
+}
+
 function hydrateRuntimeInfo(value: unknown): RuntimeInfo | null {
   if (!isRecord(value)) {
     return null;
@@ -1889,8 +1962,16 @@ function hydrateRuntimeInfo(value: unknown): RuntimeInfo | null {
   const wsHeartbeatMs = readNumber(configValue.wsHeartbeatMs);
   const port =
     configValue.port === undefined || configValue.port === null ? null : readNumber(configValue.port);
+  const storageUsage =
+    value.storageUsage === undefined || value.storageUsage === null
+      ? null
+      : hydrateStorageUsageInfo(value.storageUsage);
 
-  if (idleLockMinutes === null || wsHeartbeatMs === null) {
+  if (
+    idleLockMinutes === null ||
+    wsHeartbeatMs === null ||
+    (value.storageUsage !== undefined && value.storageUsage !== null && storageUsage === null)
+  ) {
     return null;
   }
 
@@ -1900,7 +1981,8 @@ function hydrateRuntimeInfo(value: unknown): RuntimeInfo | null {
       idleLockMinutes,
       wsHeartbeatMs,
       port
-    }
+    },
+    storageUsage
   };
 }
 
@@ -6351,6 +6433,7 @@ export default function App(): JSX.Element {
   const [toolAvailability, setToolAvailability] = useState<ToolAvailability>(
     DEFAULT_TOOL_AVAILABILITY
   );
+  const [storageUsage, setStorageUsage] = useState<StorageUsageInfo | null>(null);
   const [toolUpdateState, setToolUpdateState] = useState<ToolUpdateUiState>({
     status: 'idle',
     message: DEFAULT_TOOL_UPDATE_MESSAGE,
@@ -6500,6 +6583,7 @@ export default function App(): JSX.Element {
     filters.tagSearch.trim() !== '' ||
     filters.selectedTagIds.length > 0;
   const catalogCountLabel = `${filteredCatalog.length} ${filteredCatalog.length === 1 ? 'item' : 'items'} shown`;
+  const storageUsageSummary = storageUsage ? formatStorageUsageSummary(storageUsage) : null;
   const addVideoPrimaryMessage = addVideoMode === 'upload' ? DEFAULT_UPLOAD_MESSAGE : DEFAULT_IMPORT_MESSAGE;
 
   function clearCatalogFilters(): void {
@@ -6675,6 +6759,7 @@ export default function App(): JSX.Element {
     setTagFilterSuggestions([]);
     setIsTagFilterSearchFocused(false);
     setToolAvailability(DEFAULT_TOOL_AVAILABILITY);
+    setStorageUsage(null);
     setSocketConnectionState('disconnected');
     setIsAddVideoModalOpen(false);
     setIsSettingsModalOpen(false);
@@ -6774,6 +6859,7 @@ export default function App(): JSX.Element {
   function applyRuntime(data: RuntimeInfo): void {
     setIdleLockMinutes(data.config.idleLockMinutes);
     setToolAvailability(data.toolAvailability);
+    setStorageUsage(data.storageUsage);
   }
 
   function applySocketStateSnapshot(snapshot: SocketStateSnapshot): void {
@@ -6966,6 +7052,7 @@ export default function App(): JSX.Element {
                 setCatalog((currentItems) => currentItems.filter((candidate) => candidate.id !== itemId));
                 setViewerItem((currentValue) => (currentValue?.id === itemId ? null : currentValue));
                 setDetailsItemId((currentValue) => (currentValue === itemId ? null : currentValue));
+                void loadRuntime();
               }
               return;
             }
@@ -7053,6 +7140,9 @@ export default function App(): JSX.Element {
             const jobEvent = hydrateJobEvent(envelope.data);
             if (jobEvent) {
               recordJobActivity(jobEvent);
+              if (name === 'job.completed') {
+                void loadRuntime();
+              }
             }
             return;
           }
@@ -7348,6 +7438,7 @@ export default function App(): JSX.Element {
       setCatalog((currentItems) => currentItems.filter((candidate) => candidate.id !== itemId));
       setViewerItem((currentValue) => (currentValue?.id === itemId ? null : currentValue));
       setDetailsItemId((currentValue) => (currentValue === itemId ? null : currentValue));
+      void loadRuntime();
       return true;
     } catch (error) {
       console.warn('catalog.item.delete.failed', {
@@ -7997,6 +8088,7 @@ export default function App(): JSX.Element {
     setIsAddVideoModalOpen(false);
     requestCatalogList();
     void loadCatalog();
+    void loadRuntime();
   }
 
   async function applyIngestResponse(
@@ -8396,6 +8488,20 @@ export default function App(): JSX.Element {
           // Ignore socket close failures during teardown.
         }
       }
+    };
+  }, [authenticated]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      return undefined;
+    }
+
+    const interval = window.setInterval(() => {
+      void loadRuntime();
+    }, RUNTIME_REFRESH_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(interval);
     };
   }, [authenticated]);
 
@@ -8829,8 +8935,20 @@ export default function App(): JSX.Element {
       </main>
 
       <footer className="app-footer">
-        <p className="muted">
-          {catalog.length} total {catalog.length === 1 ? 'item' : 'items'}
+        <p className="muted footer-summary">
+          <span>
+            {catalog.length} total {catalog.length === 1 ? 'item' : 'items'}
+          </span>
+          {storageUsageSummary && (
+            <>
+              <span className="footer-summary-separator" aria-hidden="true">
+                ·
+              </span>
+              <span title={`Storage path: ${storageUsage?.storagePath ?? ''}`}>
+                {storageUsageSummary}
+              </span>
+            </>
+          )}
         </p>
         <div className="footer-connection-status" aria-live="polite">
           <span className={`connection-pill connection-${socketConnectionState}`}>

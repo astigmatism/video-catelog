@@ -1350,6 +1350,20 @@ label {
   margin: 0;
 }
 
+.footer-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.footer-summary-separator {
+  color: rgba(148, 163, 184, 0.76);
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
 .footer-connection-status {
   flex: 0 0 auto;
   display: flex;
