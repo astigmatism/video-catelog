@@ -1378,6 +1378,36 @@ function getBookmarkDisplayTitle(bookmark: CatalogBookmark): string {
   return normalizeBookmarkName(bookmark.name) ?? `Moment at ${formatViewerClockTime(bookmark.timeSeconds)}`;
 }
 
+type ViewerShortcutLabelProps = {
+  text: string;
+  shortcut: string;
+};
+
+function ViewerShortcutLabel({ text, shortcut }: ViewerShortcutLabelProps): JSX.Element {
+  const shortcutIndex = text.toLowerCase().indexOf(shortcut.toLowerCase());
+
+  if (shortcutIndex >= 0) {
+    return (
+      <>
+        {text.slice(0, shortcutIndex)}
+        <span className="viewer-shortcut-letter">
+          {text.slice(shortcutIndex, shortcutIndex + shortcut.length)}
+        </span>
+        {text.slice(shortcutIndex + shortcut.length)}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <span>{text}</span>
+      <span className="viewer-shortcut-key" aria-hidden="true">
+        {shortcut.toUpperCase()}
+      </span>
+    </>
+  );
+}
+
 function getBookmarkShortcutIndexForKey(event: KeyboardEvent): number | null {
   if (event.altKey || event.ctrlKey || event.metaKey) {
     return null;
@@ -1385,10 +1415,6 @@ function getBookmarkShortcutIndexForKey(event: KeyboardEvent): number | null {
 
   if (/^[1-9]$/.test(event.key)) {
     return Number(event.key) - 1;
-  }
-
-  if (event.key === '0') {
-    return 9;
   }
 
   return null;
@@ -1399,7 +1425,7 @@ function isViewerBeginningShortcutKey(event: KeyboardEvent): boolean {
     return false;
   }
 
-  return event.key === '`' || event.key === '~' || event.code === 'Backquote';
+  return event.key === '0' || event.key === '`' || event.key === '~' || event.code === 'Backquote';
 }
 
 function claimViewerKeyboardShortcut(event: KeyboardEvent, exclusive = false): void {
@@ -4207,6 +4233,7 @@ function ViewerOverlay({
   const thumbnailActionInProgressRef = useRef(false);
   const bookmarkCreateInProgressRef = useRef(false);
   const bookmarkActionInProgressRef = useRef(false);
+  const bookmarkCycleIndexRef = useRef(-1);
   const isBookmarksDrawerOpenRef = useRef(false);
   const isAdjustmentsDrawerOpenRef = useRef(false);
   const isSavingViewerVisualAdjustmentsRef = useRef(false);
@@ -5053,14 +5080,42 @@ function ViewerOverlay({
     });
   }
 
+  function jumpToViewerBeginning(): void {
+    bookmarkCycleIndexRef.current = -1;
+    seekVideoTo(0);
+    syncPlaybackTimeFromVideo();
+  }
+
   function jumpToBookmarkShortcut(shortcutIndex: number): void {
     const bookmark = bookmarks[shortcutIndex];
     if (!bookmark) {
       return;
     }
 
+    bookmarkCycleIndexRef.current = shortcutIndex;
     seekVideoTo(bookmark.timeSeconds);
     syncPlaybackTimeFromVideo();
+  }
+
+  function cycleBookmarkShortcut(): void {
+    if (bookmarks.length === 0) {
+      jumpToViewerBeginning();
+      return;
+    }
+
+    const currentCycleIndex = bookmarkCycleIndexRef.current;
+
+    if (currentCycleIndex >= 0) {
+      if (currentCycleIndex < bookmarks.length - 1) {
+        jumpToBookmarkShortcut(currentCycleIndex + 1);
+        return;
+      }
+
+      jumpToViewerBeginning();
+      return;
+    }
+
+    jumpToBookmarkShortcut(0);
   }
 
   function beginTimelineScrubbing(): void {
@@ -5938,6 +5993,7 @@ function ViewerOverlay({
     thumbnailActionInProgressRef.current = false;
     bookmarkCreateInProgressRef.current = false;
     bookmarkActionInProgressRef.current = false;
+    bookmarkCycleIndexRef.current = -1;
     setIsMarkingUsed(false);
     setIsSettingThumbnail(false);
     setBookmarks([]);
@@ -6182,6 +6238,10 @@ function ViewerOverlay({
         !hasShortcutModifier && (event.key.toLowerCase() === 'd' || event.code === 'KeyD');
       const isLoopKey =
         !hasShortcutModifier && (event.key.toLowerCase() === 'l' || event.code === 'KeyL');
+      const isAddBookmarkKey =
+        !hasShortcutModifier && (event.key.toLowerCase() === 'a' || event.code === 'KeyA');
+      const isCycleBookmarksKey =
+        !hasShortcutModifier && (event.key.toLowerCase() === 'b' || event.code === 'KeyB');
       const isCloseKey =
         !hasShortcutModifier &&
         (event.key.toLowerCase() === 'c' ||
@@ -6266,14 +6326,29 @@ function ViewerOverlay({
         return;
       }
 
-      if (isInteractiveTarget) {
+      if (isAddBookmarkKey && !isTextEditableTarget) {
+        claimViewerKeyboardShortcut(event);
+        if (!event.repeat) {
+          void requestCreateBookmark();
+        }
         return;
       }
 
-      if (isViewerBeginningShortcutKey(event)) {
+      if (isCycleBookmarksKey && !isTextEditableTarget) {
         claimViewerKeyboardShortcut(event);
-        seekVideoTo(0);
-        syncPlaybackTimeFromVideo();
+        if (!event.repeat) {
+          cycleBookmarkShortcut();
+        }
+        return;
+      }
+
+      if (isViewerBeginningShortcutKey(event) && !isTextEditableTarget) {
+        claimViewerKeyboardShortcut(event);
+        jumpToViewerBeginning();
+        return;
+      }
+
+      if (isInteractiveTarget) {
         return;
       }
 
@@ -6454,11 +6529,11 @@ function ViewerOverlay({
                 aria-pressed={fitMode === 'fill'}
                 title={
                   fitMode === 'fit'
-                    ? 'Switch to fill the available viewer area (F).'
-                    : 'Switch to fit the entire video in the available viewer area (F).'
+                    ? 'Switch to fill the available viewer area. Shortcut: F.'
+                    : 'Switch to fit the entire video in the available viewer area. Shortcut: F.'
                 }
               >
-                {fitMode === 'fit' ? '(F)ill' : '(F)it'}
+                <ViewerShortcutLabel text={fitMode === 'fit' ? 'Fill' : 'Fit'} shortcut="F" />
               </button>
               <button
                 type="button"
@@ -6610,19 +6685,23 @@ function ViewerOverlay({
                 void requestSetThumbnail();
               }}
               disabled={!videoUrl || isSettingThumbnail}
-              title="Set current frame as thumbnail (T)"
+              title="Set current frame as thumbnail. Shortcut: T"
               aria-label="Set current frame as thumbnail"
             >
-              {isSettingThumbnail ? 'Saving...' : '(T)humbnail Set'}
+              {isSettingThumbnail ? (
+                'Saving...'
+              ) : (
+                <ViewerShortcutLabel text="Thumbnail Set" shortcut="T" />
+              )}
             </button>
             <a
               ref={downloadLinkRef}
               className="viewer-toolbar-button viewer-toolbar-button-text"
               href={buildDownloadUrl(item)}
               onClick={noteViewerActivity}
-              title="Download video (D)"
+              title="Download video. Shortcut: D"
             >
-              (D)ownload
+              <ViewerShortcutLabel text="Download" shortcut="D" />
             </a>
             <button
               type="button"
@@ -6632,17 +6711,17 @@ function ViewerOverlay({
                 void requestMarkUsed();
               }}
               disabled={isMarkingUsed}
-              title="Mark as used and return to the catalog"
+              title="Mark as used and return to the catalog. Shortcut: S"
             >
-              (S)pice! & Close
+              <ViewerShortcutLabel text="Spice! & Close" shortcut="S" />
             </button>
             <button
               type="button"
               className="viewer-toolbar-button viewer-toolbar-button-text viewer-toolbar-button-close"
               onClick={handleCloseViewer}
-              title="Close viewer (C or X)"
+              title="Close viewer. Shortcuts: C or X"
             >
-              (C)lose
+              <ViewerShortcutLabel text="Close" shortcut="C" />
             </button>
           </div>
         </div>
@@ -6795,9 +6874,13 @@ function ViewerOverlay({
                     void requestCreateBookmark();
                   }}
                   disabled={!videoUrl || isCreatingBookmark}
-                  title="Save moment at the current playback position"
+                  title="Save moment at the current playback position. Shortcut: A"
                 >
-                  {isCreatingBookmark ? 'Saving…' : 'Save Moment'}
+                  {isCreatingBookmark ? (
+                    'Saving…'
+                  ) : (
+                    <ViewerShortcutLabel text="Save Moment" shortcut="A" />
+                  )}
                 </button>
                 <span className="viewer-bookmarks-control">
                   {renderBookmarksDrawer()}
@@ -6828,10 +6911,10 @@ function ViewerOverlay({
                   title={
                     viewerLoopState.startSeconds !== null
                       ? `Loop start set at ${viewerLoopStartLabel}`
-                      : 'Set loop start at the current playback position (L)'
+                      : 'Set loop start at the current playback position. Shortcut: L'
                   }
                 >
-                  Start (L)oop
+                  <ViewerShortcutLabel text="Start Loop" shortcut="L" />
                 </button>
                 <button
                   type="button"
@@ -6844,10 +6927,10 @@ function ViewerOverlay({
                       ? 'Set a loop start point first'
                       : viewerLoopState.endSeconds !== null && isViewerLoopActive
                         ? `Loop end set at ${viewerLoopEndLabel}`
-                        : 'Set loop end at the current playback position (L)'
+                        : 'Set loop end at the current playback position. Shortcut: L'
                   }
                 >
-                  End Loop
+                  <ViewerShortcutLabel text="End Loop" shortcut="L" />
                 </button>
                 <button
                   type="button"
@@ -6857,9 +6940,9 @@ function ViewerOverlay({
                     videoUrl === null ||
                     (viewerLoopState.startSeconds === null && viewerLoopState.endSeconds === null)
                   }
-                  title="Clear loop start and loop end (L)"
+                  title="Clear loop start and loop end. Shortcut: L"
                 >
-                  Reset Loop
+                  <ViewerShortcutLabel text="Reset Loop" shortcut="L" />
                 </button>
               </div>
             </div>
@@ -9157,6 +9240,11 @@ export default function App(): JSX.Element {
 
     const interval = window.setInterval(() => {
       if (!authenticated) {
+        return;
+      }
+
+      if (viewerItem !== null) {
+        lastInteractionRef.current = Date.now();
         return;
       }
 
