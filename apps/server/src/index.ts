@@ -14,6 +14,7 @@ import { loadConfig } from './config';
 import { createDatabasePool } from './db';
 import { SessionStore } from './session-store';
 import { detectToolAvailability, updateServerSideTools, type ServerToolUpdateResult } from './tooling';
+import { ThumbnailMemoryCache, type CachedThumbnailFile } from './thumbnail-cache';
 import type {
   AuthTerminationReason,
   CatalogBookmark,
@@ -221,6 +222,16 @@ const HOVER_SPRITE_ROWS = 10;
 const HOVER_SPRITE_FRAME_WIDTH = 160;
 const HOVER_SPRITE_FRAME_HEIGHT = 90;
 const POSTER_THUMBNAIL_WIDTH = 480;
+const THUMBNAIL_CACHE_MAX_ENTRIES = 768;
+const THUMBNAIL_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const THUMBNAIL_CACHE_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const THUMBNAIL_BROWSER_CACHE_CONTROL = 'private, max-age=86400, immutable';
+
+const thumbnailCache = new ThumbnailMemoryCache({
+  maxEntries: THUMBNAIL_CACHE_MAX_ENTRIES,
+  maxBytes: THUMBNAIL_CACHE_MAX_BYTES,
+  maxFileBytes: THUMBNAIL_CACHE_MAX_FILE_BYTES
+});
 
 const UPLOAD_DUPLICATE_REASON_CODES: DuplicateReasonCode[] = [
   'same_name',
@@ -1665,6 +1676,120 @@ function sendManagedFileResponse(
   stream.pipe(reply.raw);
 }
 
+function readFirstHeaderValue(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) {
+    return value[0] ?? null;
+  }
+
+  return typeof value === 'string' ? value : null;
+}
+
+function etagMatches(ifNoneMatchHeader: string | null, etag: string): boolean {
+  if (!ifNoneMatchHeader) {
+    return false;
+  }
+
+  return ifNoneMatchHeader
+    .split(',')
+    .map((candidate) => candidate.trim())
+    .some((candidate) => candidate === '*' || candidate === etag);
+}
+
+function lastModifiedMatches(ifModifiedSinceHeader: string | null, mtimeMs: number): boolean {
+  if (!ifModifiedSinceHeader) {
+    return false;
+  }
+
+  const parsedTime = Date.parse(ifModifiedSinceHeader);
+  if (!Number.isFinite(parsedTime)) {
+    return false;
+  }
+
+  return parsedTime >= Math.floor(mtimeMs / 1000) * 1000;
+}
+
+function requestHasFreshThumbnail(request: FastifyRequest, thumbnailFile: CachedThumbnailFile): boolean {
+  const ifNoneMatchHeader = readFirstHeaderValue(request.headers['if-none-match']);
+  if (ifNoneMatchHeader) {
+    return etagMatches(ifNoneMatchHeader, thumbnailFile.etag);
+  }
+
+  const ifModifiedSinceHeader = readFirstHeaderValue(request.headers['if-modified-since']);
+  return lastModifiedMatches(ifModifiedSinceHeader, thumbnailFile.mtimeMs);
+}
+
+function applyThumbnailResponseHeaders(reply: FastifyReply, thumbnailFile: CachedThumbnailFile): void {
+  reply.header('Cache-Control', THUMBNAIL_BROWSER_CACHE_CONTROL);
+  reply.header('Content-Type', thumbnailFile.contentType);
+  reply.header('ETag', thumbnailFile.etag);
+  reply.header('Last-Modified', thumbnailFile.lastModified);
+  reply.header('Vary', 'Cookie');
+  reply.header('X-Content-Type-Options', 'nosniff');
+}
+
+async function sendCachedThumbnailResponse(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  filePath: string,
+  notFoundMessage: string
+): Promise<void> {
+  try {
+    const thumbnailFile = await thumbnailCache.read(filePath, getProtectedMediaContentType(filePath));
+    if (!thumbnailFile) {
+      reply.code(404).header('Cache-Control', 'private, no-store').send({
+        message: notFoundMessage
+      });
+      return;
+    }
+
+    applyThumbnailResponseHeaders(reply, thumbnailFile);
+
+    if (requestHasFreshThumbnail(request, thumbnailFile)) {
+      reply.code(304).send();
+      return;
+    }
+
+    reply.header('Content-Length', String(thumbnailFile.sizeBytes));
+    reply.send(thumbnailFile.buffer);
+  } catch (error) {
+    request.log.warn(
+      {
+        err: error,
+        filePath
+      },
+      'Thumbnail memory cache failed; falling back to managed file streaming.'
+    );
+    sendManagedFileResponse(request, reply, filePath);
+  }
+}
+
+async function refreshThumbnailCacheFile(filePath: string): Promise<void> {
+  thumbnailCache.invalidatePath(filePath);
+  try {
+    await thumbnailCache.read(filePath, getProtectedMediaContentType(filePath));
+  } catch (error) {
+    app.log.warn(
+      {
+        err: error,
+        filePath
+      },
+      'Failed to refresh thumbnail memory cache entry.'
+    );
+  }
+}
+
+function invalidateThumbnailCacheFile(filePath: string | null): void {
+  if (!filePath) {
+    return;
+  }
+
+  thumbnailCache.invalidatePath(filePath);
+}
+
+function invalidateThumbnailCachePathPrefix(rootPath: string): void {
+  thumbnailCache.invalidatePathPrefix(rootPath);
+}
+
 function getCatalogItemVideoFilePath(item: CatalogItem): string | null {
   return resolveManagedMediaAbsolutePath(item.relativePath);
 }
@@ -1756,6 +1881,11 @@ function cleanupDeletedCatalogItemArtifacts(item: CatalogItem, bookmarks: Catalo
     }
 
     removedPaths.add(resolvedPath);
+    if (artifact.artifactType === 'poster_thumbnail' || artifact.artifactType === 'bookmark_thumbnail') {
+      invalidateThumbnailCacheFile(resolvedPath);
+    } else if (artifact.artifactType === 'bookmark_thumbnail_root') {
+      invalidateThumbnailCachePathPrefix(resolvedPath);
+    }
     removeDeletedCatalogArtifactPath(resolvedPath, item.id, artifact.artifactType);
   }
 }
@@ -2663,6 +2793,7 @@ async function generatePosterThumbnail(
 ): Promise<CatalogItem> {
   const inputPath = getCatalogItemAbsolutePath(item);
   const outputDescriptor = createPosterThumbnailDescriptor(item);
+  invalidateThumbnailCacheFile(outputDescriptor.absolutePath);
   removePathIfExists(outputDescriptor.absolutePath);
 
   let workingItem = await updateCatalogItemProcessing(
@@ -2691,6 +2822,8 @@ async function generatePosterThumbnail(
     captureTimeSeconds: null,
     commandLabel: 'ffmpeg poster thumbnail'
   });
+
+  await refreshThumbnailCacheFile(outputDescriptor.absolutePath);
 
   workingItem = await updateCatalogItemProcessing(
     item.id,
@@ -2780,7 +2913,9 @@ async function setCatalogItemThumbnailFromTime(
       commandLabel: 'ffmpeg current-frame thumbnail'
     });
 
+    invalidateThumbnailCacheFile(outputDescriptor.absolutePath);
     fs.renameSync(temporaryOutputPath, outputDescriptor.absolutePath);
+    await refreshThumbnailCacheFile(outputDescriptor.absolutePath);
 
     const updatedItem = await updateCatalogItemAndBroadcast(
       item.id,
@@ -2856,6 +2991,7 @@ async function createCatalogItemBookmarkFromTime(
       commandLabel: 'ffmpeg bookmark thumbnail'
     });
 
+    invalidateThumbnailCacheFile(outputDescriptor.absolutePath);
     fs.renameSync(temporaryOutputPath, outputDescriptor.absolutePath);
 
     const bookmark = await catalogStore.createCatalogItemBookmark({
@@ -2871,6 +3007,7 @@ async function createCatalogItemBookmarkFromTime(
     }
 
     shouldRemoveFinalOutput = false;
+    await refreshThumbnailCacheFile(outputDescriptor.absolutePath);
 
     writePipelineLog(
       'info',
@@ -2889,6 +3026,7 @@ async function createCatalogItemBookmarkFromTime(
   } finally {
     removePathIfExists(temporaryOutputPath);
     if (shouldRemoveFinalOutput) {
+      invalidateThumbnailCacheFile(outputDescriptor.absolutePath);
       removePathIfExists(outputDescriptor.absolutePath);
     }
   }
@@ -5561,7 +5699,12 @@ app.get('/media/thumbnails/:id', async (request: FastifyRequest, reply: FastifyR
     return;
   }
 
-  sendManagedFileResponse(request, reply, filePath);
+  await sendCachedThumbnailResponse(
+    request,
+    reply,
+    filePath,
+    'Poster thumbnail is not available for this item.'
+  );
 });
 
 app.get('/media/hover-previews/:id', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -5618,7 +5761,12 @@ app.get('/media/bookmark-thumbnails/:id', async (request: FastifyRequest, reply:
     return;
   }
 
-  sendManagedFileResponse(request, reply, filePath);
+  await sendCachedThumbnailResponse(
+    request,
+    reply,
+    filePath,
+    'Bookmark thumbnail is not available.'
+  );
 });
 
 app.get('/download/videos/:id', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -6373,6 +6521,7 @@ app.delete('/api/catalog/:id/bookmarks/:bookmarkId', async (request: FastifyRequ
 
   const thumbnailPath = getCatalogBookmarkThumbnailFilePath(deletedBookmark);
   if (thumbnailPath) {
+    invalidateThumbnailCacheFile(thumbnailPath);
     removePathIfExists(thumbnailPath);
   }
 
