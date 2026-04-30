@@ -369,7 +369,7 @@ type CatalogSortCategory =
   | 'random';
 
 type CatalogSortDirection = 'asc' | 'desc';
-type TagFilterMode = 'include' | 'exclude';
+type TagFilterState = 'inactive' | 'include' | 'exclude';
 
 type CatalogFilters = {
   search: string;
@@ -803,6 +803,54 @@ function compareCatalogTagsForOptions(left: CatalogTag, right: CatalogTag): numb
   }
 
   return left.label.localeCompare(right.label, undefined, { sensitivity: 'base' });
+}
+
+function getTagFilterState(isIncluded: boolean, isExcluded: boolean): TagFilterState {
+  if (isIncluded) {
+    return 'include';
+  }
+
+  if (isExcluded) {
+    return 'exclude';
+  }
+
+  return 'inactive';
+}
+
+function getTagFilterPillStateClassName(state: TagFilterState): string {
+  if (state === 'include') {
+    return ' is-included';
+  }
+
+  if (state === 'exclude') {
+    return ' is-excluded';
+  }
+
+  return '';
+}
+
+function getTagFilterPillAriaPressed(state: TagFilterState): boolean | 'mixed' {
+  if (state === 'include') {
+    return true;
+  }
+
+  if (state === 'exclude') {
+    return 'mixed';
+  }
+
+  return false;
+}
+
+function getTagFilterPillAccessibilityLabel(tag: CatalogTag, state: TagFilterState): string {
+  if (state === 'include') {
+    return `${tag.label} included. Click to exclude this tag.`;
+  }
+
+  if (state === 'exclude') {
+    return `${tag.label} excluded. Click to clear this tag filter.`;
+  }
+
+  return `${tag.label}. Click to include this tag.`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -7805,7 +7853,20 @@ export default function App(): JSX.Element {
           !homeStripEditor.draft.excludedTagIds.includes(tag.id)
       )
     : [];
-  const homeStripEditorAvailableTagOptions = homeStripEditor ? popularTagOptions : [];
+  const homeStripEditorActiveTagOptions: CatalogTag[] = [];
+  const homeStripEditorActiveTagOptionIds = new Set<string>();
+  for (const tag of [...homeStripDraftSelectedTags, ...homeStripDraftExcludedTags]) {
+    if (!homeStripEditorActiveTagOptionIds.has(tag.id)) {
+      homeStripEditorActiveTagOptions.push(tag);
+      homeStripEditorActiveTagOptionIds.add(tag.id);
+    }
+  }
+  const homeStripEditorAvailableTagOptions = homeStripEditor
+    ? [
+        ...homeStripEditorActiveTagOptions,
+        ...popularTagOptions.filter((tag) => !homeStripEditorActiveTagOptionIds.has(tag.id))
+      ]
+    : [];
   const isRandomSortActive = filters.sortCategory === 'random';
 
   const detailsItem = useMemo(
@@ -7830,42 +7891,17 @@ export default function App(): JSX.Element {
     setIsAdHocCatalogSortActive(false);
   }
 
-  function applyTagFilter(tag: CatalogTag, mode: TagFilterMode): void {
+  function cycleTagFilter(tag: CatalogTag): void {
     setFilters((currentValue) => {
+      const isIncluded = currentValue.selectedTagIds.includes(tag.id);
+      const isExcluded = currentValue.excludedTagIds.includes(tag.id);
       const selectedTagIds = currentValue.selectedTagIds.filter((selectedTagId) => selectedTagId !== tag.id);
       const excludedTagIds = currentValue.excludedTagIds.filter((excludedTagId) => excludedTagId !== tag.id);
 
-      if (mode === 'include') {
+      if (!isIncluded && !isExcluded) {
         selectedTagIds.push(tag.id);
-      } else {
+      } else if (isIncluded) {
         excludedTagIds.push(tag.id);
-      }
-
-      return {
-        ...currentValue,
-        tagSearch: '',
-        selectedTagIds: Array.from(new Set(selectedTagIds)),
-        excludedTagIds: Array.from(new Set(excludedTagIds))
-      };
-    });
-    setTagFilterSuggestions([]);
-  }
-
-  function toggleTagFilter(tag: CatalogTag, mode: TagFilterMode): void {
-    setFilters((currentValue) => {
-      const isActive =
-        mode === 'include'
-          ? currentValue.selectedTagIds.includes(tag.id)
-          : currentValue.excludedTagIds.includes(tag.id);
-      const selectedTagIds = currentValue.selectedTagIds.filter((selectedTagId) => selectedTagId !== tag.id);
-      const excludedTagIds = currentValue.excludedTagIds.filter((excludedTagId) => excludedTagId !== tag.id);
-
-      if (!isActive) {
-        if (mode === 'include') {
-          selectedTagIds.push(tag.id);
-        } else {
-          excludedTagIds.push(tag.id);
-        }
       }
 
       return {
@@ -8292,14 +8328,16 @@ export default function App(): JSX.Element {
     void reorderHomeStripRelative(sourceStripId, targetStripId, position);
   }
 
-  function addHomeStripDraftTag(tag: CatalogTag, mode: TagFilterMode): void {
+  function cycleHomeStripDraftTag(tag: CatalogTag): void {
     updateHomeStripDraft((draft) => {
+      const isIncluded = draft.selectedTagIds.includes(tag.id);
+      const isExcluded = draft.excludedTagIds.includes(tag.id);
       const selectedTagIds = draft.selectedTagIds.filter((selectedTagId) => selectedTagId !== tag.id);
       const excludedTagIds = draft.excludedTagIds.filter((excludedTagId) => excludedTagId !== tag.id);
 
-      if (mode === 'include') {
+      if (!isIncluded && !isExcluded) {
         selectedTagIds.push(tag.id);
-      } else {
+      } else if (isIncluded) {
         excludedTagIds.push(tag.id);
       }
 
@@ -8311,39 +8349,6 @@ export default function App(): JSX.Element {
       };
     });
     setHomeStripTagSuggestions([]);
-  }
-
-  function toggleHomeStripDraftTag(tag: CatalogTag, mode: TagFilterMode): void {
-    updateHomeStripDraft((draft) => {
-      const isActive =
-        mode === 'include' ? draft.selectedTagIds.includes(tag.id) : draft.excludedTagIds.includes(tag.id);
-      const selectedTagIds = draft.selectedTagIds.filter((selectedTagId) => selectedTagId !== tag.id);
-      const excludedTagIds = draft.excludedTagIds.filter((excludedTagId) => excludedTagId !== tag.id);
-
-      if (!isActive) {
-        if (mode === 'include') {
-          selectedTagIds.push(tag.id);
-        } else {
-          excludedTagIds.push(tag.id);
-        }
-      }
-
-      return {
-        ...draft,
-        tagSearch: '',
-        selectedTagIds: Array.from(new Set(selectedTagIds)),
-        excludedTagIds: Array.from(new Set(excludedTagIds))
-      };
-    });
-    setHomeStripTagSuggestions([]);
-  }
-
-  function removeHomeStripDraftTag(tagId: string): void {
-    updateHomeStripDraft((draft) => ({
-      ...draft,
-      selectedTagIds: draft.selectedTagIds.filter((selectedTagId) => selectedTagId !== tagId),
-      excludedTagIds: draft.excludedTagIds.filter((excludedTagId) => excludedTagId !== tagId)
-    }));
   }
 
   function applyCurrentFiltersToHomeStripDraft(): void {
@@ -9949,6 +9954,7 @@ export default function App(): JSX.Element {
       text: 'Upload started. Live progress will appear in the activity panel.'
     });
     const formData = new FormData();
+    formData.append('expectedSizeBytes', String(selectedFile.size));
     formData.append('file', selectedFile);
 
     try {
@@ -10594,7 +10600,7 @@ export default function App(): JSX.Element {
                     ) : null}
                   </div>
                   <p className="filter-section-description">
-                    Include tags to require them. Exclude tags to hide matching items.
+                    Click once to include a tag, again to exclude it, and a third time to clear it.
                   </p>
 
                   <div className="tag-filter-input-wrap">
@@ -10618,33 +10624,22 @@ export default function App(): JSX.Element {
                     />
 
                     {isFilterDrawerOpen && filters.tagSearch.trim() !== '' && isTagFilterSearchFocused ? (
-                      <div className="tag-filter-suggestion-list" role="listbox" aria-label="Matching tags">
+                      <div className="tag-filter-suggestion-list" role="group" aria-label="Matching tags">
                         {visibleTagFilterSuggestions.length > 0 ? (
                           visibleTagFilterSuggestions.map((tag) => (
-                            <div className="tag-filter-suggestion-row" key={tag.id} role="option" aria-selected="false">
-                              <span className="tag-filter-suggestion-copy">
-                                <span>{tag.label}</span>
-                                <span className="tag-usage-count">{tag.usageCount}</span>
-                              </span>
-                              <span className="tag-filter-suggestion-actions">
-                                <button
-                                  type="button"
-                                  className="tag-mode-button include"
-                                  onMouseDown={(event: MouseEvent<HTMLButtonElement>) => event.preventDefault()}
-                                  onClick={() => applyTagFilter(tag, 'include')}
-                                >
-                                  Include
-                                </button>
-                                <button
-                                  type="button"
-                                  className="tag-mode-button exclude"
-                                  onMouseDown={(event: MouseEvent<HTMLButtonElement>) => event.preventDefault()}
-                                  onClick={() => applyTagFilter(tag, 'exclude')}
-                                >
-                                  Exclude
-                                </button>
-                              </span>
-                            </div>
+                            <button
+                              type="button"
+                              className="tag-filter-option tag-filter-pill tag-filter-suggestion-pill"
+                              key={tag.id}
+                              aria-pressed={getTagFilterPillAriaPressed('inactive')}
+                              aria-label={getTagFilterPillAccessibilityLabel(tag, 'inactive')}
+                              title={getTagFilterPillAccessibilityLabel(tag, 'inactive')}
+                              onMouseDown={(event: MouseEvent<HTMLButtonElement>) => event.preventDefault()}
+                              onClick={() => cycleTagFilter(tag)}
+                            >
+                              <span className="tag-filter-option-label">{tag.label}</span>
+                              <span className="tag-usage-count">{tag.usageCount}</span>
+                            </button>
                           ))
                         ) : (
                           <div className="empty-inline-state">No matching tags.</div>
@@ -10658,39 +10653,25 @@ export default function App(): JSX.Element {
                       visibleTagOptions.map((tag) => {
                         const isIncluded = filters.selectedTagIds.includes(tag.id);
                         const isExcluded = filters.excludedTagIds.includes(tag.id);
+                        const tagFilterState = getTagFilterState(isIncluded, isExcluded);
+                        const tagFilterLabel = getTagFilterPillAccessibilityLabel(tag, tagFilterState);
 
                         return (
-                          <div
-                            className={`tag-filter-option${isIncluded ? ' is-included' : ''}${
-                              isExcluded ? ' is-excluded' : ''
-                            }`}
+                          <button
+                            type="button"
+                            className={`tag-filter-option tag-filter-pill${getTagFilterPillStateClassName(
+                              tagFilterState
+                            )}`}
                             key={tag.id}
+                            disabled={!isFilterDrawerOpen}
+                            onClick={() => cycleTagFilter(tag)}
+                            aria-pressed={getTagFilterPillAriaPressed(tagFilterState)}
+                            aria-label={tagFilterLabel}
+                            title={tagFilterLabel}
                           >
-                            <span className="tag-filter-option-copy">
-                              <span className="tag-filter-option-label">{tag.label}</span>
-                              <span className="tag-usage-count">{tag.usageCount}</span>
-                            </span>
-                            <span className="tag-filter-option-actions">
-                              <button
-                                type="button"
-                                className={`tag-mode-button include${isIncluded ? ' is-active' : ''}`}
-                                disabled={!isFilterDrawerOpen}
-                                onClick={() => toggleTagFilter(tag, 'include')}
-                                aria-pressed={isIncluded}
-                              >
-                                Include
-                              </button>
-                              <button
-                                type="button"
-                                className={`tag-mode-button exclude${isExcluded ? ' is-active' : ''}`}
-                                disabled={!isFilterDrawerOpen}
-                                onClick={() => toggleTagFilter(tag, 'exclude')}
-                                aria-pressed={isExcluded}
-                              >
-                                Exclude
-                              </button>
-                            </span>
-                          </div>
+                            <span className="tag-filter-option-label">{tag.label}</span>
+                            <span className="tag-usage-count">{tag.usageCount}</span>
+                          </button>
                         );
                       })
                     ) : (
@@ -11001,82 +10982,12 @@ export default function App(): JSX.Element {
                 <span className="tag-selected-count">{homeStripDraftActiveTagCount}</span>
               </div>
               <p className="filter-section-description">
-                Included tags are required. Excluded tags remove matching items from this saved section.
+                Click once to require a tag, again to exclude it, and a third time to clear it.
               </p>
 
-              {homeStripDraftActiveTagCount > 0 ? (
-                <div className="tag-filter-selected-groups">
-                  {homeStripDraftSelectedTags.length > 0 ? (
-                    <div className="tag-filter-mode-group" aria-label="Included home section tag filters">
-                      <span className="tag-filter-mode-label">Included</span>
-                      <div className="selected-tag-list">
-                        {homeStripDraftSelectedTags.map((tag) => (
-                          <span className="selected-tag-chip is-included" key={tag.id}>
-                            <span className="tag-filter-chip-mode">Include</span>
-                            <span className="tag-filter-chip-label">{tag.label}</span>
-                            <button
-                              type="button"
-                              className="selected-tag-chip-mode-button"
-                              disabled={homeStripEditor.saving}
-                              onClick={() => addHomeStripDraftTag(tag, 'exclude')}
-                              aria-label={`Exclude ${tag.label} instead`}
-                              title={`Exclude ${tag.label} instead`}
-                            >
-                              Exclude
-                            </button>
-                            <button
-                              type="button"
-                              className="selected-tag-chip-remove-button"
-                              disabled={homeStripEditor.saving}
-                              onClick={() => removeHomeStripDraftTag(tag.id)}
-                              aria-label={`Remove ${tag.label} home section filter`}
-                              title={`Remove ${tag.label}`}
-                            >
-                              ×
-                            </button>
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {homeStripDraftExcludedTags.length > 0 ? (
-                    <div className="tag-filter-mode-group" aria-label="Excluded home section tag filters">
-                      <span className="tag-filter-mode-label">Excluded</span>
-                      <div className="selected-tag-list">
-                        {homeStripDraftExcludedTags.map((tag) => (
-                          <span className="selected-tag-chip is-excluded" key={tag.id}>
-                            <span className="tag-filter-chip-mode">Exclude</span>
-                            <span className="tag-filter-chip-label">{tag.label}</span>
-                            <button
-                              type="button"
-                              className="selected-tag-chip-mode-button"
-                              disabled={homeStripEditor.saving}
-                              onClick={() => addHomeStripDraftTag(tag, 'include')}
-                              aria-label={`Include ${tag.label} instead`}
-                              title={`Include ${tag.label} instead`}
-                            >
-                              Include
-                            </button>
-                            <button
-                              type="button"
-                              className="selected-tag-chip-remove-button"
-                              disabled={homeStripEditor.saving}
-                              onClick={() => removeHomeStripDraftTag(tag.id)}
-                              aria-label={`Remove ${tag.label} home section exclusion`}
-                              title={`Remove ${tag.label}`}
-                            >
-                              ×
-                            </button>
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-              ) : (
+              {homeStripDraftActiveTagCount === 0 ? (
                 <p className="filter-section-description">Leave tags empty to match the whole catalog.</p>
-              )}
+              ) : null}
 
               <div className="tag-filter-input-wrap">
                 <input
@@ -11099,33 +11010,22 @@ export default function App(): JSX.Element {
                 />
 
                 {homeStripEditor.draft.tagSearch.trim() !== '' && isHomeStripTagSearchFocused ? (
-                  <div className="tag-filter-suggestion-list" role="listbox" aria-label="Matching home section tags">
+                  <div className="tag-filter-suggestion-list" role="group" aria-label="Matching home section tags">
                     {visibleHomeStripTagSuggestions.length > 0 ? (
                       visibleHomeStripTagSuggestions.map((tag) => (
-                        <div className="tag-filter-suggestion-row" key={tag.id} role="option" aria-selected="false">
-                          <span className="tag-filter-suggestion-copy">
-                            <span>{tag.label}</span>
-                            <span className="tag-usage-count">{tag.usageCount}</span>
-                          </span>
-                          <span className="tag-filter-suggestion-actions">
-                            <button
-                              type="button"
-                              className="tag-mode-button include"
-                              onMouseDown={(event: MouseEvent<HTMLButtonElement>) => event.preventDefault()}
-                              onClick={() => addHomeStripDraftTag(tag, 'include')}
-                            >
-                              Include
-                            </button>
-                            <button
-                              type="button"
-                              className="tag-mode-button exclude"
-                              onMouseDown={(event: MouseEvent<HTMLButtonElement>) => event.preventDefault()}
-                              onClick={() => addHomeStripDraftTag(tag, 'exclude')}
-                            >
-                              Exclude
-                            </button>
-                          </span>
-                        </div>
+                        <button
+                          type="button"
+                          className="tag-filter-option tag-filter-pill tag-filter-suggestion-pill"
+                          key={tag.id}
+                          aria-pressed={getTagFilterPillAriaPressed('inactive')}
+                          aria-label={getTagFilterPillAccessibilityLabel(tag, 'inactive')}
+                          title={getTagFilterPillAccessibilityLabel(tag, 'inactive')}
+                          onMouseDown={(event: MouseEvent<HTMLButtonElement>) => event.preventDefault()}
+                          onClick={() => cycleHomeStripDraftTag(tag)}
+                        >
+                          <span className="tag-filter-option-label">{tag.label}</span>
+                          <span className="tag-usage-count">{tag.usageCount}</span>
+                        </button>
                       ))
                     ) : (
                       <div className="empty-inline-state">No matching tags.</div>
@@ -11139,39 +11039,25 @@ export default function App(): JSX.Element {
                   homeStripEditorAvailableTagOptions.map((tag) => {
                     const isIncluded = homeStripEditor.draft.selectedTagIds.includes(tag.id);
                     const isExcluded = homeStripEditor.draft.excludedTagIds.includes(tag.id);
+                    const tagFilterState = getTagFilterState(isIncluded, isExcluded);
+                    const tagFilterLabel = getTagFilterPillAccessibilityLabel(tag, tagFilterState);
 
                     return (
-                      <div
-                        className={`tag-filter-option${isIncluded ? ' is-included' : ''}${
-                          isExcluded ? ' is-excluded' : ''
-                        }`}
+                      <button
+                        type="button"
+                        className={`tag-filter-option tag-filter-pill${getTagFilterPillStateClassName(
+                          tagFilterState
+                        )}`}
                         key={tag.id}
+                        disabled={homeStripEditor.saving}
+                        onClick={() => cycleHomeStripDraftTag(tag)}
+                        aria-pressed={getTagFilterPillAriaPressed(tagFilterState)}
+                        aria-label={tagFilterLabel}
+                        title={tagFilterLabel}
                       >
-                        <span className="tag-filter-option-copy">
-                          <span className="tag-filter-option-label">{tag.label}</span>
-                          <span className="tag-usage-count">{tag.usageCount}</span>
-                        </span>
-                        <span className="tag-filter-option-actions">
-                          <button
-                            type="button"
-                            className={`tag-mode-button include${isIncluded ? ' is-active' : ''}`}
-                            disabled={homeStripEditor.saving}
-                            onClick={() => toggleHomeStripDraftTag(tag, 'include')}
-                            aria-pressed={isIncluded}
-                          >
-                            Include
-                          </button>
-                          <button
-                            type="button"
-                            className={`tag-mode-button exclude${isExcluded ? ' is-active' : ''}`}
-                            disabled={homeStripEditor.saving}
-                            onClick={() => toggleHomeStripDraftTag(tag, 'exclude')}
-                            aria-pressed={isExcluded}
-                          >
-                            Exclude
-                          </button>
-                        </span>
-                      </div>
+                        <span className="tag-filter-option-label">{tag.label}</span>
+                        <span className="tag-usage-count">{tag.usageCount}</span>
+                      </button>
                     );
                   })
                 ) : (

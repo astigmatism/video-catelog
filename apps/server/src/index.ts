@@ -148,6 +148,25 @@ type RunCommandOptions = {
   captureStderrLines?: boolean;
 };
 
+type UploadIntegrityStatusCode = 400 | 413;
+
+class UploadIntegrityError extends Error {
+  readonly statusCode: UploadIntegrityStatusCode;
+
+  constructor(message: string, statusCode: UploadIntegrityStatusCode = 400) {
+    super(message);
+    this.name = 'UploadIntegrityError';
+    this.statusCode = statusCode;
+  }
+}
+
+type WrittenFileInfo = {
+  sizeBytes: number;
+  checksum: string;
+  streamTruncated: boolean;
+  streamBytesRead: number | null;
+};
+
 const DEFAULT_SOCKET_SUBSCRIPTIONS: SocketSubscriptions = {
   jobs: true
 };
@@ -231,6 +250,10 @@ const THUMBNAIL_CACHE_MAX_ENTRIES = 768;
 const THUMBNAIL_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const THUMBNAIL_CACHE_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const THUMBNAIL_BROWSER_CACHE_CONTROL = 'private, max-age=86400, immutable';
+const MEDIA_DURATION_COMPLETION_MIN_TOLERANCE_SECONDS = 5;
+const MEDIA_DURATION_COMPLETION_MAX_TOLERANCE_SECONDS = 30;
+const MEDIA_DURATION_COMPLETION_TOLERANCE_RATIO = 0.005;
+
 
 const thumbnailCache = new ThumbnailMemoryCache({
   maxEntries: THUMBNAIL_CACHE_MAX_ENTRIES,
@@ -2052,6 +2075,74 @@ function formatDurationForDisplay(value: number | null): string {
   return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }
 
+function getMediaDurationCompletionToleranceSeconds(durationSeconds: number): number {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return 0;
+  }
+
+  if (durationSeconds < 60) {
+    return Math.max(0.5, durationSeconds * 0.05);
+  }
+
+  return Math.min(
+    MEDIA_DURATION_COMPLETION_MAX_TOLERANCE_SECONDS,
+    Math.max(
+      MEDIA_DURATION_COMPLETION_MIN_TOLERANCE_SECONDS,
+      durationSeconds * MEDIA_DURATION_COMPLETION_TOLERANCE_RATIO
+    )
+  );
+}
+
+function assertObservedFfmpegDurationCompletion(input: {
+  commandLabel: string;
+  expectedDurationSeconds: number | null;
+  snapshot: FfmpegProgressState | null;
+  progressStatus: string | null;
+  logContext: PipelineLogContext;
+  requireObservedProgress?: boolean;
+  details?: Record<string, unknown>;
+}): void {
+  const expectedDurationSeconds = input.expectedDurationSeconds;
+  if (expectedDurationSeconds === null || !Number.isFinite(expectedDurationSeconds) || expectedDurationSeconds <= 0) {
+    return;
+  }
+
+  const observedOutTimeSeconds = input.snapshot?.outTimeSeconds ?? null;
+  const toleranceSeconds = getMediaDurationCompletionToleranceSeconds(expectedDurationSeconds);
+  const details: Record<string, unknown> = {
+    expectedDurationSeconds,
+    observedOutTimeSeconds,
+    toleranceSeconds,
+    progressStatus: input.progressStatus,
+    frame: input.snapshot?.frame ?? null,
+    ...(input.details ?? {})
+  };
+
+  if (observedOutTimeSeconds === null) {
+    const message = `${input.commandLabel} did not report a decoded/output timestamp, so completion against the reported duration could not be verified.`;
+    if (input.requireObservedProgress) {
+      throw new Error(message);
+    }
+
+    writePipelineLog(
+      'warn',
+      'processing.ffmpeg_progress.unverified',
+      message,
+      input.logContext,
+      details
+    );
+    return;
+  }
+
+  if (observedOutTimeSeconds + toleranceSeconds < expectedDurationSeconds) {
+    throw new Error(
+      `${input.commandLabel} stopped at ${formatDurationForDisplay(observedOutTimeSeconds)} while media metadata reports ${formatDurationForDisplay(
+        expectedDurationSeconds
+      )}. The retained asset appears truncated or internally inconsistent.`
+    );
+  }
+}
+
 function isMp4FamilyContainer(containerFormat: string | null): boolean {
   if (!containerFormat) {
     return false;
@@ -2206,10 +2297,11 @@ function createFfmpegProgressMessage(
 
 function createFfmpegProgressLineHandler(input: {
   itemId: string;
-  stage: Extract<ProcessingSnapshot['stage'], 'remuxing' | 'transcoding' | 'hover_thumbnails'>;
+  stage: Extract<ProcessingSnapshot['stage'], 'remuxing' | 'transcoding' | 'hover_thumbnails' | 'finalizing'>;
   progressLabel: string;
   durationSeconds: number | null;
   sessionId?: string | null;
+  onSnapshot?: (snapshot: FfmpegProgressState, progressStatus: string) => void;
 }): (line: string) => void {
   const values: Record<string, string> = {};
   let lastProgressAt = 0;
@@ -2234,6 +2326,8 @@ function createFfmpegProgressLineHandler(input: {
     }
 
     const snapshot = parseFfmpegProgressState(values);
+    input.onSnapshot?.(snapshot, value);
+
     const percent =
       snapshot.outTimeSeconds !== null && input.durationSeconds !== null && input.durationSeconds > 0
         ? Math.max(
@@ -2581,7 +2675,8 @@ async function runFfmpegStage(
   commandLabel: string,
   args: string[],
   durationSeconds: number | null,
-  sessionId?: string | null
+  sessionId?: string | null,
+  options: { requireDurationCompletion?: boolean } = {}
 ): Promise<CatalogItem> {
   let workingItem = await updateCatalogItemProcessing(
     item.id,
@@ -2599,12 +2694,19 @@ async function runFfmpegStage(
     getCatalogItemLogContext(workingItem, sessionId)
   );
 
+  let lastProgressSnapshot: FfmpegProgressState | null = null;
+  let lastProgressStatus: string | null = null;
+
   const progressHandler = createFfmpegProgressLineHandler({
     itemId: workingItem.id,
     stage,
     progressLabel,
     durationSeconds,
-    sessionId
+    sessionId,
+    onSnapshot: (snapshot, progressStatus) => {
+      lastProgressSnapshot = snapshot;
+      lastProgressStatus = progressStatus;
+    }
   });
 
   const result = await runCommand(config.ffmpegCommand, args, {
@@ -2621,8 +2723,149 @@ async function runFfmpegStage(
     throw new Error(message);
   }
 
+  if (options.requireDurationCompletion) {
+    assertObservedFfmpegDurationCompletion({
+      commandLabel,
+      expectedDurationSeconds: durationSeconds,
+      snapshot: lastProgressSnapshot,
+      progressStatus: lastProgressStatus,
+      logContext: getCatalogItemLogContext(workingItem, sessionId),
+      details: { stage }
+    });
+  }
+
   const refreshedItem = catalogStore.findById(item.id);
   return refreshedItem ?? workingItem;
+}
+
+async function validateRetainedMediaCandidate(input: {
+  item: CatalogItem;
+  candidatePath: string;
+  probe: MediaProbeInfo | null;
+  plan: MediaRetentionPlan;
+  candidateLabel: string;
+  sessionId?: string | null;
+}): Promise<MediaProbeInfo> {
+  const candidateStats = fs.statSync(input.candidatePath);
+  if (!candidateStats.isFile() || candidateStats.size <= 0) {
+    throw new Error('Retained media candidate is missing or empty after FFmpeg completed.');
+  }
+
+  const candidateProbe =
+    input.probe ??
+    (await runFfprobeForFile(input.candidatePath, getCatalogItemLogContext(input.item, input.sessionId)));
+
+  let workingItem = await updateCatalogItemProcessing(
+    input.item.id,
+    'finalizing',
+    'Validating retained media decode integrity.',
+    0,
+    'processing',
+    input.sessionId
+  );
+
+  writePipelineLog(
+    'info',
+    'processing.retention.validation.started',
+    'Validating retained media can be decoded through its reported duration.',
+    getCatalogItemLogContext(workingItem, input.sessionId),
+    {
+      decision: input.plan.decision,
+      candidateLabel: input.candidateLabel,
+      candidateSizeBytes: candidateStats.size,
+      expectedDurationSeconds: candidateProbe.durationSeconds
+    }
+  );
+
+  let lastProgressSnapshot: FfmpegProgressState | null = null;
+  let lastProgressStatus: string | null = null;
+  const progressHandler = createFfmpegProgressLineHandler({
+    itemId: workingItem.id,
+    stage: 'finalizing',
+    progressLabel: 'Validating retained media',
+    durationSeconds: candidateProbe.durationSeconds,
+    sessionId: input.sessionId,
+    onSnapshot: (snapshot, progressStatus) => {
+      lastProgressSnapshot = snapshot;
+      lastProgressStatus = progressStatus;
+    }
+  });
+
+  const result = await runCommand(
+    config.ffmpegCommand,
+    [
+      '-nostdin',
+      '-v',
+      'error',
+      '-xerror',
+      '-stats_period',
+      '0.5',
+      '-progress',
+      'pipe:1',
+      '-i',
+      input.candidatePath,
+      '-map',
+      '0:v:0',
+      '-an',
+      '-sn',
+      '-dn',
+      '-f',
+      'null',
+      '-'
+    ],
+    {
+      commandLabel: 'ffmpeg retained media validation',
+      logContext: getCatalogItemLogContext(workingItem, input.sessionId),
+      onStdoutLine: progressHandler,
+      captureStderrLines: true
+    }
+  );
+
+  if (result.exitCode !== 0) {
+    const message = sanitizeLogText(
+      result.stderr.trim() || result.stdout.trim() || 'Retained media decode validation failed.'
+    );
+    throw new Error(message);
+  }
+
+  assertObservedFfmpegDurationCompletion({
+    commandLabel: 'ffmpeg retained media validation',
+    expectedDurationSeconds: candidateProbe.durationSeconds,
+    snapshot: lastProgressSnapshot,
+    progressStatus: lastProgressStatus,
+    logContext: getCatalogItemLogContext(workingItem, input.sessionId),
+    requireObservedProgress: true,
+    details: {
+      decision: input.plan.decision,
+      candidateLabel: input.candidateLabel,
+      candidateSizeBytes: candidateStats.size
+    }
+  });
+
+  workingItem = await updateCatalogItemProcessing(
+    input.item.id,
+    'finalizing',
+    'Retained media decode validation passed.',
+    100,
+    'processing',
+    input.sessionId
+  );
+
+  writePipelineLog(
+    'info',
+    'processing.retention.validation.complete',
+    'Retained media decode validation passed.',
+    getCatalogItemLogContext(workingItem, input.sessionId),
+    {
+      decision: input.plan.decision,
+      candidateLabel: input.candidateLabel,
+      candidateSizeBytes: candidateStats.size,
+      durationSeconds: candidateProbe.durationSeconds,
+      finalOutTimeSeconds: lastProgressSnapshot?.outTimeSeconds ?? null
+    }
+  );
+
+  return candidateProbe;
 }
 
 async function applyRetentionPlan(
@@ -2635,11 +2878,13 @@ async function applyRetentionPlan(
   const retainedOutput = createRetainedOutputDescriptor(item, plan.outputExtension);
   const workRoot = getProcessingWorkRoot(item.id);
   const temporaryOutputPath = path.join(workRoot, `retained${plan.outputExtension}`);
+  const currentPathResolved = path.resolve(currentPath);
+  const retainedOutputPathResolved = path.resolve(retainedOutput.absolutePath);
+  const currentIsRetainedOutput = currentPathResolved === retainedOutputPathResolved;
 
   removePathIfExists(temporaryOutputPath);
-  if (path.resolve(currentPath) != path.resolve(retainedOutput.absolutePath)) {
-    removePathIfExists(retainedOutput.absolutePath);
-  }
+
+  let retainedProbe: MediaProbeInfo | null = null;
 
   switch (plan.decision) {
     case 'keep': {
@@ -2650,8 +2895,18 @@ async function applyRetentionPlan(
         getCatalogItemLogContext(item, sessionId)
       );
 
-      if (path.resolve(currentPath) != path.resolve(retainedOutput.absolutePath)) {
+      retainedProbe = await validateRetainedMediaCandidate({
+        item,
+        candidatePath: currentPath,
+        probe: inputProbe,
+        plan,
+        candidateLabel: 'kept source file',
+        sessionId
+      });
+
+      if (!currentIsRetainedOutput) {
         fs.mkdirSync(path.dirname(retainedOutput.absolutePath), { recursive: true });
+        removePathIfExists(retainedOutput.absolutePath);
         fs.renameSync(currentPath, retainedOutput.absolutePath);
       }
       break;
@@ -2679,16 +2934,28 @@ async function applyRetentionPlan(
           temporaryOutputPath
         ],
         inputProbe.durationSeconds,
-        sessionId
+        sessionId,
+        { requireDurationCompletion: true }
       );
 
-      if (path.resolve(currentPath) == path.resolve(retainedOutput.absolutePath)) {
+      retainedProbe = await validateRetainedMediaCandidate({
+        item,
+        candidatePath: temporaryOutputPath,
+        probe: null,
+        plan,
+        candidateLabel: 'remuxed temporary output',
+        sessionId
+      });
+
+      fs.mkdirSync(path.dirname(retainedOutput.absolutePath), { recursive: true });
+      if (currentIsRetainedOutput) {
         removePathIfExists(currentPath);
+        fs.renameSync(temporaryOutputPath, retainedOutput.absolutePath);
       } else {
+        removePathIfExists(retainedOutput.absolutePath);
+        fs.renameSync(temporaryOutputPath, retainedOutput.absolutePath);
         removePathIfExists(currentPath);
       }
-      fs.mkdirSync(path.dirname(retainedOutput.absolutePath), { recursive: true });
-      fs.renameSync(temporaryOutputPath, retainedOutput.absolutePath);
       break;
     }
 
@@ -2720,24 +2987,43 @@ async function applyRetentionPlan(
         'ffmpeg transcode',
         transcodeArgs,
         inputProbe.durationSeconds,
-        sessionId
+        sessionId,
+        { requireDurationCompletion: true }
       );
 
-      removePathIfExists(currentPath);
+      retainedProbe = await validateRetainedMediaCandidate({
+        item,
+        candidatePath: temporaryOutputPath,
+        probe: null,
+        plan,
+        candidateLabel: 'transcoded temporary output',
+        sessionId
+      });
+
       fs.mkdirSync(path.dirname(retainedOutput.absolutePath), { recursive: true });
-      fs.renameSync(temporaryOutputPath, retainedOutput.absolutePath);
+      if (currentIsRetainedOutput) {
+        removePathIfExists(currentPath);
+        fs.renameSync(temporaryOutputPath, retainedOutput.absolutePath);
+      } else {
+        removePathIfExists(retainedOutput.absolutePath);
+        fs.renameSync(temporaryOutputPath, retainedOutput.absolutePath);
+        removePathIfExists(currentPath);
+      }
       break;
     }
+  }
+
+  if (!retainedProbe) {
+    retainedProbe = await runFfprobeForFile(
+      retainedOutput.absolutePath,
+      getCatalogItemLogContext(item, sessionId)
+    );
   }
 
   const retainedChecksum =
     plan.decision == 'keep' && item.incomingChecksumSha256
       ? item.incomingChecksumSha256
       : await computeFileChecksum(retainedOutput.absolutePath);
-  const retainedProbe = await runFfprobeForFile(
-    retainedOutput.absolutePath,
-    getCatalogItemLogContext(item, sessionId)
-  );
   const finalProbe: MediaProbeInfo = {
     ...retainedProbe,
     isBrowserSafeInput: plan.inputIsBrowserSafe
@@ -4270,17 +4556,208 @@ async function computeFileChecksum(filePath: string): Promise<string> {
   });
 }
 
+function readReadableStreamBooleanFlag(
+  source: NodeJS.ReadableStream,
+  propertyName: 'truncated'
+): boolean {
+  const value = (source as NodeJS.ReadableStream & Record<string, unknown>)[propertyName];
+  return value === true;
+}
+
+function readReadableStreamNumberProperty(
+  source: NodeJS.ReadableStream,
+  propertyName: 'bytesRead'
+): number | null {
+  const value = (source as NodeJS.ReadableStream & Record<string, unknown>)[propertyName];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function destroyReadableStream(source: NodeJS.ReadableStream): void {
+  const destroy = (source as NodeJS.ReadableStream & { destroy?: () => void }).destroy;
+  if (typeof destroy !== 'function') {
+    return;
+  }
+
+  try {
+    destroy.call(source);
+  } catch {
+    // Ignore stream destroy failures while rejecting an upload.
+  }
+}
+
+function readMultipartFieldText(file: unknown, fieldName: string): string | null {
+  const fields = isRecord(file) && isRecord(file.fields) ? file.fields : null;
+  if (!fields) {
+    return null;
+  }
+
+  const rawField = fields[fieldName];
+  const field = Array.isArray(rawField) ? rawField[0] : rawField;
+  if (typeof field === 'string') {
+    return field;
+  }
+
+  if (isRecord(field)) {
+    const value = field.value;
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+
+  return null;
+}
+
+function parseSafeIntegerText(value: string | null): number | null {
+  const trimmedValue = value?.trim();
+  if (!trimmedValue || !/^\d+$/.test(trimmedValue)) {
+    return null;
+  }
+
+  const parsed = Number(trimmedValue);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function readExpectedUploadSizeBytes(file: unknown): number | null {
+  return parseSafeIntegerText(readMultipartFieldText(file, 'expectedSizeBytes'));
+}
+
+function createUploadTooLargeMessage(expectedSizeBytes: number): string {
+  return `Selected file is ${formatBytes(expectedSizeBytes)}, but this server is configured to accept uploads up to ${formatBytes(
+    config.maxUploadBytes
+  )}. Increase MAX_UPLOAD_BYTES and retry.`;
+}
+
+function assertExpectedUploadSizeIsAllowed(input: {
+  expectedSizeBytes: number | null;
+  originalName: string;
+  stream: NodeJS.ReadableStream;
+  logContext: PipelineLogContext;
+}): void {
+  if (input.expectedSizeBytes === null || input.expectedSizeBytes <= config.maxUploadBytes) {
+    return;
+  }
+
+  destroyReadableStream(input.stream);
+  const message = createUploadTooLargeMessage(input.expectedSizeBytes);
+  writePipelineLog(
+    'warn',
+    'upload.rejected_too_large',
+    message,
+    input.logContext,
+    {
+      originalName: input.originalName,
+      expectedSizeBytes: input.expectedSizeBytes,
+      maxUploadBytes: config.maxUploadBytes
+    }
+  );
+  throw new UploadIntegrityError(message, 413);
+}
+
+function assertCompletedUploadMatchesExpectations(input: {
+  originalName: string;
+  stagedFile: WrittenFileInfo;
+  expectedSizeBytes: number | null;
+  logContext: PipelineLogContext;
+}): void {
+  const streamTruncated = input.stagedFile.streamTruncated;
+  if (streamTruncated) {
+    const message = `Upload was truncated after ${formatBytes(input.stagedFile.sizeBytes)}. The configured upload limit is ${formatBytes(
+      config.maxUploadBytes
+    )}.`;
+    writePipelineLog(
+      'error',
+      'upload.truncated',
+      message,
+      input.logContext,
+      {
+        originalName: input.originalName,
+        sizeBytes: input.stagedFile.sizeBytes,
+        streamBytesRead: input.stagedFile.streamBytesRead,
+        maxUploadBytes: config.maxUploadBytes
+      }
+    );
+    throw new UploadIntegrityError(message, 413);
+  }
+
+  if (input.expectedSizeBytes !== null && input.stagedFile.sizeBytes !== input.expectedSizeBytes) {
+    const message = `Upload integrity check failed for ${input.originalName}: browser selected ${formatBytes(
+      input.expectedSizeBytes
+    )}, but the server staged ${formatBytes(input.stagedFile.sizeBytes)}.`;
+    writePipelineLog(
+      'error',
+      'upload.size_mismatch',
+      message,
+      input.logContext,
+      {
+        originalName: input.originalName,
+        expectedSizeBytes: input.expectedSizeBytes,
+        actualSizeBytes: input.stagedFile.sizeBytes,
+        streamBytesRead: input.stagedFile.streamBytesRead,
+        maxUploadBytes: config.maxUploadBytes
+      }
+    );
+    throw new UploadIntegrityError(
+      message,
+      input.expectedSizeBytes > config.maxUploadBytes || input.stagedFile.sizeBytes >= config.maxUploadBytes
+        ? 413
+        : 400
+    );
+  }
+
+  if (input.expectedSizeBytes === null && input.stagedFile.sizeBytes >= config.maxUploadBytes) {
+    writePipelineLog(
+      'warn',
+      'upload.size_at_limit_unverified',
+      'Upload reached the configured size limit without a browser-provided expected size; stream truncation could not be independently verified.',
+      input.logContext,
+      {
+        originalName: input.originalName,
+        sizeBytes: input.stagedFile.sizeBytes,
+        maxUploadBytes: config.maxUploadBytes
+      }
+    );
+  }
+}
+
+function getHttpStatusCodeForUploadError(error: unknown): number {
+  if (error instanceof UploadIntegrityError) {
+    return error.statusCode;
+  }
+
+  if (isRecord(error)) {
+    const statusCode = readUnknownNumber(error.statusCode) ?? readUnknownNumber(error.status);
+    if (statusCode !== null && statusCode >= 400 && statusCode < 600) {
+      return Math.trunc(statusCode);
+    }
+
+    const code = typeof error.code === 'string' ? error.code : null;
+    if (code === 'FST_REQ_FILE_TOO_LARGE' || code === 'LIMIT_FILE_SIZE') {
+      return 413;
+    }
+  }
+
+  return 500;
+}
+
 async function writeStreamToFileAndHash(
   source: NodeJS.ReadableStream,
   targetPath: string,
   options?: {
     onProgress?: (sizeBytes: number) => void;
   }
-): Promise<{ sizeBytes: number; checksum: string }> {
+): Promise<WrittenFileInfo> {
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });
 
   const hash = createHash('sha256');
   let sizeBytes = 0;
+  let streamLimitReached = false;
+
+  source.on('limit', () => {
+    streamLimitReached = true;
+  });
 
   const hashingTransform = new Transform({
     transform(
@@ -4296,11 +4773,18 @@ async function writeStreamToFileAndHash(
     }
   });
 
-  await pipeline(source, hashingTransform, fs.createWriteStream(targetPath));
+  try {
+    await pipeline(source, hashingTransform, fs.createWriteStream(targetPath));
+  } catch (error) {
+    removePathIfExists(targetPath);
+    throw error;
+  }
 
   return {
     sizeBytes,
-    checksum: hash.digest('hex')
+    checksum: hash.digest('hex'),
+    streamTruncated: streamLimitReached || readReadableStreamBooleanFlag(source, 'truncated'),
+    streamBytesRead: readReadableStreamNumberProperty(source, 'bytesRead')
   };
 }
 
@@ -5041,6 +5525,7 @@ async function stageValidatedUpload(
   }
 
   const originalIngestName = file.filename || 'unnamed-upload';
+  const expectedSizeBytes = readExpectedUploadSizeBytes(file);
   const temporaryFilePath = path.join(
     config.uploadTempRoot,
     `${randomUUID()}${path.extname(originalIngestName).toLowerCase()}`
@@ -5069,6 +5554,13 @@ async function stageValidatedUpload(
   let createdItem: CatalogItem | null = null;
 
   try {
+    assertExpectedUploadSizeIsAllowed({
+      expectedSizeBytes,
+      originalName: originalIngestName,
+      stream: file.file,
+      logContext: getPendingIngestLogContext(pendingIngest, sessionId)
+    });
+
     let lastProgressBytes = 0;
     let lastProgressAt = 0;
 
@@ -5118,6 +5610,13 @@ async function stageValidatedUpload(
           }
         );
       }
+    });
+
+    assertCompletedUploadMatchesExpectations({
+      originalName: originalIngestName,
+      stagedFile,
+      expectedSizeBytes,
+      logContext: getPendingIngestLogContext(pendingIngest, sessionId)
     });
 
     pendingIngest = await savePendingIngestAndBroadcast(
@@ -5211,6 +5710,7 @@ async function stageValidatedUpload(
     if (createdItem) {
       await markCatalogItemFailed(createdItem, failureMessage, sessionId, error);
     } else {
+      cleanupPendingArtifacts(pendingIngest);
       await markPendingIngestFailed(pendingIngest, failureMessage, sessionId, error);
     }
 
@@ -6852,6 +7352,13 @@ app.post('/api/upload', async (request: FastifyRequest, reply: FastifyReply) => 
   }
 
   const originalName = file.filename || 'unnamed-upload';
+  const expectedSizeBytes = readExpectedUploadSizeBytes(file);
+  const legacyUploadLogContext: PipelineLogContext = {
+    sessionId,
+    sourceType: 'upload',
+    visibleName: originalName
+  };
+
   writePipelineLog(
     'warn',
     'upload.legacy.started',
@@ -6863,13 +7370,44 @@ app.post('/api/upload', async (request: FastifyRequest, reply: FastifyReply) => 
     }
   );
 
+  try {
+    assertExpectedUploadSizeIsAllowed({
+      expectedSizeBytes,
+      originalName,
+      stream: file.file,
+      logContext: legacyUploadLogContext
+    });
+  } catch (error) {
+    reply.code(getHttpStatusCodeForUploadError(error)).send({
+      ok: false,
+      message: error instanceof Error ? error.message : 'Upload failed.'
+    } satisfies IngestErrorResponse);
+    return;
+  }
+
   const duplicateCheckBeforeWrite = await evaluateUploadDuplicateCheck({
     visibleName: originalName
   });
 
   const storedName = `${Date.now()}-${randomUUID()}${path.extname(originalName).toLowerCase()}`;
   const targetPath = path.join(config.incomingRoot, storedName);
-  const stagedFile = await writeStreamToFileAndHash(file.file, targetPath);
+  let stagedFile: WrittenFileInfo;
+  try {
+    stagedFile = await writeStreamToFileAndHash(file.file, targetPath);
+    assertCompletedUploadMatchesExpectations({
+      originalName,
+      stagedFile,
+      expectedSizeBytes,
+      logContext: legacyUploadLogContext
+    });
+  } catch (error) {
+    removePathIfExists(targetPath);
+    reply.code(getHttpStatusCodeForUploadError(error)).send({
+      ok: false,
+      message: error instanceof Error ? error.message : 'Upload failed.'
+    } satisfies IngestErrorResponse);
+    return;
+  }
 
   const duplicateCheckAfterWrite = await evaluateUploadDuplicateCheck({
     visibleName: originalName,
@@ -6925,7 +7463,7 @@ app.post('/api/uploads/file', async (request: FastifyRequest, reply: FastifyRepl
     const result = await stageValidatedUpload(request, sessionId);
     reply.send(result);
   } catch (error) {
-    reply.code(500).send({
+    reply.code(getHttpStatusCodeForUploadError(error)).send({
       ok: false,
       message: error instanceof Error ? error.message : 'Upload failed.'
     } satisfies IngestErrorResponse);

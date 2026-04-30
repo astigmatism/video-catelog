@@ -140,6 +140,8 @@ function parseArgumentList(value: string | undefined, fallback: string[]): strin
   return parseShellLikeArguments(value);
 }
 
+const DEFAULT_MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024;
+
 const DEFAULT_FFMPEG_RETENTION_REMUX_ARGS = ['-map', '0', '-c', 'copy', '-movflags', '+faststart'];
 
 const DEFAULT_FFMPEG_RETENTION_TRANSCODE_VIDEO_ARGS = [
@@ -277,7 +279,7 @@ export function loadConfig(): AppConfig {
     trustProxy: parseBoolean(readSetting(env, dotEnv, 'TRUST_PROXY'), false),
     wsHeartbeatMs: parseInteger(readSetting(env, dotEnv, 'WS_HEARTBEAT_MS'), 30000),
     wsAllowedOrigins: parseCommaSeparatedList(readSetting(env, dotEnv, 'WS_ALLOWED_ORIGINS')),
-    maxUploadBytes: parseInteger(readSetting(env, dotEnv, 'MAX_UPLOAD_BYTES'), 1024 * 1024 * 1024),
+    maxUploadBytes: parseInteger(readSetting(env, dotEnv, 'MAX_UPLOAD_BYTES'), DEFAULT_MAX_UPLOAD_BYTES),
     ffmpegCommand: readSetting(env, dotEnv, 'FFMPEG_PATH') ?? 'ffmpeg',
     ffmpegRetentionRemuxArgs: parseArgumentList(
       readSetting(env, dotEnv, 'FFMPEG_RETENTION_REMUX_ARGS'),
