@@ -1,6 +1,7 @@
 import type {
   ChangeEvent,
   CSSProperties,
+  DragEvent as ReactDragEvent,
   FormEvent,
   JSX,
   KeyboardEvent as ReactKeyboardEvent,
@@ -431,12 +432,24 @@ type CatalogCardProps = {
 };
 
 type HomeStripMoveDirection = 'up' | 'down';
+type HomeStripDropPosition = 'before' | 'after';
+type HomeStripDropTarget = { stripId: string; position: HomeStripDropPosition };
+
+type HomeStripActionMenuProps = {
+  strip: CatalogHomeStrip;
+  index: number;
+  totalCount: number;
+  disabled?: boolean;
+  className?: string;
+  onMove: (stripId: string, direction: HomeStripMoveDirection) => void;
+  onEdit: (strip: CatalogHomeStrip) => void;
+  onDelete: (strip: CatalogHomeStrip) => void;
+};
 
 type CatalogHomeStripSectionProps = {
   view: CatalogHomeStripView;
   index: number;
   totalCount: number;
-  catalogTagById: Map<string, CatalogTag>;
   onMove: (stripId: string, direction: HomeStripMoveDirection) => void;
   onEdit: (strip: CatalogHomeStrip) => void;
   onDelete: (strip: CatalogHomeStrip) => void;
@@ -3345,6 +3358,29 @@ function PlusIcon(): JSX.Element {
   );
 }
 
+function MenuIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 7h14" />
+      <path d="M5 12h14" />
+      <path d="M5 17h14" />
+    </svg>
+  );
+}
+
+function GripIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="9" cy="6.5" r="1" />
+      <circle cx="15" cy="6.5" r="1" />
+      <circle cx="9" cy="12" r="1" />
+      <circle cx="15" cy="12" r="1" />
+      <circle cx="9" cy="17.5" r="1" />
+      <circle cx="15" cy="17.5" r="1" />
+    </svg>
+  );
+}
+
 function PlayIcon(): JSX.Element {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" className="viewer-toolbar-solid-icon">
@@ -4065,34 +4101,117 @@ function CatalogCard({
   );
 }
 
-function getCatalogHomeStripSummary(
-  strip: CatalogHomeStrip,
-  catalogTagById: Map<string, CatalogTag>
-): string {
-  const parts = [
-    `${CATALOG_SORT_CATEGORY_LABELS[strip.sortCategory]} ${
-      strip.sortDirection === 'asc' ? 'ascending' : 'descending'
-    }`,
-    `${strip.rowCount} ${strip.rowCount === 1 ? 'row' : 'rows'}`
-  ];
+function HomeStripActionMenu({
+  strip,
+  index,
+  totalCount,
+  disabled = false,
+  className = '',
+  onMove,
+  onEdit,
+  onDelete
+}: HomeStripActionMenuProps): JSX.Element {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
 
-  if (strip.search && strip.search.trim() !== '') {
-    parts.push(`Search: "${strip.search.trim()}"`);
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    function handleDocumentMouseDown(event: globalThis.MouseEvent): void {
+      const target = event.target;
+      if (menuRef.current && target instanceof Node && !menuRef.current.contains(target)) {
+        setIsOpen(false);
+      }
+    }
+
+    function handleDocumentKeyDown(event: globalThis.KeyboardEvent): void {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handleDocumentMouseDown);
+    document.addEventListener('keydown', handleDocumentKeyDown);
+
+    return () => {
+      document.removeEventListener('mousedown', handleDocumentMouseDown);
+      document.removeEventListener('keydown', handleDocumentKeyDown);
+    };
+  }, [isOpen]);
+
+  function runMenuAction(action: () => void): void {
+    setIsOpen(false);
+    action();
   }
 
-  if (strip.tagIds.length > 0) {
-    const labels = strip.tagIds.map((tagId) => catalogTagById.get(tagId)?.label ?? 'Unknown tag');
-    parts.push(`Tags: ${labels.join(', ')}`);
-  }
+  const menuClasses = ['home-strip-menu', className, isOpen ? 'is-open' : '', disabled ? 'is-disabled' : '']
+    .filter(Boolean)
+    .join(' ');
 
-  return parts.join(' · ');
+  return (
+    <div className={menuClasses} ref={menuRef}>
+      <button
+        type="button"
+        className="home-strip-menu-trigger"
+        disabled={disabled}
+        onClick={() => setIsOpen((currentValue) => !currentValue)}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        aria-label={`Open actions for ${strip.name}`}
+        title="Actions"
+      >
+        <MenuIcon />
+      </button>
+
+      {isOpen ? (
+        <div className="home-strip-menu-bubble" role="menu" aria-label={`Actions for ${strip.name}`}>
+          <button
+            type="button"
+            className="home-strip-menu-item"
+            role="menuitem"
+            disabled={index === 0}
+            onClick={() => runMenuAction(() => onMove(strip.id, 'up'))}
+          >
+            Move up
+          </button>
+          <button
+            type="button"
+            className="home-strip-menu-item"
+            role="menuitem"
+            disabled={index >= totalCount - 1}
+            onClick={() => runMenuAction(() => onMove(strip.id, 'down'))}
+          >
+            Move down
+          </button>
+          <button
+            type="button"
+            className="home-strip-menu-item"
+            role="menuitem"
+            onClick={() => runMenuAction(() => onEdit(strip))}
+          >
+            Edit
+          </button>
+          <div className="home-strip-menu-divider" role="separator" />
+          <button
+            type="button"
+            className="home-strip-menu-item danger"
+            role="menuitem"
+            onClick={() => runMenuAction(() => onDelete(strip))}
+          >
+            Delete
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function CatalogHomeStripSection({
   view,
   index,
   totalCount,
-  catalogTagById,
   onMove,
   onEdit,
   onDelete,
@@ -4104,55 +4223,22 @@ function CatalogHomeStripSection({
 }: CatalogHomeStripSectionProps): JSX.Element {
   const { strip, items } = view;
   const stripTitleId = `home-strip-title-${strip.id}`;
-  const stripSummary = getCatalogHomeStripSummary(strip, catalogTagById);
 
   return (
     <section className="home-strip" aria-labelledby={stripTitleId}>
       <div className="home-strip-header">
         <div className="home-strip-heading">
           <h2 id={stripTitleId}>{strip.name}</h2>
-          <p>{stripSummary}</p>
         </div>
-        <div className="home-strip-actions" aria-label={`Manage ${strip.name}`}>
-          <button
-            type="button"
-            className="home-strip-action-button"
-            onClick={() => onMove(strip.id, 'up')}
-            disabled={index === 0}
-            aria-label={`Move ${strip.name} up`}
-            title="Move up"
-          >
-            ↑
-          </button>
-          <button
-            type="button"
-            className="home-strip-action-button"
-            onClick={() => onMove(strip.id, 'down')}
-            disabled={index >= totalCount - 1}
-            aria-label={`Move ${strip.name} down`}
-            title="Move down"
-          >
-            ↓
-          </button>
-          <button
-            type="button"
-            className="home-strip-action-button"
-            onClick={() => onEdit(strip)}
-            aria-label={`Edit ${strip.name}`}
-            title="Edit strip"
-          >
-            Edit
-          </button>
-          <button
-            type="button"
-            className="home-strip-action-button danger"
-            onClick={() => onDelete(strip)}
-            aria-label={`Delete ${strip.name}`}
-            title="Delete strip"
-          >
-            Delete
-          </button>
-        </div>
+        <HomeStripActionMenu
+          strip={strip}
+          index={index}
+          totalCount={totalCount}
+          className="home-strip-header-menu"
+          onMove={onMove}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
       </div>
 
       {items.length > 0 ? (
@@ -4171,7 +4257,7 @@ function CatalogHomeStripSection({
           ))}
         </div>
       ) : (
-        <div className="empty-state home-strip-empty">No items match this strip yet.</div>
+        <div className="empty-state home-strip-empty">No items match this section yet.</div>
       )}
     </section>
   );
@@ -7392,6 +7478,8 @@ export default function App(): JSX.Element {
 
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [homeStrips, setHomeStrips] = useState<CatalogHomeStrip[]>([]);
+  const [draggedHomeStripId, setDraggedHomeStripId] = useState<string | null>(null);
+  const [homeStripDropTarget, setHomeStripDropTarget] = useState<HomeStripDropTarget | null>(null);
   const [pendingIngests, setPendingIngests] = useState<PendingIngest[]>([]);
   const [recentActivity, setRecentActivity] = useState<ActivityFeedEntry[]>([]);
   const [idleLockMinutes, setIdleLockMinutes] = useState(30);
@@ -7718,7 +7806,7 @@ export default function App(): JSX.Element {
 
     const requestBody = createHomeStripRequestBody(editor.draft);
     if (requestBody.name === '') {
-      setHomeStripEditorNotice('error', 'Enter a strip name.');
+      setHomeStripEditorNotice('error', 'Enter a section title.');
       return;
     }
 
@@ -7760,7 +7848,7 @@ export default function App(): JSX.Element {
       const payload = await readJsonPayload(response);
       if (!response.ok) {
         const message = isRecord(payload) ? readString(payload.message) : null;
-        setHomeStripEditorNotice('error', message ?? 'Unable to save this strip.');
+        setHomeStripEditorNotice('error', message ?? 'Unable to save this home section.');
         return;
       }
 
@@ -7774,13 +7862,13 @@ export default function App(): JSX.Element {
     } catch (error) {
       setHomeStripEditorNotice(
         'error',
-        error instanceof Error ? error.message : 'Unable to save this strip.'
+        error instanceof Error ? error.message : 'Unable to save this home section.'
       );
     }
   }
 
   async function deleteHomeStrip(strip: CatalogHomeStrip): Promise<void> {
-    const confirmed = window.confirm(`Delete the "${strip.name}" home strip?`);
+    const confirmed = window.confirm(`Delete the "${strip.name}" home section?`);
     if (!confirmed) {
       return;
     }
@@ -7822,18 +7910,11 @@ export default function App(): JSX.Element {
     }
   }
 
-  async function moveHomeStrip(stripId: string, direction: HomeStripMoveDirection): Promise<void> {
-    const currentIndex = homeStrips.findIndex((candidate) => candidate.id === stripId);
-    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
-
-    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= homeStrips.length) {
-      return;
-    }
-
-    const previousStrips = homeStrips;
-    const nextStrips = [...homeStrips];
-    [nextStrips[currentIndex], nextStrips[targetIndex]] = [nextStrips[targetIndex], nextStrips[currentIndex]];
-
+  async function saveHomeStripOrder(
+    nextStrips: CatalogHomeStrip[],
+    previousStrips: CatalogHomeStrip[],
+    failureContext: Record<string, unknown>
+  ): Promise<void> {
     const optimisticStrips = nextStrips.map((strip, index) => ({
       ...strip,
       displayOrder: index
@@ -7851,13 +7932,14 @@ export default function App(): JSX.Element {
       });
 
       if (response.status === 401) {
+        setHomeStrips(previousStrips);
         resetAuthenticatedState();
         return;
       }
 
       const payload = await readJsonPayload(response);
       if (!response.ok) {
-        throw new Error(isRecord(payload) ? readString(payload.message) ?? 'Unable to reorder strips.' : 'Unable to reorder strips.');
+        throw new Error(isRecord(payload) ? readString(payload.message) ?? 'Unable to reorder home sections.' : 'Unable to reorder home sections.');
       }
 
       if (!applyHomeStripsPayload(payload)) {
@@ -7866,11 +7948,124 @@ export default function App(): JSX.Element {
     } catch (error) {
       setHomeStrips(previousStrips);
       console.warn('home-strip.reorder.failed', {
-        stripId,
-        direction,
+        ...failureContext,
         message: error instanceof Error ? error.message : String(error)
       });
     }
+  }
+
+  async function moveHomeStrip(stripId: string, direction: HomeStripMoveDirection): Promise<void> {
+    const currentIndex = homeStrips.findIndex((candidate) => candidate.id === stripId);
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= homeStrips.length) {
+      return;
+    }
+
+    const nextStrips = [...homeStrips];
+    const [movedStrip] = nextStrips.splice(currentIndex, 1);
+    nextStrips.splice(targetIndex, 0, movedStrip);
+
+    await saveHomeStripOrder(nextStrips, homeStrips, {
+      action: 'move',
+      stripId,
+      direction
+    });
+  }
+
+  async function reorderHomeStripRelative(
+    sourceStripId: string,
+    targetStripId: string,
+    position: HomeStripDropPosition
+  ): Promise<void> {
+    if (sourceStripId === targetStripId) {
+      return;
+    }
+
+    const sourceStrip = homeStrips.find((strip) => strip.id === sourceStripId);
+    if (!sourceStrip) {
+      return;
+    }
+
+    const remainingStrips = homeStrips.filter((strip) => strip.id !== sourceStripId);
+    const targetIndex = remainingStrips.findIndex((strip) => strip.id === targetStripId);
+    if (targetIndex < 0) {
+      return;
+    }
+
+    const insertionIndex = position === 'after' ? targetIndex + 1 : targetIndex;
+    const nextStrips = [...remainingStrips];
+    nextStrips.splice(insertionIndex, 0, sourceStrip);
+
+    await saveHomeStripOrder(nextStrips, homeStrips, {
+      action: 'drag-reorder',
+      sourceStripId,
+      targetStripId,
+      position
+    });
+  }
+
+  function getHomeStripDropPosition(event: ReactDragEvent<HTMLElement>): HomeStripDropPosition {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return event.clientY > bounds.top + bounds.height / 2 ? 'after' : 'before';
+  }
+
+  function clearHomeStripDragState(): void {
+    setDraggedHomeStripId(null);
+    setHomeStripDropTarget(null);
+  }
+
+  function handleHomeStripDragStart(stripId: string, event: ReactDragEvent<HTMLElement>): void {
+    if (!isFilterDrawerOpen || homeStrips.length < 2) {
+      event.preventDefault();
+      return;
+    }
+
+    setDraggedHomeStripId(stripId);
+    setHomeStripDropTarget(null);
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', stripId);
+  }
+
+  function handleHomeStripDragOver(targetStripId: string, event: ReactDragEvent<HTMLElement>): void {
+    const sourceStripId = draggedHomeStripId || event.dataTransfer.getData('text/plain');
+    if (!isFilterDrawerOpen || sourceStripId === '' || sourceStripId === targetStripId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    const position = getHomeStripDropPosition(event);
+    setHomeStripDropTarget((currentValue) =>
+      currentValue?.stripId === targetStripId && currentValue.position === position
+        ? currentValue
+        : { stripId: targetStripId, position }
+    );
+  }
+
+  function handleHomeStripDragLeave(stripId: string, event: ReactDragEvent<HTMLElement>): void {
+    const relatedTarget = event.relatedTarget;
+    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) {
+      return;
+    }
+
+    setHomeStripDropTarget((currentValue) =>
+      currentValue?.stripId === stripId ? null : currentValue
+    );
+  }
+
+  function handleHomeStripDrop(targetStripId: string, event: ReactDragEvent<HTMLElement>): void {
+    event.preventDefault();
+
+    const sourceStripId = draggedHomeStripId || event.dataTransfer.getData('text/plain');
+    const position = getHomeStripDropPosition(event);
+    clearHomeStripDragState();
+
+    if (!isFilterDrawerOpen || sourceStripId === '' || sourceStripId === targetStripId) {
+      return;
+    }
+
+    void reorderHomeStripRelative(sourceStripId, targetStripId, position);
   }
 
   function addHomeStripDraftTag(tag: CatalogTag): void {
@@ -10220,76 +10415,83 @@ export default function App(): JSX.Element {
                 </section>
 
                 <section className="home-strip-sidebar-section" aria-labelledby="home-strip-sidebar-heading">
-                  <div className="filter-section-heading">
-                    <h3 id="home-strip-sidebar-heading">Home strips</h3>
-                    <span className="tag-selected-count">{homeStrips.length}</span>
+                  <div className="filter-section-heading home-strip-sidebar-heading">
+                    <div className="home-strip-sidebar-title">
+                      <h3 id="home-strip-sidebar-heading">Home layout</h3>
+                      <span className="tag-selected-count">{homeStrips.length}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="home-strip-create-icon-button"
+                      disabled={!isFilterDrawerOpen}
+                      onClick={openCreateHomeStripFromFilters}
+                      aria-label="Save current filters to Home"
+                      title="Save current filters to Home"
+                    >
+                      <PlusIcon />
+                    </button>
                   </div>
-                  <p className="filter-section-description">
-                    Saved strips make up the default home view. Search, tags, or sort changes switch this
-                    viewport to catalog results until filters are cleared.
+                  <p className="filter-section-description home-strip-sidebar-hint">
+                    Drag to reorder. Use + to save the current search, sort, and tags.
                   </p>
-                  <button
-                    type="button"
-                    className="app-button home-strip-create-button"
-                    disabled={!isFilterDrawerOpen}
-                    onClick={openCreateHomeStripFromFilters}
-                  >
-                    Add current filter as strip
-                  </button>
 
                   {homeStrips.length > 0 ? (
-                    <div className="home-strip-sidebar-list" aria-label="Saved home strips">
-                      {homeStrips.map((strip, index) => (
-                        <article className="home-strip-sidebar-item" key={strip.id}>
-                          <div className="home-strip-sidebar-item-copy">
-                            <strong>{strip.name}</strong>
-                            <span>{getCatalogHomeStripSummary(strip, catalogTagById)}</span>
-                          </div>
-                          <div className="home-strip-sidebar-actions">
-                            <button
-                              type="button"
-                              className="home-strip-sidebar-action"
-                              disabled={!isFilterDrawerOpen || index === 0}
-                              onClick={() => void moveHomeStrip(strip.id, 'up')}
-                              aria-label={`Move ${strip.name} up`}
-                              title="Move up"
+                    <div className="home-strip-sidebar-list" role="list" aria-label="Saved home layout sections">
+                      {homeStrips.map((strip, index) => {
+                        const isDragging = draggedHomeStripId === strip.id;
+                        const isDropBefore =
+                          homeStripDropTarget?.stripId === strip.id && homeStripDropTarget.position === 'before';
+                        const isDropAfter =
+                          homeStripDropTarget?.stripId === strip.id && homeStripDropTarget.position === 'after';
+                        const canDragHomeStrip = isFilterDrawerOpen && homeStrips.length > 1;
+
+                        return (
+                          <article
+                            className={`home-strip-sidebar-item${isDragging ? ' is-dragging' : ''}${
+                              isDropBefore ? ' is-drop-before' : ''
+                            }${isDropAfter ? ' is-drop-after' : ''}`}
+                            key={strip.id}
+                            role="listitem"
+                            onDragOver={(event: ReactDragEvent<HTMLElement>) =>
+                              handleHomeStripDragOver(strip.id, event)
+                            }
+                            onDragLeave={(event: ReactDragEvent<HTMLElement>) =>
+                              handleHomeStripDragLeave(strip.id, event)
+                            }
+                            onDrop={(event: ReactDragEvent<HTMLElement>) => handleHomeStripDrop(strip.id, event)}
+                          >
+                            <span
+                              className={`home-strip-sidebar-drag-handle${canDragHomeStrip ? '' : ' is-disabled'}`}
+                              draggable={canDragHomeStrip}
+                              onDragStart={(event: ReactDragEvent<HTMLElement>) =>
+                                handleHomeStripDragStart(strip.id, event)
+                              }
+                              onDragEnd={clearHomeStripDragState}
+                              aria-label={`Drag ${strip.name} to reorder`}
+                              title="Drag to reorder"
                             >
-                              ↑
-                            </button>
-                            <button
-                              type="button"
-                              className="home-strip-sidebar-action"
-                              disabled={!isFilterDrawerOpen || index >= homeStrips.length - 1}
-                              onClick={() => void moveHomeStrip(strip.id, 'down')}
-                              aria-label={`Move ${strip.name} down`}
-                              title="Move down"
-                            >
-                              ↓
-                            </button>
-                            <button
-                              type="button"
-                              className="home-strip-sidebar-action"
+                              <GripIcon />
+                            </span>
+                            <div className="home-strip-sidebar-item-copy">
+                              <strong>{strip.name}</strong>
+                            </div>
+                            <HomeStripActionMenu
+                              strip={strip}
+                              index={index}
+                              totalCount={homeStrips.length}
                               disabled={!isFilterDrawerOpen}
-                              onClick={() => openEditHomeStrip(strip)}
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              className="home-strip-sidebar-action danger"
-                              disabled={!isFilterDrawerOpen}
-                              onClick={() => void deleteHomeStrip(strip)}
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        </article>
-                      ))}
+                              className="home-strip-sidebar-menu"
+                              onMove={(stripId, direction) => void moveHomeStrip(stripId, direction)}
+                              onEdit={openEditHomeStrip}
+                              onDelete={(candidate) => void deleteHomeStrip(candidate)}
+                            />
+                          </article>
+                        );
+                      })}
                     </div>
                   ) : (
                     <div className="empty-inline-state">
-                      No home strips yet. Configure search, sort, or tags above, then save the current
-                      filter as a strip.
+                      No home sections yet. Use + to save the current search, sort, and tags.
                     </div>
                   )}
                 </section>
@@ -10298,16 +10500,22 @@ export default function App(): JSX.Element {
           </div>
         </aside>
 
-        <section className="catalog-panel" aria-label={isHomeViewActive ? 'Home view strips' : 'Catalog results'}>
+        <section className="catalog-panel" aria-label={isHomeViewActive ? 'Home layout sections' : 'Catalog results'}>
           {isHomeViewActive ? (
             <div className="home-view">
               <div className="catalog-panel-header home-view-header">
                 <div>
                   <h2>Home</h2>
-                  <p>Saved strips are shown on normal page load. Use search, sort, or tags to browse all results.</p>
+                  <p>Saved home sections are shown on normal page load. Use search, sort, or tags to browse all results.</p>
                 </div>
-                <button type="button" className="app-button secondary" onClick={openCreateHomeStripFromFilters}>
-                  Add strip
+                <button
+                  type="button"
+                  className="home-strip-create-icon-button home-view-create-button"
+                  onClick={openCreateHomeStripFromFilters}
+                  aria-label="Create a Home section"
+                  title="Create a Home section"
+                >
+                  <PlusIcon />
                 </button>
               </div>
 
@@ -10318,7 +10526,6 @@ export default function App(): JSX.Element {
                     view={view}
                     index={index}
                     totalCount={homeStripViews.length}
-                    catalogTagById={catalogTagById}
                     onMove={(stripId, direction) => void moveHomeStrip(stripId, direction)}
                     onEdit={openEditHomeStrip}
                     onDelete={(strip) => void deleteHomeStrip(strip)}
@@ -10332,8 +10539,8 @@ export default function App(): JSX.Element {
               ) : (
                 <div className="empty-state home-view-empty">
                   {catalog.length === 0
-                    ? 'No items yet. Use Add Video to upload or import one, then create home strips from the side panel.'
-                    : 'No home strips yet. Configure search, sort, or tags in the side panel, then choose Add current filter as strip.'}
+                    ? 'No items yet. Use Add Video to upload or import one, then save home sections from the side panel.'
+                    : 'No home sections yet. Use the + button in the side panel to save the current search, sort, and tags.'}
                 </div>
               )}
             </div>
@@ -10399,7 +10606,7 @@ export default function App(): JSX.Element {
 
       {homeStripEditor && (
         <Modal
-          title={homeStripEditor.mode === 'add' ? 'Add home strip' : 'Edit home strip'}
+          title={homeStripEditor.mode === 'add' ? 'Add home section' : 'Edit home section'}
           titleId="home-strip-editor-title"
           onClose={() => {
             if (!homeStripEditor.saving) {
@@ -10415,7 +10622,7 @@ export default function App(): JSX.Element {
             onSubmit={(event: FormEvent<HTMLFormElement>) => void saveHomeStripEditor(event)}
           >
             <p className="filter-section-description">
-              Save the search, sort, and tag criteria used by this home strip. The strip appears in the
+              Save the search, sort, and tag criteria used by this home section. It appears in the
               default home view until you start browsing with active filters.
             </p>
 
@@ -10427,7 +10634,7 @@ export default function App(): JSX.Element {
 
             <div className="field-grid-two">
               <div>
-                <label htmlFor="home-strip-name">Strip name</label>
+                <label htmlFor="home-strip-name">Section title</label>
                 <input
                   id="home-strip-name"
                   type="text"
@@ -10525,7 +10732,7 @@ export default function App(): JSX.Element {
               </div>
 
               {homeStripDraftSelectedTags.length > 0 ? (
-                <div className="selected-tag-list" aria-label="Selected strip tag filters">
+                <div className="selected-tag-list" aria-label="Selected home section tag filters">
                   {homeStripDraftSelectedTags.map((tag) => (
                     <span className="selected-tag-chip" key={tag.id}>
                       <span>{tag.label}</span>
@@ -10533,7 +10740,7 @@ export default function App(): JSX.Element {
                         type="button"
                         disabled={homeStripEditor.saving}
                         onClick={() => removeHomeStripDraftTag(tag.id)}
-                        aria-label={`Remove ${tag.label} strip filter`}
+                        aria-label={`Remove ${tag.label} home section filter`}
                         title={`Remove ${tag.label}`}
                       >
                         ×
@@ -10566,7 +10773,7 @@ export default function App(): JSX.Element {
                 />
 
                 {homeStripEditor.draft.tagSearch.trim() !== '' && isHomeStripTagSearchFocused ? (
-                  <div className="tag-filter-suggestion-list" role="listbox" aria-label="Matching strip tags">
+                  <div className="tag-filter-suggestion-list" role="listbox" aria-label="Matching home section tags">
                     {visibleHomeStripTagSuggestions.length > 0 ? (
                       visibleHomeStripTagSuggestions.map((tag) => (
                         <button
@@ -10587,7 +10794,7 @@ export default function App(): JSX.Element {
                 ) : null}
               </div>
 
-              <div className="tag-options-list" role="group" aria-label="Available strip tags">
+              <div className="tag-options-list" role="group" aria-label="Available home section tags">
                 {homeStripEditorAvailableTagOptions.length > 0 ? (
                   homeStripEditorAvailableTagOptions.map((tag) => (
                     <button
@@ -10633,7 +10840,7 @@ export default function App(): JSX.Element {
                 className="app-button"
                 disabled={homeStripEditor.saving || normalizeHomeStripText(homeStripEditor.draft.name) === ''}
               >
-                {homeStripEditor.saving ? 'Saving…' : 'Save strip'}
+                {homeStripEditor.saving ? 'Saving…' : 'Save section'}
               </button>
             </div>
           </form>
