@@ -9,7 +9,7 @@ import type {
   ReactNode,
   Ref
 } from 'react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { GoogleLockScreen } from './GoogleLockScreen';
 import {
   AUTHENTICATED_BROWSER_IDENTITY,
@@ -3121,6 +3121,43 @@ function getCatalogHomeStripItems(strip: CatalogHomeStrip, items: CatalogItem[])
   );
 }
 
+const HOME_STRIP_MIN_ITEMS_PER_ROW = 1;
+const HOME_STRIP_CARD_MIN_WIDTH_FALLBACK_PX = 260;
+const HOME_STRIP_COLUMN_GAP_FALLBACK_PX = 16;
+
+function readCssPixelValue(value: string, fallbackValue: number): number {
+  const parsedValue = Number.parseFloat(value);
+  return Number.isFinite(parsedValue) ? parsedValue : fallbackValue;
+}
+
+function getHomeStripItemsPerRow(gridElement: HTMLElement): number {
+  const computedStyle = window.getComputedStyle(gridElement);
+  const horizontalPadding =
+    readCssPixelValue(computedStyle.paddingLeft, 0) + readCssPixelValue(computedStyle.paddingRight, 0);
+  const availableWidth = Math.max(0, gridElement.getBoundingClientRect().width - horizontalPadding);
+
+  if (availableWidth <= 0) {
+    return HOME_STRIP_MIN_ITEMS_PER_ROW;
+  }
+
+  const cardMinWidth = Math.max(
+    1,
+    readCssPixelValue(
+      computedStyle.getPropertyValue('--home-strip-card-min-width'),
+      HOME_STRIP_CARD_MIN_WIDTH_FALLBACK_PX
+    )
+  );
+  const columnGap = Math.max(
+    0,
+    readCssPixelValue(computedStyle.columnGap, HOME_STRIP_COLUMN_GAP_FALLBACK_PX)
+  );
+
+  return Math.max(
+    HOME_STRIP_MIN_ITEMS_PER_ROW,
+    Math.floor((availableWidth + columnGap) / (cardMinWidth + columnGap))
+  );
+}
+
 function sortCatalogItems(
   items: CatalogItem[],
   category: CatalogSortCategory,
@@ -4223,6 +4260,58 @@ function CatalogHomeStripSection({
 }: CatalogHomeStripSectionProps): JSX.Element {
   const { strip, items } = view;
   const stripTitleId = `home-strip-title-${strip.id}`;
+  const stripGridId = `home-strip-grid-${strip.id}`;
+  const gridRef = useRef<HTMLDivElement>(null);
+  const stripLayoutResetKey = [
+    strip.id,
+    strip.rowCount,
+    strip.sortCategory,
+    strip.sortDirection,
+    strip.search ?? '',
+    ...strip.tagIds
+  ].join('::');
+  const [visibleRows, setVisibleRows] = useState<number>(strip.rowCount);
+  const [itemsPerRow, setItemsPerRow] = useState<number>(HOME_STRIP_MIN_ITEMS_PER_ROW);
+
+  useLayoutEffect(() => {
+    setVisibleRows(strip.rowCount);
+  }, [strip.rowCount, stripLayoutResetKey]);
+
+  useLayoutEffect(() => {
+    const gridElement = gridRef.current;
+
+    if (!gridElement) {
+      return;
+    }
+
+    const updateItemsPerRow = (): void => {
+      const nextItemsPerRow = getHomeStripItemsPerRow(gridElement);
+      setItemsPerRow((currentValue) =>
+        currentValue === nextItemsPerRow ? currentValue : nextItemsPerRow
+      );
+    };
+
+    updateItemsPerRow();
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateItemsPerRow);
+      return () => {
+        window.removeEventListener('resize', updateItemsPerRow);
+      };
+    }
+
+    const resizeObserver = new ResizeObserver(updateItemsPerRow);
+    resizeObserver.observe(gridElement);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [items.length]);
+
+  const visibleItemCount = Math.min(items.length, visibleRows * itemsPerRow);
+  const visibleItems = items.slice(0, visibleItemCount);
+  const remainingItemCount = items.length - visibleItemCount;
+  const hasMoreItems = remainingItemCount > 0;
 
   return (
     <section className="home-strip" aria-labelledby={stripTitleId}>
@@ -4242,20 +4331,39 @@ function CatalogHomeStripSection({
       </div>
 
       {items.length > 0 ? (
-        <div className={`home-strip-grid home-strip-rows-${strip.rowCount}`}>
-          {items.map((item) => (
-            <CatalogCard
-              key={item.id}
-              item={item}
-              contextKey={strip.id}
-              onOpenViewer={onOpenViewer}
-              onOpenDetails={onOpenDetails}
-              onAddTag={onAddTag}
-              onRemoveTag={onRemoveTag}
-              onSearchTags={onSearchTags}
-            />
-          ))}
-        </div>
+        <>
+          <div id={stripGridId} className="home-strip-grid" ref={gridRef}>
+            {visibleItems.map((item) => (
+              <CatalogCard
+                key={item.id}
+                item={item}
+                contextKey={strip.id}
+                onOpenViewer={onOpenViewer}
+                onOpenDetails={onOpenDetails}
+                onAddTag={onAddTag}
+                onRemoveTag={onRemoveTag}
+                onSearchTags={onSearchTags}
+              />
+            ))}
+          </div>
+
+          {hasMoreItems ? (
+            <div className="home-strip-footer">
+              <span className="home-strip-visible-count">
+                Showing {visibleItemCount} of {items.length}
+              </span>
+              <button
+                type="button"
+                className="app-button secondary home-strip-load-more-button"
+                onClick={() => setVisibleRows((currentValue) => currentValue + 1)}
+                aria-controls={stripGridId}
+                aria-label={`Load another row for ${strip.name}`}
+              >
+                Load more
+              </button>
+            </div>
+          ) : null}
+        </>
       ) : (
         <div className="empty-state home-strip-empty">No items match this section yet.</div>
       )}
@@ -6048,7 +6156,7 @@ function ViewerOverlay({
       <div
         ref={viewerBookmarksDrawerRef}
         className={`viewer-bookmarks-drawer${isBookmarksDrawerOpen ? ' is-open' : ''}`}
-        aria-label="Saved bookmarks"
+        aria-label="Saved moments"
         aria-hidden={!isBookmarksDrawerOpen}
       >
         <div className="viewer-bookmarks-drawer-header">
@@ -10503,21 +10611,6 @@ export default function App(): JSX.Element {
         <section className="catalog-panel" aria-label={isHomeViewActive ? 'Home layout sections' : 'Catalog results'}>
           {isHomeViewActive ? (
             <div className="home-view">
-              <div className="catalog-panel-header home-view-header">
-                <div>
-                  <h2>Home</h2>
-                  <p>Saved home sections are shown on normal page load. Use search, sort, or tags to browse all results.</p>
-                </div>
-                <button
-                  type="button"
-                  className="home-strip-create-icon-button home-view-create-button"
-                  onClick={openCreateHomeStripFromFilters}
-                  aria-label="Create a Home section"
-                  title="Create a Home section"
-                >
-                  <PlusIcon />
-                </button>
-              </div>
 
               {homeStripViews.length > 0 ? (
                 homeStripViews.map((view, index) => (

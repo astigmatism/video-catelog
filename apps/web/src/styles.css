@@ -3864,6 +3864,7 @@ label {
   display: grid;
   place-items: center;
   padding: 0;
+  margin-right: 0.22rem;
   border: 1px solid rgba(96, 165, 250, 0.32);
   border-radius: 999px;
   background: rgba(37, 99, 235, 0.14);
@@ -4128,11 +4129,14 @@ label {
 
 .home-view {
   flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
+  max-width: 100%;
   display: grid;
   align-content: start;
   gap: 1rem;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding-right: 0.15rem;
 }
 
@@ -4149,11 +4153,12 @@ label {
 .home-strip {
   display: grid;
   gap: 0.72rem;
+  min-width: 0;
+  max-width: 100%;
   padding: 0.95rem;
-  border: 1px solid rgba(148, 163, 184, 0.16);
   border-radius: 18px;
   background:
-    radial-gradient(circle at 100% 0%, rgba(59, 130, 246, 0.12), transparent 34%),
+    radial-gradient(circle at 0% 0%, rgba(59, 130, 246, 0.10), transparent 34%),
     rgba(10, 18, 31, 0.72);
   box-shadow: var(--shadow-md);
 }
@@ -4162,6 +4167,7 @@ label {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  min-width: 0;
   gap: 0.75rem;
 }
 
@@ -4179,29 +4185,41 @@ label {
 }
 
 .home-strip-grid {
+  --home-strip-card-min-width: 260px;
   display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(260px, 300px);
-  grid-template-rows: repeat(1, minmax(0, auto));
-  gap: 1rem;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding: 0.15rem 0.1rem 0.45rem;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--home-strip-card-min-width)), 1fr));
   align-items: start;
-  overscroll-behavior-inline: contain;
-}
-
-.home-strip-rows-2 {
-  grid-template-rows: repeat(2, minmax(0, auto));
-}
-
-.home-strip-rows-3 {
-  grid-template-rows: repeat(3, minmax(0, auto));
+  gap: 1rem;
+  min-width: 0;
+  max-width: 100%;
+  overflow: visible;
+  padding: 0.15rem 0.1rem 0.25rem;
 }
 
 .home-strip-grid .card {
   width: 100%;
+  min-width: 284px;
+}
+
+.home-strip-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
   min-width: 0;
+  padding-top: 0.05rem;
+}
+
+.home-strip-visible-count {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.home-strip-load-more-button {
+  min-height: 2.25rem;
+  padding: 0.55rem 0.92rem;
+  border-radius: 999px;
 }
 
 .home-strip-empty,
@@ -4236,6 +4254,15 @@ label {
   }
 
   .home-strip-grid {
-    grid-auto-columns: minmax(235px, 84vw);
+    --home-strip-card-min-width: 235px;
+  }
+
+  .home-strip-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .home-strip-load-more-button {
+    width: 100%;
   }
 }
