@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS catalog_items (
   used_count bigint NOT NULL DEFAULT 0 CHECK (used_count >= 0),
   download_count bigint NOT NULL DEFAULT 0 CHECK (download_count >= 0),
   last_viewed_at timestamptz,
+  last_used_at timestamptz,
   last_downloaded_at timestamptz,
   processing_stage text,
   processing_percent double precision,
@@ -59,6 +60,9 @@ ALTER TABLE catalog_items
 
 ALTER TABLE catalog_items
   ADD COLUMN IF NOT EXISTS last_viewed_at timestamptz;
+
+ALTER TABLE catalog_items
+  ADD COLUMN IF NOT EXISTS last_used_at timestamptz;
 
 ALTER TABLE catalog_items
   ADD COLUMN IF NOT EXISTS last_downloaded_at timestamptz;
@@ -142,6 +146,7 @@ CREATE TABLE IF NOT EXISTS catalog_home_strips (
   display_order integer NOT NULL CHECK (display_order >= 0),
   row_count integer NOT NULL DEFAULT 1 CHECK (row_count IN (1, 2, 3)),
   sort_category text NOT NULL CHECK (sort_category IN (
+    'none',
     'uploadedAt',
     'name',
     'duration',
@@ -149,6 +154,8 @@ CREATE TABLE IF NOT EXISTS catalog_home_strips (
     'usedCount',
     'downloadCount',
     'lastViewedAt',
+    'lastUsedAt',
+    'lastDownloadedAt',
     'resolution',
     'random'
   )),
@@ -186,6 +193,38 @@ BEGIN
       ADD CONSTRAINT catalog_home_strips_excluded_tag_ids_is_array
       CHECK (jsonb_typeof(excluded_tag_ids) = 'array');
   END IF;
+END $$;
+
+DO $$
+DECLARE
+  sort_constraint_name text;
+BEGIN
+  FOR sort_constraint_name IN
+    SELECT conname
+    FROM pg_constraint
+    WHERE conrelid = 'catalog_home_strips'::regclass
+      AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE '%sort_category%'
+  LOOP
+    EXECUTE format('ALTER TABLE catalog_home_strips DROP CONSTRAINT %I', sort_constraint_name);
+  END LOOP;
+
+  ALTER TABLE catalog_home_strips
+    ADD CONSTRAINT catalog_home_strips_sort_category_check
+    CHECK (sort_category IN (
+      'none',
+      'uploadedAt',
+      'name',
+      'duration',
+      'viewCount',
+      'usedCount',
+      'downloadCount',
+      'lastViewedAt',
+      'lastUsedAt',
+      'lastDownloadedAt',
+      'resolution',
+      'random'
+    ));
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_catalog_home_strips_display_order

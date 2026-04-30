@@ -33,6 +33,7 @@ type AddCatalogItemInput = {
   usedCount?: number;
   downloadCount?: number;
   lastViewedAt?: string | null;
+  lastUsedAt?: string | null;
   lastDownloadedAt?: string | null;
   status?: CatalogItemStatus;
   incomingChecksumSha256?: string | null;
@@ -133,6 +134,7 @@ type CatalogItemRow = {
   used_count: number | string;
   download_count: number | string;
   last_viewed_at: Date | string | null;
+  last_used_at: Date | string | null;
   last_downloaded_at: Date | string | null;
   processing_stage: string | null;
   processing_percent: number | string | null;
@@ -240,6 +242,7 @@ const DEFAULT_TAG_AUTOCOMPLETE_LIMIT = 10;
 const DEFAULT_TOP_TAG_LIMIT = 10;
 
 const CATALOG_HOME_STRIP_SORT_CATEGORIES: CatalogHomeStripSortCategory[] = [
+  'none',
   'uploadedAt',
   'name',
   'duration',
@@ -247,6 +250,8 @@ const CATALOG_HOME_STRIP_SORT_CATEGORIES: CatalogHomeStripSortCategory[] = [
   'usedCount',
   'downloadCount',
   'lastViewedAt',
+  'lastUsedAt',
+  'lastDownloadedAt',
   'resolution',
   'random'
 ];
@@ -745,6 +750,7 @@ function cloneCatalogItem(item: CatalogItem): CatalogItem {
     usedCount: item.usedCount,
     downloadCount: item.downloadCount,
     lastViewedAt: item.lastViewedAt,
+    lastUsedAt: item.lastUsedAt,
     lastDownloadedAt: item.lastDownloadedAt,
     tags: normalizeCatalogTags(item.tags).map(cloneCatalogTag),
     processing: cloneProcessingSnapshot(item.processing)
@@ -886,6 +892,7 @@ function normalizeCatalogItem(input: CatalogItem): CatalogItem {
     usedCount: normalizeCatalogItemCounter(input.usedCount),
     downloadCount: normalizeCatalogItemCounter(input.downloadCount),
     lastViewedAt: normalizeNullableTimestamp(input.lastViewedAt),
+    lastUsedAt: normalizeNullableTimestamp(input.lastUsedAt),
     lastDownloadedAt: normalizeNullableTimestamp(input.lastDownloadedAt),
     tags: normalizeCatalogTags(input.tags),
     processing: cloneProcessingSnapshot(input.processing)
@@ -1004,6 +1011,7 @@ function buildCatalogItemFromInput(input: AddCatalogItemInput): CatalogItem {
     usedCount: input.usedCount ?? 0,
     downloadCount: input.downloadCount ?? 0,
     lastViewedAt: input.lastViewedAt ?? null,
+    lastUsedAt: input.lastUsedAt ?? null,
     lastDownloadedAt: input.lastDownloadedAt ?? null,
     tags: [],
     processing: input.processing ?? null
@@ -1109,6 +1117,7 @@ function hydrateCatalogItemFromRow(row: CatalogItemRow): CatalogItem {
     usedCount: normalizeCatalogItemCounter(row.used_count),
     downloadCount: normalizeCatalogItemCounter(row.download_count),
     lastViewedAt: normalizeNullableTimestamp(row.last_viewed_at),
+    lastUsedAt: normalizeNullableTimestamp(row.last_used_at),
     lastDownloadedAt: normalizeNullableTimestamp(row.last_downloaded_at),
     tags: [],
     processing
@@ -1883,7 +1892,8 @@ export class CatalogStore {
 
       const updatedItem = normalizeCatalogItem({
         ...currentItem,
-        usedCount: currentItem.usedCount + 1
+        usedCount: currentItem.usedCount + 1,
+        lastUsedAt: new Date().toISOString()
       });
 
       const updated = await this.updateCatalogItemRow(this.options.pool, updatedItem);
@@ -2112,6 +2122,7 @@ export class CatalogStore {
           used_count,
           download_count,
           last_viewed_at,
+          last_used_at,
           last_downloaded_at,
           processing_stage,
           processing_percent,
@@ -2228,6 +2239,7 @@ export class CatalogStore {
           used_count,
           download_count,
           last_viewed_at,
+          last_used_at,
           last_downloaded_at,
           processing_stage,
           processing_percent,
@@ -2676,6 +2688,7 @@ export class CatalogStore {
           used_count,
           download_count,
           last_viewed_at,
+          last_used_at,
           last_downloaded_at,
           processing_stage,
           processing_percent,
@@ -2685,7 +2698,7 @@ export class CatalogStore {
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-          $19::jsonb, $20::jsonb, $21, $22, $23, $24, $25, $26, $27, $28::timestamptz, $29::timestamptz, $30, $31, $32, $33::timestamptz, now()
+          $19::jsonb, $20::jsonb, $21, $22, $23, $24, $25, $26, $27, $28::timestamptz, $29::timestamptz, $30::timestamptz, $31, $32, $33, $34::timestamptz, now()
         )
       `,
       [
@@ -2717,6 +2730,7 @@ export class CatalogStore {
         item.usedCount,
         item.downloadCount,
         item.lastViewedAt,
+        item.lastUsedAt,
         item.lastDownloadedAt,
         processing.stage,
         processing.percent,
@@ -2763,11 +2777,12 @@ export class CatalogStore {
           used_count = $25,
           download_count = $26,
           last_viewed_at = $27::timestamptz,
-          last_downloaded_at = $28::timestamptz,
-          processing_stage = $29,
-          processing_percent = $30,
-          processing_message = $31,
-          processing_updated_at = $32::timestamptz,
+          last_used_at = $28::timestamptz,
+          last_downloaded_at = $29::timestamptz,
+          processing_stage = $30,
+          processing_percent = $31,
+          processing_message = $32,
+          processing_updated_at = $33::timestamptz,
           updated_at = now()
         WHERE id = $1
         RETURNING id
@@ -2800,6 +2815,7 @@ export class CatalogStore {
         item.usedCount,
         item.downloadCount,
         item.lastViewedAt,
+        item.lastUsedAt,
         item.lastDownloadedAt,
         processing.stage,
         processing.percent,

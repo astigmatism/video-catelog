@@ -158,6 +158,7 @@ type CatalogItem = {
   usedCount: number;
   downloadCount: number;
   lastViewedAt: string | null;
+  lastUsedAt: string | null;
   lastDownloadedAt: string | null;
   tags: CatalogTag[];
   processing: ProcessingSnapshot | null;
@@ -358,6 +359,7 @@ declare const __VIDEO_CATALOG_DEV_BACKEND_HTTP_ORIGIN__: string | undefined;
 declare const __VIDEO_CATALOG_DEV_BACKEND_WS_ORIGIN__: string | undefined;
 
 type CatalogSortCategory =
+  | 'none'
   | 'uploadedAt'
   | 'name'
   | 'duration'
@@ -365,6 +367,8 @@ type CatalogSortCategory =
   | 'usedCount'
   | 'downloadCount'
   | 'lastViewedAt'
+  | 'lastUsedAt'
+  | 'lastDownloadedAt'
   | 'resolution'
   | 'random';
 
@@ -620,6 +624,7 @@ const SOCKET_CONNECTION_LABELS: Record<SocketConnectionState, string> = {
 };
 
 const CATALOG_SORT_CATEGORY_LABELS: Record<CatalogSortCategory, string> = {
+  none: '',
   uploadedAt: 'Date added',
   name: 'Name',
   duration: 'Duration',
@@ -627,6 +632,8 @@ const CATALOG_SORT_CATEGORY_LABELS: Record<CatalogSortCategory, string> = {
   usedCount: 'Used count',
   downloadCount: 'Download count',
   lastViewedAt: 'Last viewed',
+  lastUsedAt: 'Last used',
+  lastDownloadedAt: 'Last downloaded',
   resolution: 'Resolution',
   random: 'Randomized'
 };
@@ -698,7 +705,7 @@ function createNextCatalogRandomSeed(currentSeed: number): number {
 function getDefaultCatalogFilters(): CatalogFilters {
   return {
     search: '',
-    sortCategory: 'uploadedAt',
+    sortCategory: 'none',
     sortDirection: 'desc',
     tagSearch: '',
     selectedTagIds: [],
@@ -2123,6 +2130,7 @@ function hydrateCatalogItem(value: unknown): CatalogItem | null {
     usedCount: normalizeCatalogItemCount(value.usedCount),
     downloadCount: normalizeCatalogItemCount(value.downloadCount),
     lastViewedAt: readString(value.lastViewedAt),
+    lastUsedAt: readString(value.lastUsedAt),
     lastDownloadedAt: readString(value.lastDownloadedAt),
     tags,
     processing: value.processing === null ? null : hydrateProcessingSnapshot(value.processing)
@@ -3140,6 +3148,20 @@ function compareCatalogSortValues(
         direction,
         direction === 'asc' ? 'first' : 'last'
       );
+    case 'lastUsedAt':
+      return compareOptionalNumbers(
+        getComparableTimestamp(left.lastUsedAt),
+        getComparableTimestamp(right.lastUsedAt),
+        direction,
+        direction === 'asc' ? 'first' : 'last'
+      );
+    case 'lastDownloadedAt':
+      return compareOptionalNumbers(
+        getComparableTimestamp(left.lastDownloadedAt),
+        getComparableTimestamp(right.lastDownloadedAt),
+        direction,
+        direction === 'asc' ? 'first' : 'last'
+      );
     case 'resolution':
       return compareOptionalNumbers(
         getComparableResolutionPixels(left),
@@ -3287,6 +3309,10 @@ function sortCatalogItems(
   randomSeed: number
 ): CatalogItem[] {
   const nextItems = [...items];
+
+  if (category === 'none') {
+    return nextItems;
+  }
 
   if (category === 'random') {
     return nextItems
@@ -7744,7 +7770,6 @@ export default function App(): JSX.Element {
   );
   const [isFilterDrawerOpen, setIsFilterDrawerOpen] = useState(true);
   const [filters, setFilters] = useState<CatalogFilters>(() => readStoredCatalogFilters());
-  const [isAdHocCatalogSortActive, setIsAdHocCatalogSortActive] = useState(false);
   const [tagFilterSuggestions, setTagFilterSuggestions] = useState<CatalogTag[]>([]);
   const [isTagFilterSearchFocused, setIsTagFilterSearchFocused] = useState(false);
   const [isTagPickerModalOpen, setIsTagPickerModalOpen] = useState(false);
@@ -7927,6 +7952,7 @@ export default function App(): JSX.Element {
         ...popularTagOptions.filter((tag) => !homeStripEditorActiveTagOptionIds.has(tag.id))
       ]
     : [];
+  const isCatalogSortActive = filters.sortCategory !== 'none';
   const isRandomSortActive = filters.sortCategory === 'random';
 
   const detailsItem = useMemo(
@@ -7939,7 +7965,7 @@ export default function App(): JSX.Element {
     filters.tagSearch.trim() !== '' ||
     filters.selectedTagIds.length > 0 ||
     filters.excludedTagIds.length > 0 ||
-    isAdHocCatalogSortActive;
+    isCatalogSortActive;
   const isHomeViewActive = !isAnyCatalogFilterActive;
   const catalogCountLabel = `${filteredCatalog.length} ${filteredCatalog.length === 1 ? 'item' : 'items'} shown`;
   const storageUsageSummary = storageUsage ? formatStorageUsageSummary(storageUsage) : null;
@@ -7948,7 +7974,6 @@ export default function App(): JSX.Element {
   function clearCatalogFilters(): void {
     setFilters(getDefaultCatalogFilters());
     setTagFilterSuggestions([]);
-    setIsAdHocCatalogSortActive(false);
   }
 
   function openTagPickerModal(): void {
@@ -8010,7 +8035,6 @@ export default function App(): JSX.Element {
   }
 
   function reshuffleCatalogSort(): void {
-    setIsAdHocCatalogSortActive(true);
     setFilters((currentValue) => ({
       ...currentValue,
       sortCategory: 'random',
@@ -8031,7 +8055,7 @@ export default function App(): JSX.Element {
     } else if (activeTagFilterCount > 1) {
       const firstTagLabel = selectedFilterTags[0]?.label ?? `Without ${excludedFilterTags[0]?.label ?? 'tag'}`;
       name = `${firstTagLabel} + ${activeTagFilterCount - 1} tags`;
-    } else if (filters.sortCategory !== 'uploadedAt' || filters.sortDirection !== 'desc') {
+    } else if (isCatalogSortActive) {
       name = `${CATALOG_SORT_CATEGORY_LABELS[filters.sortCategory]} ${
         filters.sortDirection === 'asc' ? 'Ascending' : 'Descending'
       }`;
@@ -8604,7 +8628,6 @@ export default function App(): JSX.Element {
     setPendingIngests([]);
     setRecentActivity([]);
     setFilters(getDefaultCatalogFilters());
-    setIsAdHocCatalogSortActive(false);
     setTagFilterSuggestions([]);
     setIsTagFilterSearchFocused(false);
     setHomeStripEditor(null);
@@ -10615,7 +10638,6 @@ export default function App(): JSX.Element {
                         disabled={!isFilterDrawerOpen}
                         onChange={(event: ChangeEvent<HTMLSelectElement>) => {
                           const nextSortCategory = event.target.value as CatalogSortCategory;
-                          setIsAdHocCatalogSortActive(true);
                           setFilters((currentValue) => ({
                             ...currentValue,
                             sortCategory: nextSortCategory,
@@ -10637,23 +10659,26 @@ export default function App(): JSX.Element {
                     <button
                       type="button"
                       className={`sort-direction-button${isRandomSortActive ? ' is-random-disabled' : ''}`}
-                      disabled={!isFilterDrawerOpen || isRandomSortActive}
+                      disabled={!isFilterDrawerOpen || !isCatalogSortActive || isRandomSortActive}
                       onClick={() => {
-                        setIsAdHocCatalogSortActive(true);
                         setFilters((currentValue) => ({
                           ...currentValue,
                           sortDirection: currentValue.sortDirection === 'asc' ? 'desc' : 'asc'
                         }));
                       }}
                       aria-label={
-                        isRandomSortActive
-                          ? 'Sort direction is not used while randomized sorting is active.'
-                          : `Sort order: ${filters.sortDirection === 'asc' ? 'ascending' : 'descending'}. Toggle sort direction.`
+                        !isCatalogSortActive
+                          ? 'Sort direction is not used when no sort is selected.'
+                          : isRandomSortActive
+                            ? 'Sort direction is not used while randomized sorting is active.'
+                            : `Sort order: ${filters.sortDirection === 'asc' ? 'ascending' : 'descending'}. Toggle sort direction.`
                       }
                       title={
-                        isRandomSortActive
-                          ? 'Randomized sorting ignores ascending and descending order'
-                          : `Sort ${filters.sortDirection === 'asc' ? 'ascending' : 'descending'}`
+                        !isCatalogSortActive
+                          ? 'No sort selected'
+                          : isRandomSortActive
+                            ? 'Randomized sorting ignores ascending and descending order'
+                            : `Sort ${filters.sortDirection === 'asc' ? 'ascending' : 'descending'}`
                       }
                     >
                       <span className="sort-direction-icon" aria-hidden="true">
@@ -11045,7 +11070,11 @@ export default function App(): JSX.Element {
                 <select
                   id="home-strip-sort-direction"
                   value={homeStripEditor.draft.sortDirection}
-                  disabled={homeStripEditor.saving || homeStripEditor.draft.sortCategory === 'random'}
+                  disabled={
+                    homeStripEditor.saving ||
+                    homeStripEditor.draft.sortCategory === 'none' ||
+                    homeStripEditor.draft.sortCategory === 'random'
+                  }
                   onChange={(event: ChangeEvent<HTMLSelectElement>) =>
                     updateHomeStripDraft((draft) => ({
                       ...draft,

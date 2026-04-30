@@ -103,6 +103,7 @@ export type CatalogTag = {
 export type CatalogHomeStripRowCount = 1 | 2 | 3;
 
 export type CatalogHomeStripSortCategory =
+  | 'none'
   | 'uploadedAt'
   | 'name'
   | 'duration'
@@ -110,6 +111,8 @@ export type CatalogHomeStripSortCategory =
   | 'usedCount'
   | 'downloadCount'
   | 'lastViewedAt'
+  | 'lastUsedAt'
+  | 'lastDownloadedAt'
   | 'resolution'
   | 'random';
 
@@ -158,6 +161,7 @@ export type CatalogItem = {
   usedCount: number;
   downloadCount: number;
   lastViewedAt: string | null;
+  lastUsedAt: string | null;
   lastDownloadedAt: string | null;
   tags: CatalogTag[];
   processing: ProcessingSnapshot | null;

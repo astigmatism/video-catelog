@@ -470,6 +470,7 @@ async function evaluateYtDlpPreDownloadDuplicateCheck(input: {
 
 const CATALOG_HOME_STRIP_NAME_MAX_LENGTH = 120;
 const CATALOG_HOME_STRIP_SORT_CATEGORIES: CatalogHomeStripSortCategory[] = [
+  'none',
   'uploadedAt',
   'name',
   'duration',
@@ -477,6 +478,8 @@ const CATALOG_HOME_STRIP_SORT_CATEGORIES: CatalogHomeStripSortCategory[] = [
   'usedCount',
   'downloadCount',
   'lastViewedAt',
+  'lastUsedAt',
+  'lastDownloadedAt',
   'resolution',
   'random'
 ];
