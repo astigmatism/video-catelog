@@ -3099,25 +3099,28 @@ function filterCatalogItemsByCriteria(
   });
 }
 
-function getStableHomeStripRandomSeed(strip: CatalogHomeStrip): number {
-  const key = strip.id + ':' + strip.createdAt;
-  let hash = 0x811c9dc5;
+function getCatalogHomeStripRandomSeed(strip: CatalogHomeStrip, randomSeed: number): number {
+  let hash = (randomSeed ^ 0x811c9dc5) >>> 0;
 
-  for (let index = 0; index < key.length; index += 1) {
-    hash ^= key.charCodeAt(index);
+  for (let index = 0; index < strip.id.length; index += 1) {
+    hash ^= strip.id.charCodeAt(index);
     hash = Math.imul(hash, 16777619) >>> 0;
   }
 
   return hash >>> 0;
 }
 
-function getCatalogHomeStripItems(strip: CatalogHomeStrip, items: CatalogItem[]): CatalogItem[] {
+function getCatalogHomeStripItems(
+  strip: CatalogHomeStrip,
+  items: CatalogItem[],
+  randomSeed: number
+): CatalogItem[] {
   const filteredItems = filterCatalogItemsByCriteria(items, strip.search ?? '', strip.tagIds);
   return sortCatalogItems(
     filteredItems,
     strip.sortCategory,
     strip.sortDirection,
-    getStableHomeStripRandomSeed(strip)
+    getCatalogHomeStripRandomSeed(strip, randomSeed)
   );
 }
 
@@ -3167,18 +3170,19 @@ function sortCatalogItems(
   const nextItems = [...items];
 
   if (category === 'random') {
-    nextItems.sort((left, right) => {
-      const leftValue = getSeededCatalogRandomSortValue(left, randomSeed);
-      const rightValue = getSeededCatalogRandomSortValue(right, randomSeed);
+    return nextItems
+      .map((item) => ({
+        item,
+        sortValue: getSeededCatalogRandomSortValue(item, randomSeed)
+      }))
+      .sort((left, right) => {
+        if (left.sortValue !== right.sortValue) {
+          return left.sortValue < right.sortValue ? -1 : 1;
+        }
 
-      if (leftValue !== rightValue) {
-        return leftValue < rightValue ? -1 : 1;
-      }
-
-      return compareCatalogItemsWithTieBreakers(left, right);
-    });
-
-    return nextItems;
+        return compareCatalogItemsWithTieBreakers(left.item, right.item);
+      })
+      .map(({ item }) => item);
   }
 
   nextItems.sort((left, right) => {
@@ -7586,6 +7590,7 @@ export default function App(): JSX.Element {
 
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [homeStrips, setHomeStrips] = useState<CatalogHomeStrip[]>([]);
+  const [homeStripRandomSeed, setHomeStripRandomSeed] = useState(() => createCatalogRandomSeed());
   const [draggedHomeStripId, setDraggedHomeStripId] = useState<string | null>(null);
   const [homeStripDropTarget, setHomeStripDropTarget] = useState<HomeStripDropTarget | null>(null);
   const [pendingIngests, setPendingIngests] = useState<PendingIngest[]>([]);
@@ -7659,8 +7664,12 @@ export default function App(): JSX.Element {
   ]);
 
   const homeStripViews = useMemo<CatalogHomeStripView[]>(
-    () => homeStrips.map((strip) => ({ strip, items: getCatalogHomeStripItems(strip, catalog) })),
-    [catalog, homeStrips]
+    () =>
+      homeStrips.map((strip) => ({
+        strip,
+        items: getCatalogHomeStripItems(strip, catalog, homeStripRandomSeed)
+      })),
+    [catalog, homeStripRandomSeed, homeStrips]
   );
 
   const availableTagOptions = useMemo(() => {
@@ -7900,7 +7909,7 @@ export default function App(): JSX.Element {
       return false;
     }
 
-    setHomeStrips(strips);
+    applyLoadedHomeStrips(strips);
     return true;
   }
 
@@ -8367,6 +8376,7 @@ export default function App(): JSX.Element {
     setAuthenticated(false);
     setCatalog([]);
     setHomeStrips([]);
+    setHomeStripRandomSeed(createCatalogRandomSeed());
     setPendingIngests([]);
     setRecentActivity([]);
     setFilters(getDefaultCatalogFilters());
@@ -8473,6 +8483,20 @@ export default function App(): JSX.Element {
     );
   }
 
+  function refreshHomeStripRandomSeed(): void {
+    setHomeStripRandomSeed((currentSeed) => createNextCatalogRandomSeed(currentSeed));
+  }
+
+  function applyLoadedCatalogItems(items: CatalogItem[]): void {
+    setCatalog(items);
+    refreshHomeStripRandomSeed();
+  }
+
+  function applyLoadedHomeStrips(strips: CatalogHomeStrip[]): void {
+    setHomeStrips(strips);
+    refreshHomeStripRandomSeed();
+  }
+
   function applyRuntime(data: RuntimeInfo): void {
     setIdleLockMinutes(data.config.idleLockMinutes);
     setToolAvailability(data.toolAvailability);
@@ -8482,6 +8506,7 @@ export default function App(): JSX.Element {
   function applySocketStateSnapshot(snapshot: SocketStateSnapshot): void {
     setCatalog(snapshot.catalogItems);
     setHomeStrips(snapshot.homeStrips);
+    refreshHomeStripRandomSeed();
     setPendingIngests(snapshot.pendingIngests);
     applyRuntime(snapshot.runtime);
   }
@@ -8606,7 +8631,7 @@ export default function App(): JSX.Element {
       case 'catalog:list': {
         const items = parseCatalogItemsPayload(envelope.payload);
         if (items) {
-          setCatalog(items);
+          applyLoadedCatalogItems(items);
         }
         return;
       }
@@ -8660,7 +8685,7 @@ export default function App(): JSX.Element {
           case 'homeStrips.updated': {
             const payload = parseCatalogHomeStripsPayload(envelope.data);
             if (payload) {
-              setHomeStrips(payload);
+              applyLoadedHomeStrips(payload);
             }
             return;
           }
@@ -8811,7 +8836,7 @@ export default function App(): JSX.Element {
       return;
     }
 
-    setCatalog(items);
+    applyLoadedCatalogItems(items);
   }
 
   async function loadHomeStrips(): Promise<void> {
@@ -8834,7 +8859,7 @@ export default function App(): JSX.Element {
       return;
     }
 
-    setHomeStrips(strips);
+    applyLoadedHomeStrips(strips);
   }
 
   async function fetchTagSuggestions(query: string, limit = 10): Promise<CatalogTag[]> {
@@ -10525,8 +10550,7 @@ export default function App(): JSX.Element {
                 <section className="home-strip-sidebar-section" aria-labelledby="home-strip-sidebar-heading">
                   <div className="filter-section-heading home-strip-sidebar-heading">
                     <div className="home-strip-sidebar-title">
-                      <h3 id="home-strip-sidebar-heading">Home layout</h3>
-                      <span className="tag-selected-count">{homeStrips.length}</span>
+                      <h3 id="home-strip-sidebar-heading">Quick Strips</h3>
                     </div>
                     <button
                       type="button"
@@ -10540,7 +10564,7 @@ export default function App(): JSX.Element {
                     </button>
                   </div>
                   <p className="filter-section-description home-strip-sidebar-hint">
-                    Drag to reorder. Use + to save the current search, sort, and tags.
+                    Drag to reorder. Use + to save the current search, sort, and tags to a new strip.
                   </p>
 
                   {homeStrips.length > 0 ? (
