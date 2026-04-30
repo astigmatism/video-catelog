@@ -100,6 +100,38 @@ export type CatalogTag = {
   updatedAt: string;
 };
 
+export type CatalogHomeStripRowCount = 1 | 2 | 3;
+
+export type CatalogHomeStripSortCategory =
+  | 'uploadedAt'
+  | 'name'
+  | 'duration'
+  | 'viewCount'
+  | 'usedCount'
+  | 'downloadCount'
+  | 'lastViewedAt'
+  | 'resolution'
+  | 'random';
+
+export type CatalogHomeStripSortDirection = 'asc' | 'desc';
+
+export type CatalogHomeStrip = {
+  id: string;
+  name: string;
+  displayOrder: number;
+  rowCount: CatalogHomeStripRowCount;
+  sortCategory: CatalogHomeStripSortCategory;
+  sortDirection: CatalogHomeStripSortDirection;
+  search: string | null;
+  tagIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CatalogHomeStripListPayload = {
+  strips: CatalogHomeStrip[];
+};
+
 export type CatalogItem = {
   id: string;
   originalName: string;
@@ -222,6 +254,7 @@ export type SocketStateSnapshot = {
   serverTime: string;
   catalog: CatalogQueryResult;
   pendingIngests: PendingIngestListPayload;
+  homeStrips: CatalogHomeStripListPayload;
   runtime: RuntimeStatePayload;
   subscriptions: SocketSubscriptions;
   connection: {
@@ -292,6 +325,7 @@ export type SocketCommandName =
   | 'state.sync'
   | 'catalog.query'
   | 'catalog.refresh'
+  | 'homeStrips.list'
   | 'video.get'
   | 'pendingIngests.list'
   | 'runtime.get'
@@ -335,6 +369,7 @@ export type SocketAckData =
     }
   | CatalogQueryResult
   | CatalogItem
+  | CatalogHomeStripListPayload
   | CatalogTagListPayload
   | PendingIngestListPayload
   | RuntimeStatePayload
@@ -387,6 +422,11 @@ export type SocketEventMessage =
       data: {
         id: string;
       };
+    }
+  | {
+      type: 'evt';
+      name: 'homeStrips.updated';
+      data: CatalogHomeStripListPayload;
     }
   | {
       type: 'evt';

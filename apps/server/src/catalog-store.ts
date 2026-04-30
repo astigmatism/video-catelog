@@ -3,6 +3,10 @@ import type { Pool, PoolClient } from 'pg';
 import { bootstrapCatalogStateSchema, withTransaction } from './db';
 import type {
   CatalogBookmark,
+  CatalogHomeStrip,
+  CatalogHomeStripRowCount,
+  CatalogHomeStripSortCategory,
+  CatalogHomeStripSortDirection,
   CatalogItem,
   CatalogTag,
   CatalogItemSourceType,
@@ -55,6 +59,17 @@ type CreateCatalogBookmarkInput = {
   timeSeconds: number;
   thumbnailRelativePath: string;
 };
+
+type CreateCatalogHomeStripInput = {
+  name: string;
+  rowCount: CatalogHomeStripRowCount;
+  sortCategory: CatalogHomeStripSortCategory;
+  sortDirection: CatalogHomeStripSortDirection;
+  search?: string | null;
+  tagIds?: string[];
+};
+
+type UpdateCatalogHomeStripInput = Partial<CreateCatalogHomeStripInput>;
 
 type UpdateCatalogBookmarkInput = {
   name: string | null;
@@ -137,6 +152,19 @@ type CatalogItemTagHydrationRow = CatalogTagRow & {
   catalog_item_id: string;
 };
 
+type CatalogHomeStripRow = {
+  id: string;
+  name: string;
+  display_order: number | string;
+  row_count: number | string;
+  sort_category: string;
+  sort_direction: string;
+  search_term: string | null;
+  tag_ids: unknown;
+  created_at: Date | string;
+  updated_at: Date | string;
+};
+
 type DuplicateCandidateRow = CatalogItemRow & {
   matches_name: boolean;
   matches_checksum: boolean;
@@ -202,8 +230,24 @@ const DEFAULT_VIEWER_VISUAL_ADJUSTMENTS: ViewerVisualAdjustments = {
 };
 
 const TAG_LABEL_MAX_LENGTH = 80;
+const HOME_STRIP_NAME_MAX_LENGTH = 120;
+const DEFAULT_HOME_STRIP_ROW_COUNT: CatalogHomeStripRowCount = 1;
+const DEFAULT_HOME_STRIP_SORT_CATEGORY: CatalogHomeStripSortCategory = 'uploadedAt';
+const DEFAULT_HOME_STRIP_SORT_DIRECTION: CatalogHomeStripSortDirection = 'desc';
 const DEFAULT_TAG_AUTOCOMPLETE_LIMIT = 10;
 const DEFAULT_TOP_TAG_LIMIT = 10;
+
+const CATALOG_HOME_STRIP_SORT_CATEGORIES: CatalogHomeStripSortCategory[] = [
+  'uploadedAt',
+  'name',
+  'duration',
+  'viewCount',
+  'usedCount',
+  'downloadCount',
+  'lastViewedAt',
+  'resolution',
+  'random'
+];
 
 export function normalizeVisibleName(value: string): string {
   return value
@@ -225,6 +269,78 @@ export function normalizeCatalogTagLabel(value: string): string {
 
 export function normalizeCatalogTagKey(value: string): string {
   return normalizeCatalogTagLabel(value).toLowerCase();
+}
+
+function normalizeCatalogHomeStripName(value: string | null | undefined): string {
+  const normalized = (value ?? '')
+    .normalize('NFKC')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, HOME_STRIP_NAME_MAX_LENGTH);
+
+  return normalized === '' ? 'Untitled strip' : normalized;
+}
+
+function isCatalogHomeStripSortCategory(value: string): value is CatalogHomeStripSortCategory {
+  return CATALOG_HOME_STRIP_SORT_CATEGORIES.includes(value as CatalogHomeStripSortCategory);
+}
+
+function normalizeCatalogHomeStripSortCategory(value: unknown): CatalogHomeStripSortCategory {
+  const text = readString(value);
+  return text && isCatalogHomeStripSortCategory(text) ? text : DEFAULT_HOME_STRIP_SORT_CATEGORY;
+}
+
+function normalizeCatalogHomeStripSortDirection(value: unknown): CatalogHomeStripSortDirection {
+  return value === 'asc' || value === 'desc' ? value : DEFAULT_HOME_STRIP_SORT_DIRECTION;
+}
+
+function normalizeCatalogHomeStripRowCount(value: unknown): CatalogHomeStripRowCount {
+  const parsed = readNumber(value);
+  if (parsed === 2 || parsed === 3) {
+    return parsed;
+  }
+
+  return DEFAULT_HOME_STRIP_ROW_COUNT;
+}
+
+function normalizeCatalogHomeStripSearch(value: unknown): string | null {
+  const text = readString(value);
+  if (text === null) {
+    return null;
+  }
+
+  const trimmed = text.normalize('NFKC').trim().replace(/\s+/g, ' ');
+  return trimmed === '' ? null : trimmed;
+}
+
+function normalizeCatalogHomeStripTagIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const tagIds: string[] = [];
+  for (const candidate of value) {
+    const tagId = readString(candidate);
+    if (tagId === null) {
+      continue;
+    }
+
+    const trimmedTagId = tagId.trim();
+    if (trimmedTagId !== '' && !tagIds.includes(trimmedTagId)) {
+      tagIds.push(trimmedTagId);
+    }
+  }
+
+  return tagIds;
+}
+
+function normalizeCatalogHomeStripDisplayOrder(value: unknown): number {
+  const parsed = readNumber(value);
+  if (parsed === null || parsed < 0) {
+    return 0;
+  }
+
+  return Math.floor(parsed);
 }
 
 function normalizeSourceUrl(value: string): string {
@@ -633,6 +749,21 @@ function cloneCatalogItem(item: CatalogItem): CatalogItem {
   };
 }
 
+function cloneCatalogHomeStrip(strip: CatalogHomeStrip): CatalogHomeStrip {
+  return {
+    id: strip.id,
+    name: strip.name,
+    displayOrder: strip.displayOrder,
+    rowCount: strip.rowCount,
+    sortCategory: strip.sortCategory,
+    sortDirection: strip.sortDirection,
+    search: strip.search,
+    tagIds: [...strip.tagIds],
+    createdAt: strip.createdAt,
+    updatedAt: strip.updatedAt
+  };
+}
+
 function cloneCatalogBookmark(bookmark: CatalogBookmark): CatalogBookmark {
   return {
     id: bookmark.id,
@@ -758,6 +889,24 @@ function normalizeCatalogItem(input: CatalogItem): CatalogItem {
   };
 }
 
+function normalizeCatalogHomeStrip(input: CatalogHomeStrip): CatalogHomeStrip {
+  const createdAt = normalizeNullableTimestamp(input.createdAt) ?? new Date().toISOString();
+  const updatedAt = normalizeNullableTimestamp(input.updatedAt) ?? createdAt;
+
+  return {
+    id: input.id,
+    name: normalizeCatalogHomeStripName(input.name),
+    displayOrder: normalizeCatalogHomeStripDisplayOrder(input.displayOrder),
+    rowCount: normalizeCatalogHomeStripRowCount(input.rowCount),
+    sortCategory: normalizeCatalogHomeStripSortCategory(input.sortCategory),
+    sortDirection: normalizeCatalogHomeStripSortDirection(input.sortDirection),
+    search: normalizeCatalogHomeStripSearch(input.search),
+    tagIds: normalizeCatalogHomeStripTagIds(input.tagIds),
+    createdAt,
+    updatedAt
+  };
+}
+
 function normalizeCatalogBookmark(input: CatalogBookmark): CatalogBookmark {
   return {
     id: input.id,
@@ -857,6 +1006,26 @@ function buildCatalogItemFromInput(input: AddCatalogItemInput): CatalogItem {
   });
 }
 
+function buildCatalogHomeStripFromInput(
+  input: CreateCatalogHomeStripInput,
+  displayOrder: number
+): CatalogHomeStrip {
+  const now = new Date().toISOString();
+
+  return normalizeCatalogHomeStrip({
+    id: randomUUID(),
+    name: input.name,
+    displayOrder,
+    rowCount: input.rowCount,
+    sortCategory: input.sortCategory,
+    sortDirection: input.sortDirection,
+    search: input.search ?? null,
+    tagIds: input.tagIds ?? [],
+    createdAt: now,
+    updatedAt: now
+  });
+}
+
 function buildCatalogBookmarkFromInput(input: CreateCatalogBookmarkInput): CatalogBookmark {
   const now = new Date().toISOString();
 
@@ -941,6 +1110,24 @@ function hydrateCatalogItemFromRow(row: CatalogItemRow): CatalogItem {
   });
 }
 
+function hydrateCatalogHomeStripFromRow(row: CatalogHomeStripRow): CatalogHomeStrip {
+  const createdAt = readIsoString(row.created_at) ?? new Date().toISOString();
+  const updatedAt = readIsoString(row.updated_at) ?? createdAt;
+
+  return normalizeCatalogHomeStrip({
+    id: row.id,
+    name: row.name,
+    displayOrder: normalizeCatalogHomeStripDisplayOrder(row.display_order),
+    rowCount: normalizeCatalogHomeStripRowCount(row.row_count),
+    sortCategory: normalizeCatalogHomeStripSortCategory(row.sort_category),
+    sortDirection: normalizeCatalogHomeStripSortDirection(row.sort_direction),
+    search: normalizeCatalogHomeStripSearch(row.search_term),
+    tagIds: normalizeCatalogHomeStripTagIds(row.tag_ids),
+    createdAt,
+    updatedAt
+  });
+}
+
 function hydrateCatalogBookmarkFromRow(row: CatalogBookmarkRow): CatalogBookmark {
   const createdAt = readIsoString(row.created_at) ?? new Date().toISOString();
   const updatedAt = readIsoString(row.updated_at) ?? createdAt;
@@ -994,6 +1181,7 @@ function hydratePendingIngestFromRow(row: PendingIngestRow): PendingIngest {
 export class CatalogStore {
   private readonly itemById = new Map<string, CatalogItem>();
   private readonly bookmarkById = new Map<string, CatalogBookmark>();
+  private readonly homeStripById = new Map<string, CatalogHomeStrip>();
   private readonly pendingIngestById = new Map<string, PendingIngest>();
   private readonly writeChains = new Map<string, Promise<void>>();
   private initializationPromise: Promise<void> | null = null;
@@ -1019,6 +1207,122 @@ export class CatalogStore {
     return Array.from(this.itemById.values())
       .sort((left, right) => right.uploadedAt.localeCompare(left.uploadedAt))
       .map(cloneCatalogItem);
+  }
+
+  listHomeStrips(): CatalogHomeStrip[] {
+    this.assertInitialized();
+
+    return this.getSortedHomeStrips().map(cloneCatalogHomeStrip);
+  }
+
+  async createHomeStrip(input: CreateCatalogHomeStripInput): Promise<CatalogHomeStrip> {
+    this.assertInitialized();
+
+    return this.enqueueWrite(this.getCatalogHomeStripsWriteKey(), async () => {
+      const strip = buildCatalogHomeStripFromInput(input, this.getNextHomeStripDisplayOrder());
+      await this.insertCatalogHomeStrip(this.options.pool, strip);
+      this.homeStripById.set(strip.id, strip);
+      return cloneCatalogHomeStrip(strip);
+    });
+  }
+
+  async updateHomeStrip(
+    stripId: string,
+    patch: UpdateCatalogHomeStripInput
+  ): Promise<CatalogHomeStrip | undefined> {
+    this.assertInitialized();
+
+    return this.enqueueWrite(this.getCatalogHomeStripsWriteKey(), async () => {
+      const currentStrip = this.homeStripById.get(stripId);
+      if (!currentStrip) {
+        return undefined;
+      }
+
+      const updatedStrip = normalizeCatalogHomeStrip({
+        ...currentStrip,
+        name: patch.name ?? currentStrip.name,
+        rowCount: patch.rowCount ?? currentStrip.rowCount,
+        sortCategory: patch.sortCategory ?? currentStrip.sortCategory,
+        sortDirection: patch.sortDirection ?? currentStrip.sortDirection,
+        search: patch.search !== undefined ? patch.search : currentStrip.search,
+        tagIds: patch.tagIds !== undefined ? patch.tagIds : currentStrip.tagIds,
+        updatedAt: new Date().toISOString()
+      });
+
+      const updated = await this.updateCatalogHomeStripRow(this.options.pool, updatedStrip);
+      if (!updated) {
+        this.homeStripById.delete(stripId);
+        return undefined;
+      }
+
+      this.homeStripById.set(stripId, updatedStrip);
+      return cloneCatalogHomeStrip(updatedStrip);
+    });
+  }
+
+  async deleteHomeStrip(stripId: string): Promise<CatalogHomeStrip | undefined> {
+    this.assertInitialized();
+
+    return this.enqueueWrite(this.getCatalogHomeStripsWriteKey(), async () => {
+      const currentStrip = this.homeStripById.get(stripId);
+      if (!currentStrip) {
+        return undefined;
+      }
+
+      const result = await this.options.pool.query<{ id: string }>(
+        'DELETE FROM catalog_home_strips WHERE id = $1 RETURNING id',
+        [stripId]
+      );
+
+      if (result.rowCount === 0) {
+        this.homeStripById.delete(stripId);
+        return undefined;
+      }
+
+      this.homeStripById.delete(stripId);
+      await this.compactHomeStripDisplayOrders(this.options.pool);
+      return cloneCatalogHomeStrip(currentStrip);
+    });
+  }
+
+  async reorderHomeStrips(stripIds: string[]): Promise<CatalogHomeStrip[] | undefined> {
+    this.assertInitialized();
+
+    return this.enqueueWrite(this.getCatalogHomeStripsWriteKey(), async () => {
+      const requestedIds = normalizeCatalogHomeStripTagIds(stripIds);
+      if (requestedIds.some((stripId) => !this.homeStripById.has(stripId))) {
+        return undefined;
+      }
+
+      const requestedIdSet = new Set(requestedIds);
+      const orderedStrips = [
+        ...requestedIds
+          .map((stripId) => this.homeStripById.get(stripId))
+          .filter((strip): strip is CatalogHomeStrip => strip !== undefined),
+        ...this.getSortedHomeStrips().filter((strip) => !requestedIdSet.has(strip.id))
+      ];
+
+      const now = new Date().toISOString();
+      const normalizedStrips = orderedStrips.map((strip, index) =>
+        normalizeCatalogHomeStrip({
+          ...strip,
+          displayOrder: index,
+          updatedAt: strip.displayOrder === index ? strip.updatedAt : now
+        })
+      );
+
+      await withTransaction(this.options.pool, async (client) => {
+        for (const strip of normalizedStrips) {
+          await this.updateCatalogHomeStripRow(client, strip);
+        }
+      });
+
+      for (const strip of normalizedStrips) {
+        this.homeStripById.set(strip.id, strip);
+      }
+
+      return this.listHomeStrips();
+    });
   }
 
   async searchTags(input: { search?: string | null; limit?: number | null } = {}): Promise<CatalogTag[]> {
@@ -1955,6 +2259,24 @@ export class CatalogStore {
       `
     );
 
+    const homeStripsResult = await this.options.pool.query<CatalogHomeStripRow>(
+      `
+        SELECT
+          id,
+          name,
+          display_order,
+          row_count,
+          sort_category,
+          sort_direction,
+          search_term,
+          tag_ids,
+          created_at,
+          updated_at
+        FROM catalog_home_strips
+        ORDER BY display_order ASC, created_at ASC
+      `
+    );
+
     const bookmarksResult = await this.options.pool.query<CatalogBookmarkRow>(
       `
         SELECT
@@ -1997,6 +2319,7 @@ export class CatalogStore {
 
     this.itemById.clear();
     this.bookmarkById.clear();
+    this.homeStripById.clear();
     this.pendingIngestById.clear();
 
     for (const row of itemsResult.rows) {
@@ -2009,6 +2332,11 @@ export class CatalogStore {
       if (this.itemById.has(bookmark.catalogItemId)) {
         this.bookmarkById.set(bookmark.id, bookmark);
       }
+    }
+
+    for (const row of homeStripsResult.rows) {
+      const strip = hydrateCatalogHomeStripFromRow(row);
+      this.homeStripById.set(strip.id, strip);
     }
 
     for (const row of tagResult.rows) {
@@ -2058,8 +2386,53 @@ export class CatalogStore {
     return `pending_ingest:${pendingIngestId}`;
   }
 
+  private getCatalogHomeStripsWriteKey(): string {
+    return 'catalog_home_strips';
+  }
+
   private getCatalogTagsWriteKey(): string {
     return 'catalog_tags';
+  }
+
+  private getSortedHomeStrips(): CatalogHomeStrip[] {
+    return Array.from(this.homeStripById.values()).sort((left, right) => {
+      if (left.displayOrder !== right.displayOrder) {
+        return left.displayOrder - right.displayOrder;
+      }
+
+      const createdAtComparison = left.createdAt.localeCompare(right.createdAt);
+      if (createdAtComparison !== 0) {
+        return createdAtComparison;
+      }
+
+      return left.name.localeCompare(right.name);
+    });
+  }
+
+  private getNextHomeStripDisplayOrder(): number {
+    const sortedStrips = this.getSortedHomeStrips();
+    const lastStrip = sortedStrips.at(-1);
+    return lastStrip ? lastStrip.displayOrder + 1 : 0;
+  }
+
+  private async compactHomeStripDisplayOrders(queryable: Queryable): Promise<void> {
+    const sortedStrips = this.getSortedHomeStrips();
+    const now = new Date().toISOString();
+
+    for (let index = 0; index < sortedStrips.length; index += 1) {
+      const strip = sortedStrips[index];
+      if (!strip || strip.displayOrder === index) {
+        continue;
+      }
+
+      const updatedStrip = normalizeCatalogHomeStrip({
+        ...strip,
+        displayOrder: index,
+        updatedAt: now
+      });
+      await this.updateCatalogHomeStripRow(queryable, updatedStrip);
+      this.homeStripById.set(updatedStrip.id, updatedStrip);
+    }
   }
 
   private normalizeTagLimit(value: number | null | undefined, fallback: number): number {
@@ -2155,6 +2528,73 @@ export class CatalogStore {
         this.writeChains.delete(key);
       }
     }
+  }
+
+  private async insertCatalogHomeStrip(queryable: Queryable, strip: CatalogHomeStrip): Promise<void> {
+    await queryable.query(
+      `
+        INSERT INTO catalog_home_strips (
+          id,
+          name,
+          display_order,
+          row_count,
+          sort_category,
+          sort_direction,
+          search_term,
+          tag_ids,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::timestamptz, $10::timestamptz)
+      `,
+      [
+        strip.id,
+        strip.name,
+        strip.displayOrder,
+        strip.rowCount,
+        strip.sortCategory,
+        strip.sortDirection,
+        strip.search,
+        toJsonParameter(strip.tagIds),
+        strip.createdAt,
+        strip.updatedAt
+      ]
+    );
+  }
+
+  private async updateCatalogHomeStripRow(
+    queryable: Queryable,
+    strip: CatalogHomeStrip
+  ): Promise<CatalogHomeStrip | undefined> {
+    const result = await queryable.query<{ id: string }>(
+      `
+        UPDATE catalog_home_strips
+        SET
+          name = $2,
+          display_order = $3,
+          row_count = $4,
+          sort_category = $5,
+          sort_direction = $6,
+          search_term = $7,
+          tag_ids = $8::jsonb,
+          updated_at = $9::timestamptz
+        WHERE id = $1
+        RETURNING id
+      `,
+      [
+        strip.id,
+        strip.name,
+        strip.displayOrder,
+        strip.rowCount,
+        strip.sortCategory,
+        strip.sortDirection,
+        strip.search,
+        toJsonParameter(strip.tagIds),
+        strip.updatedAt
+      ]
+    );
+
+    return result.rowCount === 0 ? undefined : strip;
   }
 
   private async insertCatalogItemBookmark(

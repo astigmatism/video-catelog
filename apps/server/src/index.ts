@@ -18,6 +18,11 @@ import { ThumbnailMemoryCache, type CachedThumbnailFile } from './thumbnail-cach
 import type {
   AuthTerminationReason,
   CatalogBookmark,
+  CatalogHomeStrip,
+  CatalogHomeStripListPayload,
+  CatalogHomeStripRowCount,
+  CatalogHomeStripSortCategory,
+  CatalogHomeStripSortDirection,
   CatalogItem,
   CatalogItemStatus,
   CatalogItemSourceType,
@@ -440,6 +445,19 @@ async function evaluateYtDlpPreDownloadDuplicateCheck(input: {
   });
 }
 
+const CATALOG_HOME_STRIP_NAME_MAX_LENGTH = 120;
+const CATALOG_HOME_STRIP_SORT_CATEGORIES: CatalogHomeStripSortCategory[] = [
+  'uploadedAt',
+  'name',
+  'duration',
+  'viewCount',
+  'usedCount',
+  'downloadCount',
+  'lastViewedAt',
+  'resolution',
+  'random'
+];
+
 function createDefaultCatalogQueryInput(): CatalogQueryInput {
   return {
     search: null,
@@ -535,6 +553,12 @@ function createPendingIngestListPayload(): PendingIngestListPayload {
   };
 }
 
+function createHomeStripListPayload(): CatalogHomeStripListPayload {
+  return {
+    strips: catalogStore.listHomeStrips()
+  };
+}
+
 function createSocketStateSnapshot(
   socketState: SessionSocketState,
   catalogQuery: CatalogQueryInput = createDefaultCatalogQueryInput()
@@ -543,6 +567,7 @@ function createSocketStateSnapshot(
     serverTime: new Date().toISOString(),
     catalog: queryCatalog(catalogQuery),
     pendingIngests: createPendingIngestListPayload(),
+    homeStrips: createHomeStripListPayload(),
     runtime: createRuntimeStatePayload(),
     subscriptions: {
       ...socketState.subscriptions
@@ -1092,6 +1117,14 @@ function broadcastCatalogItemDeleted(itemId: string, _sessionId?: string | null)
       op: 'delete',
       itemId
     }
+  });
+}
+
+function broadcastHomeStripsUpdated(_sessionId?: string | null): void {
+  broadcastSocketMessage({
+    type: 'evt',
+    name: 'homeStrips.updated',
+    data: createHomeStripListPayload()
   });
 }
 
@@ -3838,6 +3871,124 @@ function parseCatalogQueryPayload(payload: unknown): CatalogQueryInput | null {
   };
 }
 
+function isCatalogHomeStripSortCategory(value: string): value is CatalogHomeStripSortCategory {
+  return CATALOG_HOME_STRIP_SORT_CATEGORIES.includes(value as CatalogHomeStripSortCategory);
+}
+
+function isCatalogHomeStripRowCount(value: number): value is CatalogHomeStripRowCount {
+  return value === 1 || value === 2 || value === 3;
+}
+
+function normalizeCatalogHomeStripNameValue(value: string): string {
+  return value
+    .normalize('NFKC')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, CATALOG_HOME_STRIP_NAME_MAX_LENGTH);
+}
+
+function normalizeCatalogHomeStripSearchValue(value: string | null): string | null {
+  if (value === null) {
+    return null;
+  }
+
+  const normalized = value.normalize('NFKC').trim().replace(/\s+/g, ' ');
+  return normalized === '' ? null : normalized;
+}
+
+function parseCatalogHomeStripTagIds(value: unknown): string[] | null {
+  if (value === undefined || value === null) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const tagIds: string[] = [];
+  for (const candidate of value) {
+    const tagId = readString(candidate);
+    if (tagId === null) {
+      return null;
+    }
+
+    const trimmedTagId = tagId.trim();
+    if (trimmedTagId !== '' && !tagIds.includes(trimmedTagId)) {
+      tagIds.push(trimmedTagId);
+    }
+  }
+
+  return tagIds;
+}
+
+type ParsedCatalogHomeStripBody = {
+  name: string;
+  rowCount: CatalogHomeStripRowCount;
+  sortCategory: CatalogHomeStripSortCategory;
+  sortDirection: CatalogHomeStripSortDirection;
+  search: string | null;
+  tagIds: string[];
+};
+
+function parseCatalogHomeStripBody(body: unknown): ParsedCatalogHomeStripBody | null {
+  if (!isRecord(body)) {
+    return null;
+  }
+
+  const nameValue = readString(body.name);
+  const rowCountValue = readNumber(body.rowCount);
+  const sortCategoryValue = readString(body.sortCategory);
+  const sortDirectionValue = readString(body.sortDirection);
+  const searchValue = body.search === undefined || body.search === null ? null : readString(body.search);
+  const tagIds = parseCatalogHomeStripTagIds(body.tagIds);
+
+  if (
+    nameValue === null ||
+    rowCountValue === null ||
+    !isCatalogHomeStripRowCount(rowCountValue) ||
+    !sortCategoryValue ||
+    !isCatalogHomeStripSortCategory(sortCategoryValue) ||
+    (sortDirectionValue !== 'asc' && sortDirectionValue !== 'desc') ||
+    searchValue === undefined ||
+    tagIds === null
+  ) {
+    return null;
+  }
+
+  const name = normalizeCatalogHomeStripNameValue(nameValue);
+  if (name === '') {
+    return null;
+  }
+
+  return {
+    name,
+    rowCount: rowCountValue,
+    sortCategory: sortCategoryValue,
+    sortDirection: sortDirectionValue,
+    search: normalizeCatalogHomeStripSearchValue(searchValue),
+    tagIds
+  };
+}
+
+function parseCatalogHomeStripIdParam(request: FastifyRequest): string | null {
+  const params: Record<string, unknown> = isRecord(request.params) ? request.params : {};
+  const stripId = readString(params.id);
+  return stripId ? stripId.trim() || null : null;
+}
+
+function parseCatalogHomeStripReorderBody(body: unknown): { stripIds: string[] } | null {
+  if (!isRecord(body)) {
+    return null;
+  }
+
+  const stripIds = parseCatalogHomeStripTagIds(body.stripIds);
+  if (stripIds === null) {
+    return null;
+  }
+
+  return { stripIds };
+}
+
 function parseCatalogTagRequestBody(body: unknown): { label: string } | null {
   if (!isRecord(body)) {
     return null;
@@ -5935,6 +6086,134 @@ app.get('/api/catalog', async (request: FastifyRequest, reply: FastifyReply) => 
   });
 });
 
+app.get('/api/home-strips', async (request: FastifyRequest, reply: FastifyReply) => {
+  if (!isAuthenticated(request)) {
+    reply.code(401).send({ authenticated: false });
+    return;
+  }
+
+  reply.send({
+    ok: true,
+    ...createHomeStripListPayload()
+  });
+});
+
+app.post('/api/home-strips', async (request: FastifyRequest, reply: FastifyReply) => {
+  const sessionId = getAuthenticatedSessionId(request, reply);
+  if (!sessionId) {
+    return;
+  }
+
+  const body = parseCatalogHomeStripBody(request.body);
+  if (!body) {
+    reply.code(400).send({
+      ok: false,
+      message: 'Provide a strip name, row count, sort, direction, optional search, and optional tag ids.'
+    });
+    return;
+  }
+
+  const strip = await catalogStore.createHomeStrip(body);
+  broadcastHomeStripsUpdated(sessionId);
+  reply.code(201).send({
+    ok: true,
+    strip,
+    ...createHomeStripListPayload()
+  });
+});
+
+app.put('/api/home-strips/reorder', async (request: FastifyRequest, reply: FastifyReply) => {
+  const sessionId = getAuthenticatedSessionId(request, reply);
+  if (!sessionId) {
+    return;
+  }
+
+  const body = parseCatalogHomeStripReorderBody(request.body);
+  if (!body) {
+    reply.code(400).send({
+      ok: false,
+      message: 'Provide an ordered stripIds array.'
+    });
+    return;
+  }
+
+  const strips = await catalogStore.reorderHomeStrips(body.stripIds);
+  if (!strips) {
+    reply.code(400).send({
+      ok: false,
+      message: 'One or more strip ids do not exist.'
+    });
+    return;
+  }
+
+  broadcastHomeStripsUpdated(sessionId);
+  reply.send({
+    ok: true,
+    strips
+  });
+});
+
+app.patch('/api/home-strips/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+  const sessionId = getAuthenticatedSessionId(request, reply);
+  if (!sessionId) {
+    return;
+  }
+
+  const stripId = parseCatalogHomeStripIdParam(request);
+  if (!stripId) {
+    reply.code(400).send({ ok: false, message: 'A strip id is required.' });
+    return;
+  }
+
+  const body = parseCatalogHomeStripBody(request.body);
+  if (!body) {
+    reply.code(400).send({
+      ok: false,
+      message: 'Provide a strip name, row count, sort, direction, optional search, and optional tag ids.'
+    });
+    return;
+  }
+
+  const strip = await catalogStore.updateHomeStrip(stripId, body);
+  if (!strip) {
+    reply.code(404).send({ ok: false, message: 'Home strip not found.' });
+    return;
+  }
+
+  broadcastHomeStripsUpdated(sessionId);
+  reply.send({
+    ok: true,
+    strip,
+    ...createHomeStripListPayload()
+  });
+});
+
+app.delete('/api/home-strips/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+  const sessionId = getAuthenticatedSessionId(request, reply);
+  if (!sessionId) {
+    return;
+  }
+
+  const stripId = parseCatalogHomeStripIdParam(request);
+  if (!stripId) {
+    reply.code(400).send({ ok: false, message: 'A strip id is required.' });
+    return;
+  }
+
+  const strip = await catalogStore.deleteHomeStrip(stripId);
+  if (!strip) {
+    reply.code(404).send({ ok: false, message: 'Home strip not found.' });
+    return;
+  }
+
+  broadcastHomeStripsUpdated(sessionId);
+  reply.send({
+    ok: true,
+    strip,
+    ...createHomeStripListPayload()
+  });
+});
+
 app.patch('/api/catalog/:id', async (request: FastifyRequest, reply: FastifyReply) => {
   const sessionId = getAuthenticatedSessionId(request, reply);
   if (!sessionId) {
@@ -6765,6 +7044,9 @@ async function handleStructuredSocketCommand(
     }
     case 'catalog.refresh':
       sendSocketAckSuccess(socketState, command.id, queryCatalog(createDefaultCatalogQueryInput()));
+      return;
+    case 'homeStrips.list':
+      sendSocketAckSuccess(socketState, command.id, createHomeStripListPayload());
       return;
     case 'video.get': {
       const payload = parseVideoGetPayload(command.payload);
