@@ -2143,6 +2143,10 @@ function assertObservedFfmpegDurationCompletion(input: {
   }
 }
 
+function getFfmpegProgressOutTimeSeconds(snapshot: FfmpegProgressState | null): number | null {
+  return snapshot?.outTimeSeconds ?? null;
+}
+
 function isMp4FamilyContainer(containerFormat: string | null): boolean {
   if (!containerFormat) {
     return false;
@@ -2861,7 +2865,7 @@ async function validateRetainedMediaCandidate(input: {
       candidateLabel: input.candidateLabel,
       candidateSizeBytes: candidateStats.size,
       durationSeconds: candidateProbe.durationSeconds,
-      finalOutTimeSeconds: lastProgressSnapshot?.outTimeSeconds ?? null
+      finalOutTimeSeconds: getFfmpegProgressOutTimeSeconds(lastProgressSnapshot)
     }
   );
 
