@@ -464,6 +464,7 @@ function createDefaultCatalogQueryInput(): CatalogQueryInput {
     sourceType: null,
     status: null,
     tagIds: [],
+    excludedTagIds: [],
     sort: 'newest'
   };
 }
@@ -477,6 +478,9 @@ function queryCatalog(input: CatalogQueryInput = createDefaultCatalogQueryInput(
   const selectedTagIds = Array.from(
     new Set(input.tagIds.map((tagId) => tagId.trim()).filter((tagId) => tagId !== ''))
   );
+  const excludedTagIds = Array.from(
+    new Set((input.excludedTagIds ?? []).map((tagId) => tagId.trim()).filter((tagId) => tagId !== ''))
+  );
 
   const filtered = catalogStore.list().filter((item) => {
     if (input.sourceType && item.sourceType !== input.sourceType) {
@@ -487,9 +491,13 @@ function queryCatalog(input: CatalogQueryInput = createDefaultCatalogQueryInput(
       return false;
     }
 
-    if (selectedTagIds.length > 0) {
+    if (selectedTagIds.length > 0 || excludedTagIds.length > 0) {
       const itemTagIds = new Set(item.tags.map((tag) => tag.id));
       if (!selectedTagIds.every((tagId) => itemTagIds.has(tagId))) {
+        return false;
+      }
+
+      if (excludedTagIds.some((tagId) => itemTagIds.has(tagId))) {
         return false;
       }
     }
@@ -540,6 +548,7 @@ function queryCatalog(input: CatalogQueryInput = createDefaultCatalogQueryInput(
       sourceType: input.sourceType ?? null,
       status: input.status ?? null,
       tagIds: selectedTagIds,
+      excludedTagIds,
       sort: input.sort
     }
   };
@@ -3820,6 +3829,8 @@ function parseCatalogQueryPayload(payload: unknown): CatalogQueryInput | null {
   const statusValue = payload.status === undefined || payload.status === null ? null : readString(payload.status);
   const sortValue = payload.sort === undefined || payload.sort === null ? 'newest' : readString(payload.sort);
   const tagIdsValue = payload.tagIds === undefined || payload.tagIds === null ? [] : payload.tagIds;
+  const excludedTagIdsValue =
+    payload.excludedTagIds === undefined || payload.excludedTagIds === null ? [] : payload.excludedTagIds;
 
   if (payload.search !== undefined && payload.search !== null && searchValue === null) {
     return null;
@@ -3845,7 +3856,7 @@ function parseCatalogQueryPayload(payload: unknown): CatalogQueryInput | null {
     return null;
   }
 
-  if (!Array.isArray(tagIdsValue)) {
+  if (!Array.isArray(tagIdsValue) || !Array.isArray(excludedTagIdsValue)) {
     return null;
   }
 
@@ -3862,11 +3873,25 @@ function parseCatalogQueryPayload(payload: unknown): CatalogQueryInput | null {
     }
   }
 
+  const excludedTagIds: string[] = [];
+  for (const tagIdValue of excludedTagIdsValue) {
+    const tagId = readString(tagIdValue);
+    if (tagId === null) {
+      return null;
+    }
+
+    const trimmedTagId = tagId.trim();
+    if (trimmedTagId !== '' && !excludedTagIds.includes(trimmedTagId)) {
+      excludedTagIds.push(trimmedTagId);
+    }
+  }
+
   return {
     search: searchValue ? searchValue.trim() || null : null,
     sourceType: sourceTypeValue as CatalogItemSourceType | null,
     status: statusValue as CatalogItemStatus | null,
     tagIds,
+    excludedTagIds,
     sort: sortValue
   };
 }
@@ -3928,6 +3953,7 @@ type ParsedCatalogHomeStripBody = {
   sortDirection: CatalogHomeStripSortDirection;
   search: string | null;
   tagIds: string[];
+  excludedTagIds: string[];
 };
 
 function parseCatalogHomeStripBody(body: unknown): ParsedCatalogHomeStripBody | null {
@@ -3941,6 +3967,7 @@ function parseCatalogHomeStripBody(body: unknown): ParsedCatalogHomeStripBody | 
   const sortDirectionValue = readString(body.sortDirection);
   const searchValue = body.search === undefined || body.search === null ? null : readString(body.search);
   const tagIds = parseCatalogHomeStripTagIds(body.tagIds);
+  const excludedTagIds = parseCatalogHomeStripTagIds(body.excludedTagIds);
 
   if (
     nameValue === null ||
@@ -3950,7 +3977,8 @@ function parseCatalogHomeStripBody(body: unknown): ParsedCatalogHomeStripBody | 
     !isCatalogHomeStripSortCategory(sortCategoryValue) ||
     (sortDirectionValue !== 'asc' && sortDirectionValue !== 'desc') ||
     searchValue === undefined ||
-    tagIds === null
+    tagIds === null ||
+    excludedTagIds === null
   ) {
     return null;
   }
@@ -3966,7 +3994,8 @@ function parseCatalogHomeStripBody(body: unknown): ParsedCatalogHomeStripBody | 
     sortCategory: sortCategoryValue,
     sortDirection: sortDirectionValue,
     search: normalizeCatalogHomeStripSearchValue(searchValue),
-    tagIds
+    tagIds,
+    excludedTagIds
   };
 }
 
@@ -6108,7 +6137,7 @@ app.post('/api/home-strips', async (request: FastifyRequest, reply: FastifyReply
   if (!body) {
     reply.code(400).send({
       ok: false,
-      message: 'Provide a strip name, row count, sort, direction, optional search, and optional tag ids.'
+      message: 'Provide a strip name, row count, sort, direction, optional search, and optional include/exclude tag ids.'
     });
     return;
   }
@@ -6169,7 +6198,7 @@ app.patch('/api/home-strips/:id', async (request: FastifyRequest, reply: Fastify
   if (!body) {
     reply.code(400).send({
       ok: false,
-      message: 'Provide a strip name, row count, sort, direction, optional search, and optional tag ids.'
+      message: 'Provide a strip name, row count, sort, direction, optional search, and optional include/exclude tag ids.'
     });
     return;
   }

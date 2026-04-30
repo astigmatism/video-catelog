@@ -124,6 +124,7 @@ export type CatalogHomeStrip = {
   sortDirection: CatalogHomeStripSortDirection;
   search: string | null;
   tagIds: string[];
+  excludedTagIds: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -228,6 +229,7 @@ export type CatalogQueryInput = {
   sourceType: CatalogItemSourceType | null;
   status: CatalogItemStatus | null;
   tagIds: string[];
+  excludedTagIds: string[];
   sort: CatalogQuerySort;
 };
 

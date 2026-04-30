@@ -67,6 +67,7 @@ type CreateCatalogHomeStripInput = {
   sortDirection: CatalogHomeStripSortDirection;
   search?: string | null;
   tagIds?: string[];
+  excludedTagIds?: string[];
 };
 
 type UpdateCatalogHomeStripInput = Partial<CreateCatalogHomeStripInput>;
@@ -161,6 +162,7 @@ type CatalogHomeStripRow = {
   sort_direction: string;
   search_term: string | null;
   tag_ids: unknown;
+  excluded_tag_ids: unknown;
   created_at: Date | string;
   updated_at: Date | string;
 };
@@ -759,6 +761,7 @@ function cloneCatalogHomeStrip(strip: CatalogHomeStrip): CatalogHomeStrip {
     sortDirection: strip.sortDirection,
     search: strip.search,
     tagIds: [...strip.tagIds],
+    excludedTagIds: [...strip.excludedTagIds],
     createdAt: strip.createdAt,
     updatedAt: strip.updatedAt
   };
@@ -902,6 +905,7 @@ function normalizeCatalogHomeStrip(input: CatalogHomeStrip): CatalogHomeStrip {
     sortDirection: normalizeCatalogHomeStripSortDirection(input.sortDirection),
     search: normalizeCatalogHomeStripSearch(input.search),
     tagIds: normalizeCatalogHomeStripTagIds(input.tagIds),
+    excludedTagIds: normalizeCatalogHomeStripTagIds(input.excludedTagIds),
     createdAt,
     updatedAt
   };
@@ -1021,6 +1025,7 @@ function buildCatalogHomeStripFromInput(
     sortDirection: input.sortDirection,
     search: input.search ?? null,
     tagIds: input.tagIds ?? [],
+    excludedTagIds: input.excludedTagIds ?? [],
     createdAt: now,
     updatedAt: now
   });
@@ -1123,6 +1128,7 @@ function hydrateCatalogHomeStripFromRow(row: CatalogHomeStripRow): CatalogHomeSt
     sortDirection: normalizeCatalogHomeStripSortDirection(row.sort_direction),
     search: normalizeCatalogHomeStripSearch(row.search_term),
     tagIds: normalizeCatalogHomeStripTagIds(row.tag_ids),
+    excludedTagIds: normalizeCatalogHomeStripTagIds(row.excluded_tag_ids),
     createdAt,
     updatedAt
   });
@@ -1246,6 +1252,8 @@ export class CatalogStore {
         sortDirection: patch.sortDirection ?? currentStrip.sortDirection,
         search: patch.search !== undefined ? patch.search : currentStrip.search,
         tagIds: patch.tagIds !== undefined ? patch.tagIds : currentStrip.tagIds,
+        excludedTagIds:
+          patch.excludedTagIds !== undefined ? patch.excludedTagIds : currentStrip.excludedTagIds,
         updatedAt: new Date().toISOString()
       });
 
@@ -2270,6 +2278,7 @@ export class CatalogStore {
           sort_direction,
           search_term,
           tag_ids,
+          excluded_tag_ids,
           created_at,
           updated_at
         FROM catalog_home_strips
@@ -2542,10 +2551,11 @@ export class CatalogStore {
           sort_direction,
           search_term,
           tag_ids,
+          excluded_tag_ids,
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::timestamptz, $10::timestamptz)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::timestamptz, $11::timestamptz)
       `,
       [
         strip.id,
@@ -2556,6 +2566,7 @@ export class CatalogStore {
         strip.sortDirection,
         strip.search,
         toJsonParameter(strip.tagIds),
+        toJsonParameter(strip.excludedTagIds),
         strip.createdAt,
         strip.updatedAt
       ]
@@ -2577,7 +2588,8 @@ export class CatalogStore {
           sort_direction = $6,
           search_term = $7,
           tag_ids = $8::jsonb,
-          updated_at = $9::timestamptz
+          excluded_tag_ids = $9::jsonb,
+          updated_at = $10::timestamptz
         WHERE id = $1
         RETURNING id
       `,
@@ -2590,6 +2602,7 @@ export class CatalogStore {
         strip.sortDirection,
         strip.search,
         toJsonParameter(strip.tagIds),
+        toJsonParameter(strip.excludedTagIds),
         strip.updatedAt
       ]
     );
