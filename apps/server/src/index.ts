@@ -2143,10 +2143,6 @@ function assertObservedFfmpegDurationCompletion(input: {
   }
 }
 
-function getFfmpegProgressOutTimeSeconds(snapshot: FfmpegProgressState | null): number | null {
-  return snapshot?.outTimeSeconds ?? null;
-}
-
 function isMp4FamilyContainer(containerFormat: string | null): boolean {
   if (!containerFormat) {
     return false;
@@ -2781,8 +2777,13 @@ async function validateRetainedMediaCandidate(input: {
     }
   );
 
-  let lastProgressSnapshot: FfmpegProgressState | null = null;
-  let lastProgressStatus: string | null = null;
+  const validationProgress: {
+    snapshot: FfmpegProgressState | null;
+    status: string | null;
+  } = {
+    snapshot: null,
+    status: null
+  };
   const progressHandler = createFfmpegProgressLineHandler({
     itemId: workingItem.id,
     stage: 'finalizing',
@@ -2790,8 +2791,8 @@ async function validateRetainedMediaCandidate(input: {
     durationSeconds: candidateProbe.durationSeconds,
     sessionId: input.sessionId,
     onSnapshot: (snapshot, progressStatus) => {
-      lastProgressSnapshot = snapshot;
-      lastProgressStatus = progressStatus;
+      validationProgress.snapshot = snapshot;
+      validationProgress.status = progressStatus;
     }
   });
 
@@ -2835,8 +2836,8 @@ async function validateRetainedMediaCandidate(input: {
   assertObservedFfmpegDurationCompletion({
     commandLabel: 'ffmpeg retained media validation',
     expectedDurationSeconds: candidateProbe.durationSeconds,
-    snapshot: lastProgressSnapshot,
-    progressStatus: lastProgressStatus,
+    snapshot: validationProgress.snapshot,
+    progressStatus: validationProgress.status,
     logContext: getCatalogItemLogContext(workingItem, input.sessionId),
     requireObservedProgress: true,
     details: {
@@ -2865,7 +2866,7 @@ async function validateRetainedMediaCandidate(input: {
       candidateLabel: input.candidateLabel,
       candidateSizeBytes: candidateStats.size,
       durationSeconds: candidateProbe.durationSeconds,
-      finalOutTimeSeconds: getFfmpegProgressOutTimeSeconds(lastProgressSnapshot)
+      finalOutTimeSeconds: validationProgress.snapshot?.outTimeSeconds ?? null
     }
   );
 
