@@ -4185,7 +4185,7 @@ label {
 }
 
 .home-strip-grid {
-  --home-strip-card-min-width: 260px;
+  --home-strip-card-min-width: 284px;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--home-strip-card-min-width)), 1fr));
   align-items: start;
