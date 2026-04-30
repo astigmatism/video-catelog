@@ -105,7 +105,9 @@ a:focus-visible,
 .details-action-button:focus-visible,
 .details-delete-button:focus-visible,
 .sort-direction-button:focus-visible,
-.randomize-sort-button:focus-visible {
+.tag-filter-picker-button:focus-visible,
+.randomize-sort-button:focus-visible,
+.tag-picker-pill:focus-visible {
   outline: 2px solid #60a5fa;
   outline-offset: 2px;
 }
@@ -712,7 +714,7 @@ label {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(284px, 1fr));
   align-content: start;
   gap: 1rem;
   overflow: auto;
@@ -3730,7 +3732,8 @@ label {
 
 .tag-management-current-list .empty-inline-state,
 .tag-filter-suggestion-list .empty-inline-state,
-.tag-options-list .empty-inline-state {
+.tag-options-list .empty-inline-state,
+.tag-picker-cloud .empty-inline-state {
   width: 100%;
   padding: 0.55rem 0.35rem;
   font-size: 0.82rem;
@@ -3785,6 +3788,38 @@ label {
 
 .tag-filter-input-wrap {
   position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.tag-filter-picker-button {
+  min-width: 3rem;
+  height: 2.45rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.9);
+  color: #dbeafe;
+  font-size: 0.84rem;
+  font-weight: 800;
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease,
+    transform 0.18s ease;
+}
+
+.tag-filter-picker-button:hover:not(:disabled) {
+  border-color: rgba(96, 165, 250, 0.46);
+  background: rgba(59, 130, 246, 0.14);
+  transform: translateY(-1px);
+}
+
+.tag-filter-picker-button:disabled {
+  transform: none;
 }
 
 .tag-filter-suggestion-list {
@@ -3896,6 +3931,67 @@ label {
 .tag-filter-suggestion-pill {
   min-height: 1.85rem;
   font-size: 0.8rem;
+}
+
+.tag-picker-panel {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.tag-picker-description {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.tag-picker-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(11rem, auto);
+  align-items: end;
+  gap: 0.75rem;
+}
+
+.tag-picker-search-field,
+.tag-picker-sort-field {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.tag-picker-sort-field select {
+  height: 2.45rem;
+}
+
+.tag-picker-cloud-status {
+  margin: -0.28rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.tag-picker-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.45rem;
+  max-height: min(54vh, 32rem);
+  overflow: auto;
+  padding: 0.55rem;
+}
+
+.tag-picker-pill {
+  min-height: 2rem;
+}
+
+.tag-picker-pill .tag-usage-count {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 640px) {
+  .tag-picker-controls {
+    grid-template-columns: 1fr;
+  }
 }
 
 .home-strip-sidebar-section {

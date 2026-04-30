@@ -843,14 +843,14 @@ const CATALOG_ITEM_PIPELINE_PERCENT_RANGES: Record<
 > = {
   upload: {
     queued: { start: 3, end: 8 },
-    ffprobe: { start: 10, end: 22 },
-    duplicate_validation_final: { start: 22, end: 28 },
-    retention_decision: { start: 28, end: 36 },
-    remuxing: { start: 36, end: 70 },
-    transcoding: { start: 36, end: 76 },
-    poster_thumbnail: { start: 78, end: 84 },
-    hover_thumbnails: { start: 84, end: 96 },
-    finalizing: { start: 96, end: 99 },
+    ffprobe: { start: 10, end: 20 },
+    duplicate_validation_final: { start: 20, end: 26 },
+    retention_decision: { start: 26, end: 34 },
+    remuxing: { start: 34, end: 60 },
+    transcoding: { start: 34, end: 74 },
+    poster_thumbnail: { start: 82, end: 87 },
+    hover_thumbnails: { start: 87, end: 97 },
+    finalizing: { start: 97, end: 99 },
     cleanup: { start: 99, end: 100 },
     completed: { start: 100, end: 100 }
   },
@@ -860,8 +860,8 @@ const CATALOG_ITEM_PIPELINE_PERCENT_RANGES: Record<
     source_download_complete: { start: 40, end: 43 },
     ffprobe: { start: 43, end: 52 },
     retention_decision: { start: 52, end: 60 },
-    remuxing: { start: 60, end: 78 },
-    transcoding: { start: 60, end: 82 },
+    remuxing: { start: 60, end: 72 },
+    transcoding: { start: 60, end: 78 },
     poster_thumbnail: { start: 84, end: 89 },
     hover_thumbnails: { start: 89, end: 97 },
     finalizing: { start: 97, end: 99 },
@@ -869,6 +869,29 @@ const CATALOG_ITEM_PIPELINE_PERCENT_RANGES: Record<
     completed: { start: 100, end: 100 }
   }
 };
+
+const CATALOG_ITEM_RETENTION_VALIDATION_PERCENT_RANGES: Record<
+  CatalogItemSourceType,
+  Record<RetentionDecision, PipelinePercentRange>
+> = {
+  upload: {
+    keep: { start: 34, end: 82 },
+    remux: { start: 60, end: 82 },
+    transcode: { start: 74, end: 82 }
+  },
+  yt_dlp: {
+    keep: { start: 60, end: 84 },
+    remux: { start: 72, end: 84 },
+    transcode: { start: 78, end: 84 }
+  }
+};
+
+function getRetentionValidationPipelinePercentRange(
+  sourceType: CatalogItemSourceType,
+  decision: RetentionDecision
+): PipelinePercentRange {
+  return CATALOG_ITEM_RETENTION_VALIDATION_PERCENT_RANGES[sourceType][decision];
+}
 
 function interpolatePipelinePercent(
   range: PipelinePercentRange,
@@ -885,13 +908,14 @@ function interpolatePipelinePercent(
 function getCatalogItemPipelinePercent(
   sourceType: CatalogItemSourceType,
   stage: ProcessingSnapshot['stage'],
-  stagePercent: number | null
+  stagePercent: number | null,
+  percentRangeOverride?: PipelinePercentRange
 ): number | null {
   if (stage === 'failed') {
     return null;
   }
 
-  const range = CATALOG_ITEM_PIPELINE_PERCENT_RANGES[sourceType][stage];
+  const range = percentRangeOverride ?? CATALOG_ITEM_PIPELINE_PERCENT_RANGES[sourceType][stage];
   if (!range) {
     return stagePercent;
   }
@@ -903,12 +927,13 @@ function createCatalogItemProcessingSnapshotForSource(
   sourceType: CatalogItemSourceType,
   stage: ProcessingSnapshot['stage'],
   message: string,
-  stagePercent: number | null
+  stagePercent: number | null,
+  percentRangeOverride?: PipelinePercentRange
 ): ProcessingSnapshot {
   return createProcessingSnapshot(
     stage,
     message,
-    getCatalogItemPipelinePercent(sourceType, stage, stagePercent)
+    getCatalogItemPipelinePercent(sourceType, stage, stagePercent, percentRangeOverride)
   );
 }
 
@@ -2301,6 +2326,7 @@ function createFfmpegProgressLineHandler(input: {
   progressLabel: string;
   durationSeconds: number | null;
   sessionId?: string | null;
+  percentRangeOverride?: PipelinePercentRange;
   onSnapshot?: (snapshot: FfmpegProgressState, progressStatus: string) => void;
 }): (line: string) => void {
   const values: Record<string, string> = {};
@@ -2365,7 +2391,9 @@ function createFfmpegProgressLineHandler(input: {
       message,
       percent,
       'processing',
-      input.sessionId
+      input.sessionId,
+      {},
+      input.percentRangeOverride
     )
       .then((updatedItem) => {
 
@@ -2376,6 +2404,7 @@ function createFfmpegProgressLineHandler(input: {
           getCatalogItemLogContext(updatedItem, input.sessionId),
           {
             percent,
+            pipelinePercent: updatedItem.processing?.percent ?? null,
             outTimeSeconds: snapshot.outTimeSeconds,
             frame: snapshot.frame,
             speed: snapshot.speed
@@ -2427,7 +2456,8 @@ async function updateCatalogItemProcessing(
   stagePercent: number | null,
   status: CatalogItem['status'],
   sessionId?: string | null,
-  patch: CatalogItemMutablePatch = {}
+  patch: CatalogItemMutablePatch = {},
+  percentRangeOverride?: PipelinePercentRange
 ): Promise<CatalogItem> {
   const currentItem = catalogStore.findById(itemId);
   const sourceType = patch.sourceType ?? currentItem?.sourceType;
@@ -2444,7 +2474,8 @@ async function updateCatalogItemProcessing(
         sourceType,
         stage,
         message,
-        stagePercent
+        stagePercent,
+        percentRangeOverride
       )
     },
     sessionId
@@ -2754,6 +2785,10 @@ async function validateRetainedMediaCandidate(input: {
   const candidateProbe =
     input.probe ??
     (await runFfprobeForFile(input.candidatePath, getCatalogItemLogContext(input.item, input.sessionId)));
+  const validationPercentRange = getRetentionValidationPipelinePercentRange(
+    input.item.sourceType,
+    input.plan.decision
+  );
 
   let workingItem = await updateCatalogItemProcessing(
     input.item.id,
@@ -2761,7 +2796,9 @@ async function validateRetainedMediaCandidate(input: {
     'Validating retained media decode integrity.',
     0,
     'processing',
-    input.sessionId
+    input.sessionId,
+    {},
+    validationPercentRange
   );
 
   writePipelineLog(
@@ -2773,7 +2810,9 @@ async function validateRetainedMediaCandidate(input: {
       decision: input.plan.decision,
       candidateLabel: input.candidateLabel,
       candidateSizeBytes: candidateStats.size,
-      expectedDurationSeconds: candidateProbe.durationSeconds
+      expectedDurationSeconds: candidateProbe.durationSeconds,
+      pipelinePercentStart: validationPercentRange.start,
+      pipelinePercentEnd: validationPercentRange.end
     }
   );
 
@@ -2790,6 +2829,7 @@ async function validateRetainedMediaCandidate(input: {
     progressLabel: 'Validating retained media',
     durationSeconds: candidateProbe.durationSeconds,
     sessionId: input.sessionId,
+    percentRangeOverride: validationPercentRange,
     onSnapshot: (snapshot, progressStatus) => {
       validationProgress.snapshot = snapshot;
       validationProgress.status = progressStatus;
@@ -2843,7 +2883,9 @@ async function validateRetainedMediaCandidate(input: {
     details: {
       decision: input.plan.decision,
       candidateLabel: input.candidateLabel,
-      candidateSizeBytes: candidateStats.size
+      candidateSizeBytes: candidateStats.size,
+      pipelinePercentStart: validationPercentRange.start,
+      pipelinePercentEnd: validationPercentRange.end
     }
   });
 
@@ -2853,7 +2895,9 @@ async function validateRetainedMediaCandidate(input: {
     'Retained media decode validation passed.',
     100,
     'processing',
-    input.sessionId
+    input.sessionId,
+    {},
+    validationPercentRange
   );
 
   writePipelineLog(
@@ -2866,7 +2910,9 @@ async function validateRetainedMediaCandidate(input: {
       candidateLabel: input.candidateLabel,
       candidateSizeBytes: candidateStats.size,
       durationSeconds: candidateProbe.durationSeconds,
-      finalOutTimeSeconds: validationProgress.snapshot?.outTimeSeconds ?? null
+      finalOutTimeSeconds: validationProgress.snapshot?.outTimeSeconds ?? null,
+      pipelinePercentStart: validationPercentRange.start,
+      pipelinePercentEnd: validationPercentRange.end
     }
   );
 

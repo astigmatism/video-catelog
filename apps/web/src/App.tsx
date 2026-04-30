@@ -388,6 +388,8 @@ type VisibleTagListSettings = {
   limit: number;
 };
 
+type TagPickerSortMode = 'labelAsc' | 'labelDesc' | 'usageDesc' | 'usageAsc';
+
 type ViewerFitMode = 'fit' | 'fill';
 type ViewerSize = {
   width: number;
@@ -802,7 +804,38 @@ function compareCatalogTagsForOptions(left: CatalogTag, right: CatalogTag): numb
     return usageDifference;
   }
 
-  return left.label.localeCompare(right.label, undefined, { sensitivity: 'base' });
+  return compareCatalogTagsByLabel(left, right);
+}
+
+function compareCatalogTagsByLabel(left: CatalogTag, right: CatalogTag): number {
+  const labelComparison = left.label.localeCompare(right.label, undefined, { sensitivity: 'base' });
+  if (labelComparison !== 0) {
+    return labelComparison;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
+function compareCatalogTagsForPicker(
+  left: CatalogTag,
+  right: CatalogTag,
+  sortMode: TagPickerSortMode
+): number {
+  if (sortMode === 'labelDesc') {
+    return compareCatalogTagsByLabel(right, left);
+  }
+
+  if (sortMode === 'usageDesc') {
+    const usageDifference = right.usageCount - left.usageCount;
+    return usageDifference !== 0 ? usageDifference : compareCatalogTagsByLabel(left, right);
+  }
+
+  if (sortMode === 'usageAsc') {
+    const usageDifference = left.usageCount - right.usageCount;
+    return usageDifference !== 0 ? usageDifference : compareCatalogTagsByLabel(left, right);
+  }
+
+  return compareCatalogTagsByLabel(left, right);
 }
 
 function getTagFilterState(isIncluded: boolean, isExcluded: boolean): TagFilterState {
@@ -851,6 +884,18 @@ function getTagFilterPillAccessibilityLabel(tag: CatalogTag, state: TagFilterSta
   }
 
   return `${tag.label}. Click to include this tag.`;
+}
+
+function getTagPickerOptionAccessibilityLabel(tag: CatalogTag, state: TagFilterState): string {
+  if (state === 'include') {
+    return `${tag.label} is already included. Select to keep it included and close this dialog.`;
+  }
+
+  if (state === 'exclude') {
+    return `${tag.label} is currently excluded. Select to change it to an include filter.`;
+  }
+
+  return `${tag.label}. Select to add it as an include filter.`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -4274,14 +4319,14 @@ function HomeStripActionMenu({
         onClick={() => setIsOpen((currentValue) => !currentValue)}
         aria-haspopup="menu"
         aria-expanded={isOpen}
-        aria-label={`Open actions for ${strip.name}`}
-        title="Actions"
+        aria-label={`Open options for ${strip.name}`}
+        title="Strip Options"
       >
         <MenuIcon />
       </button>
 
       {isOpen ? (
-        <div className="home-strip-menu-bubble" role="menu" aria-label={`Actions for ${strip.name}`}>
+        <div className="home-strip-menu-bubble" role="menu" aria-label={`Options for ${strip.name}`}>
           <button
             type="button"
             className="home-strip-menu-item"
@@ -7702,6 +7747,9 @@ export default function App(): JSX.Element {
   const [isAdHocCatalogSortActive, setIsAdHocCatalogSortActive] = useState(false);
   const [tagFilterSuggestions, setTagFilterSuggestions] = useState<CatalogTag[]>([]);
   const [isTagFilterSearchFocused, setIsTagFilterSearchFocused] = useState(false);
+  const [isTagPickerModalOpen, setIsTagPickerModalOpen] = useState(false);
+  const [tagPickerSearch, setTagPickerSearch] = useState('');
+  const [tagPickerSortMode, setTagPickerSortMode] = useState<TagPickerSortMode>('labelAsc');
   const [homeStripEditor, setHomeStripEditor] = useState<HomeStripEditorState | null>(null);
   const [homeStripTagSuggestions, setHomeStripTagSuggestions] = useState<CatalogTag[]>([]);
   const [isHomeStripTagSearchFocused, setIsHomeStripTagSearchFocused] = useState(false);
@@ -7721,6 +7769,7 @@ export default function App(): JSX.Element {
   const isAnyModalOpen =
     isAddVideoModalOpen ||
     isSettingsModalOpen ||
+    isTagPickerModalOpen ||
     viewerItem !== null ||
     detailsItemId !== null ||
     homeStripEditor !== null;
@@ -7833,6 +7882,17 @@ export default function App(): JSX.Element {
   const visibleTagFilterSuggestions = tagFilterSuggestions.filter(
     (tag) => !filters.selectedTagIds.includes(tag.id) && !filters.excludedTagIds.includes(tag.id)
   );
+  const visibleTagPickerOptions = useMemo(() => {
+    const query = normalizeCatalogTagKey(tagPickerSearch);
+    const matchingTags =
+      query === ''
+        ? availableTagOptions
+        : availableTagOptions.filter((tag) => tag.normalizedLabel.includes(query));
+
+    return [...matchingTags].sort((left, right) =>
+      compareCatalogTagsForPicker(left, right, tagPickerSortMode)
+    );
+  }, [availableTagOptions, tagPickerSearch, tagPickerSortMode]);
   const homeStripDraftSelectedTags = homeStripEditor
     ? homeStripEditor.draft.selectedTagIds
         .map((tagId) => catalogTagById.get(tagId))
@@ -7889,6 +7949,33 @@ export default function App(): JSX.Element {
     setFilters(getDefaultCatalogFilters());
     setTagFilterSuggestions([]);
     setIsAdHocCatalogSortActive(false);
+  }
+
+  function openTagPickerModal(): void {
+    setTagPickerSearch('');
+    setTagPickerSortMode('labelAsc');
+    setIsTagPickerModalOpen(true);
+  }
+
+  function closeTagPickerModal(): void {
+    setIsTagPickerModalOpen(false);
+    setTagPickerSearch('');
+    setTagPickerSortMode('labelAsc');
+  }
+
+  function includeTagFilter(tag: CatalogTag): void {
+    setFilters((currentValue) => ({
+      ...currentValue,
+      tagSearch: '',
+      selectedTagIds: Array.from(new Set([...currentValue.selectedTagIds, tag.id])),
+      excludedTagIds: currentValue.excludedTagIds.filter((excludedTagId) => excludedTagId !== tag.id)
+    }));
+    setTagFilterSuggestions([]);
+  }
+
+  function selectTagFilterFromPicker(tag: CatalogTag): void {
+    includeTagFilter(tag);
+    closeTagPickerModal();
   }
 
   function cycleTagFilter(tag: CatalogTag): void {
@@ -8528,6 +8615,9 @@ export default function App(): JSX.Element {
     setSocketConnectionState('disconnected');
     setIsAddVideoModalOpen(false);
     setIsSettingsModalOpen(false);
+    setIsTagPickerModalOpen(false);
+    setTagPickerSearch('');
+    setTagPickerSortMode('labelAsc');
     setViewerItem(null);
     setDetailsItemId(null);
     setToolUpdateState({
@@ -10622,6 +10712,16 @@ export default function App(): JSX.Element {
                         }))
                       }
                     />
+                    <button
+                      type="button"
+                      className="tag-filter-picker-button"
+                      disabled={!isFilterDrawerOpen}
+                      onClick={openTagPickerModal}
+                      aria-label="Browse all tags"
+                      title="Browse all tags"
+                    >
+                      All
+                    </button>
 
                     {isFilterDrawerOpen && filters.tagSearch.trim() !== '' && isTagFilterSearchFocused ? (
                       <div className="tag-filter-suggestion-list" role="group" aria-label="Matching tags">
@@ -11554,6 +11654,92 @@ export default function App(): JSX.Element {
           </div>
           <div className="modal-actions">
             <button type="button" className="app-button secondary" onClick={closeSettingsModal}>
+              Close
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {isTagPickerModalOpen && (
+        <Modal title="Select tags for filter" titleId="tag-picker-modal-title" onClose={closeTagPickerModal} size="wide">
+          <div className="tag-picker-panel">
+            <p className="tag-picker-description">
+              Choose any tag to add it as an include filter. Excluded tags will switch to included.
+            </p>
+            <div className="tag-picker-controls">
+              <div className="tag-picker-search-field">
+                <label className="field-label" htmlFor="tag-picker-search">
+                  Search tags
+                </label>
+                <input
+                  id="tag-picker-search"
+                  type="search"
+                  value={tagPickerSearch}
+                  placeholder="Search all tags"
+                  autoComplete="off"
+                  autoFocus
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    setTagPickerSearch(event.target.value)
+                  }
+                />
+              </div>
+              <div className="tag-picker-sort-field">
+                <label className="field-label" htmlFor="tag-picker-sort">
+                  Sort
+                </label>
+                <select
+                  id="tag-picker-sort"
+                  value={tagPickerSortMode}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                    setTagPickerSortMode(event.target.value as TagPickerSortMode)
+                  }
+                >
+                  <option value="labelAsc">Alphabetical A-Z</option>
+                  <option value="labelDesc">Alphabetical Z-A</option>
+                  <option value="usageDesc">Most used first</option>
+                  <option value="usageAsc">Least used first</option>
+                </select>
+              </div>
+            </div>
+            {availableTagOptions.length > 0 ? (
+              <p className="tag-picker-cloud-status">
+                {visibleTagPickerOptions.length} of {availableTagOptions.length} tags shown
+              </p>
+            ) : null}
+            <div className="tag-picker-cloud" role="group" aria-label="All available tags">
+              {visibleTagPickerOptions.length > 0 ? (
+                visibleTagPickerOptions.map((tag) => {
+                  const isIncluded = filters.selectedTagIds.includes(tag.id);
+                  const isExcluded = filters.excludedTagIds.includes(tag.id);
+                  const tagFilterState = getTagFilterState(isIncluded, isExcluded);
+                  const tagPickerLabel = getTagPickerOptionAccessibilityLabel(tag, tagFilterState);
+
+                  return (
+                    <button
+                      type="button"
+                      className={`tag-filter-option tag-filter-pill tag-picker-pill${getTagFilterPillStateClassName(
+                        tagFilterState
+                      )}`}
+                      key={tag.id}
+                      onClick={() => selectTagFilterFromPicker(tag)}
+                      aria-pressed={getTagFilterPillAriaPressed(tagFilterState)}
+                      aria-label={tagPickerLabel}
+                      title={tagPickerLabel}
+                    >
+                      <span className="tag-filter-option-label">{tag.label}</span>
+                      <span className="tag-usage-count">{tag.usageCount}</span>
+                    </button>
+                  );
+                })
+              ) : (
+                <div className="empty-inline-state">
+                  {availableTagOptions.length > 0 ? 'No matching tags.' : 'No tags in use yet.'}
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="modal-actions">
+            <button type="button" className="app-button secondary" onClick={closeTagPickerModal}>
               Close
             </button>
           </div>
