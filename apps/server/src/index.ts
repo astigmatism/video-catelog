@@ -2788,6 +2788,29 @@ async function validateRetainedMediaCandidate(input: {
   const candidateProbe =
     input.probe ??
     (await runFfprobeForFile(input.candidatePath, getCatalogItemLogContext(input.item, input.sessionId)));
+
+  if (input.item.sourceType === 'upload') {
+    writePipelineLog(
+      'info',
+      'processing.retention.validation.complete',
+      'Upload retained media candidate passed lightweight file and metadata validation.',
+      getCatalogItemLogContext(input.item, input.sessionId),
+      {
+        decision: input.plan.decision,
+        candidateLabel: input.candidateLabel,
+        candidateSizeBytes: candidateStats.size,
+        durationSeconds: candidateProbe.durationSeconds,
+        width: candidateProbe.width,
+        height: candidateProbe.height,
+        videoCodec: candidateProbe.videoCodec,
+        audioCodec: candidateProbe.audioCodec,
+        containerFormat: candidateProbe.containerFormat
+      }
+    );
+
+    return candidateProbe;
+  }
+
   const validationPercentRange = getRetentionValidationPipelinePercentRange(
     input.item.sourceType,
     input.plan.decision
