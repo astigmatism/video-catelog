@@ -8,7 +8,7 @@ import type { CatalogBookmark, CatalogItem, HoverPreviewSprite, ProcessingSnapsh
 
 export const HOVER_PREVIEW_REBUILD_REVISION = 1;
 
-const PREVIEW_PLAYBACK_SECONDS = 3;
+const PREVIEW_PLAYBACK_SECONDS = 5;
 const PREVIEW_TARGET_FRAME_COUNT = 25;
 const PREVIEW_COLUMNS = 5;
 const PREVIEW_FRAME_WIDTH = 160;
