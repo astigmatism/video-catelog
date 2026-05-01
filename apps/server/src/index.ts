@@ -15,6 +15,7 @@ import { createDatabasePool } from './db';
 import { SessionStore } from './session-store';
 import { detectToolAvailability, updateServerSideTools, type ServerToolUpdateResult } from './tooling';
 import { ThumbnailMemoryCache, type CachedThumbnailFile } from './thumbnail-cache';
+import { IdleHoverPreviewRebuilder } from './idle-hover-preview-rebuilder';
 import type {
   AuthTerminationReason,
   CatalogBookmark,
@@ -61,9 +62,30 @@ const app = Fastify({
   logger: true,
   trustProxy: config.trustProxy
 });
+const idleHoverPreviewRebuilder = new IdleHoverPreviewRebuilder({
+  catalogStore,
+  config,
+  logger: app.log,
+  isFfmpegAvailable: () => detectToolAvailability(getToolCommandConfig()).ffmpeg,
+  onCatalogItemUpdated: (item) => {
+    broadcastCatalogItemUpdated(item, null, {
+      includeProcessingEvents: false
+    });
+  }
+});
 
 app.addHook('onClose', async () => {
+  await idleHoverPreviewRebuilder.close();
   await catalogStore.close();
+});
+
+sessionStore.onActivityStateChange((transition) => {
+  if (transition.current.idle) {
+    idleHoverPreviewRebuilder.start(transition.reason);
+    return;
+  }
+
+  idleHoverPreviewRebuilder.cancel(transition.reason);
 });
 
 type IngestSuccessResponse = {
@@ -8163,6 +8185,10 @@ async function start(): Promise<void> {
       typeof sessionSweepTimer.unref === 'function'
     ) {
       sessionSweepTimer.unref();
+    }
+
+    if (sessionStore.isIdle()) {
+      idleHoverPreviewRebuilder.start('startup.idle');
     }
 
     app.log.info(

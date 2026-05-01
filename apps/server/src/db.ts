@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS catalog_items (
   source_remote_id text,
   thumbnail_relative_path text,
   hover_preview_sprite jsonb,
+  hover_preview_revision integer NOT NULL DEFAULT 0 CHECK (hover_preview_revision >= 0),
   probe jsonb,
   viewer_adjustment_contrast double precision NOT NULL DEFAULT 1 CHECK (viewer_adjustment_contrast >= 0 AND viewer_adjustment_contrast <= 2),
   viewer_adjustment_brightness double precision NOT NULL DEFAULT 1 CHECK (viewer_adjustment_brightness >= 0 AND viewer_adjustment_brightness <= 2),
@@ -79,6 +80,17 @@ ALTER TABLE catalog_items
 ALTER TABLE catalog_items
   ADD COLUMN IF NOT EXISTS viewer_adjustments_enabled boolean NOT NULL DEFAULT false;
 
+ALTER TABLE catalog_items
+  ADD COLUMN IF NOT EXISTS hover_preview_revision integer NOT NULL DEFAULT 0 CHECK (hover_preview_revision >= 0);
+
+UPDATE catalog_items
+SET hover_preview_revision = 0
+WHERE hover_preview_revision IS NULL;
+
+ALTER TABLE catalog_items
+  ALTER COLUMN hover_preview_revision SET DEFAULT 0,
+  ALTER COLUMN hover_preview_revision SET NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_catalog_items_uploaded_at ON catalog_items (uploaded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_catalog_items_status ON catalog_items (status);
 CREATE INDEX IF NOT EXISTS idx_catalog_items_source_type ON catalog_items (source_type);
@@ -92,6 +104,8 @@ CREATE INDEX IF NOT EXISTS idx_catalog_items_normalized_source_url
 CREATE INDEX IF NOT EXISTS idx_catalog_items_source_remote
   ON catalog_items (source_site, source_remote_id)
   WHERE source_site IS NOT NULL AND source_remote_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_catalog_items_hover_preview_revision
+  ON catalog_items (hover_preview_revision);
 
 
 CREATE TABLE IF NOT EXISTS catalog_tags (

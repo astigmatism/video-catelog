@@ -155,6 +155,7 @@ export type CatalogItem = {
   sourceRemoteId: string | null;
   thumbnailRelativePath: string | null;
   hoverPreviewSprite: HoverPreviewSprite | null;
+  hoverPreviewRevision: number;
   probe: MediaProbeInfo | null;
   viewerVisualAdjustments: ViewerVisualAdjustments;
   viewCount: number;

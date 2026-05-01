@@ -44,6 +44,7 @@ type AddCatalogItemInput = {
   sourceRemoteId?: string | null;
   thumbnailRelativePath?: string | null;
   hoverPreviewSprite?: HoverPreviewSprite | null;
+  hoverPreviewRevision?: number;
   probe?: MediaProbeInfo | null;
   viewerVisualAdjustments?: ViewerVisualAdjustments;
   processing?: ProcessingSnapshot | null;
@@ -125,6 +126,7 @@ type CatalogItemRow = {
   source_remote_id: string | null;
   thumbnail_relative_path: string | null;
   hover_preview_sprite: unknown;
+  hover_preview_revision: number | string;
   probe: unknown;
   viewer_adjustment_contrast: number | string;
   viewer_adjustment_brightness: number | string;
@@ -389,6 +391,16 @@ function readBoolean(value: unknown): boolean | null {
 }
 
 function normalizeCatalogItemCounter(value: unknown): number {
+  const parsed = readNumber(value);
+
+  if (parsed === null || parsed < 0) {
+    return 0;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeHoverPreviewRevision(value: unknown): number {
   const parsed = readNumber(value);
 
   if (parsed === null || parsed < 0) {
@@ -744,6 +756,7 @@ function cloneCatalogItem(item: CatalogItem): CatalogItem {
     sourceRemoteId: item.sourceRemoteId,
     thumbnailRelativePath: item.thumbnailRelativePath,
     hoverPreviewSprite: cloneHoverPreviewSprite(item.hoverPreviewSprite),
+    hoverPreviewRevision: normalizeHoverPreviewRevision(item.hoverPreviewRevision),
     probe: cloneMediaProbeInfo(item.probe),
     viewerVisualAdjustments: cloneViewerVisualAdjustments(item.viewerVisualAdjustments),
     viewCount: item.viewCount,
@@ -886,6 +899,7 @@ function normalizeCatalogItem(input: CatalogItem): CatalogItem {
     sourceRemoteId: input.sourceRemoteId ?? null,
     thumbnailRelativePath: input.thumbnailRelativePath ?? null,
     hoverPreviewSprite: cloneHoverPreviewSprite(input.hoverPreviewSprite),
+    hoverPreviewRevision: normalizeHoverPreviewRevision(input.hoverPreviewRevision),
     probe: cloneMediaProbeInfo(input.probe),
     viewerVisualAdjustments: cloneViewerVisualAdjustments(input.viewerVisualAdjustments),
     viewCount: normalizeViewCount(input.viewCount),
@@ -1005,6 +1019,7 @@ function buildCatalogItemFromInput(input: AddCatalogItemInput): CatalogItem {
     sourceRemoteId: input.sourceRemoteId ?? null,
     thumbnailRelativePath: input.thumbnailRelativePath ?? null,
     hoverPreviewSprite: input.hoverPreviewSprite ?? null,
+    hoverPreviewRevision: input.hoverPreviewRevision ?? 0,
     probe: input.probe ?? null,
     viewerVisualAdjustments: input.viewerVisualAdjustments ?? DEFAULT_VIEWER_VISUAL_ADJUSTMENTS,
     viewCount: input.viewCount ?? 0,
@@ -1106,6 +1121,7 @@ function hydrateCatalogItemFromRow(row: CatalogItemRow): CatalogItem {
     sourceRemoteId: row.source_remote_id,
     thumbnailRelativePath: row.thumbnail_relative_path,
     hoverPreviewSprite: readHoverPreviewSprite(row.hover_preview_sprite),
+    hoverPreviewRevision: normalizeHoverPreviewRevision(row.hover_preview_revision),
     probe: readMediaProbeInfo(row.probe),
     viewerVisualAdjustments: normalizeViewerVisualAdjustments({
       contrast: row.viewer_adjustment_contrast,
@@ -2113,6 +2129,7 @@ export class CatalogStore {
           source_remote_id,
           thumbnail_relative_path,
           hover_preview_sprite,
+          hover_preview_revision,
           probe,
           viewer_adjustment_contrast,
           viewer_adjustment_brightness,
@@ -2230,6 +2247,7 @@ export class CatalogStore {
           source_remote_id,
           thumbnail_relative_path,
           hover_preview_sprite,
+          hover_preview_revision,
           probe,
           viewer_adjustment_contrast,
           viewer_adjustment_brightness,
@@ -2679,6 +2697,7 @@ export class CatalogStore {
           source_remote_id,
           thumbnail_relative_path,
           hover_preview_sprite,
+          hover_preview_revision,
           probe,
           viewer_adjustment_contrast,
           viewer_adjustment_brightness,
@@ -2698,7 +2717,7 @@ export class CatalogStore {
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-          $19::jsonb, $20::jsonb, $21, $22, $23, $24, $25, $26, $27, $28::timestamptz, $29::timestamptz, $30::timestamptz, $31, $32, $33, $34::timestamptz, now()
+          $19::jsonb, $20, $21::jsonb, $22, $23, $24, $25, $26, $27, $28, $29::timestamptz, $30::timestamptz, $31::timestamptz, $32, $33, $34, $35::timestamptz, now()
         )
       `,
       [
@@ -2721,6 +2740,7 @@ export class CatalogStore {
         item.sourceRemoteId,
         item.thumbnailRelativePath,
         toJsonParameter(item.hoverPreviewSprite),
+        item.hoverPreviewRevision,
         toJsonParameter(item.probe),
         item.viewerVisualAdjustments.contrast,
         item.viewerVisualAdjustments.brightness,
@@ -2768,21 +2788,22 @@ export class CatalogStore {
           source_remote_id = $16,
           thumbnail_relative_path = $17,
           hover_preview_sprite = $18::jsonb,
-          probe = $19::jsonb,
-          viewer_adjustment_contrast = $20,
-          viewer_adjustment_brightness = $21,
-          viewer_adjustment_saturation = $22,
-          viewer_adjustments_enabled = $23,
-          view_count = $24,
-          used_count = $25,
-          download_count = $26,
-          last_viewed_at = $27::timestamptz,
-          last_used_at = $28::timestamptz,
-          last_downloaded_at = $29::timestamptz,
-          processing_stage = $30,
-          processing_percent = $31,
-          processing_message = $32,
-          processing_updated_at = $33::timestamptz,
+          hover_preview_revision = $19,
+          probe = $20::jsonb,
+          viewer_adjustment_contrast = $21,
+          viewer_adjustment_brightness = $22,
+          viewer_adjustment_saturation = $23,
+          viewer_adjustments_enabled = $24,
+          view_count = $25,
+          used_count = $26,
+          download_count = $27,
+          last_viewed_at = $28::timestamptz,
+          last_used_at = $29::timestamptz,
+          last_downloaded_at = $30::timestamptz,
+          processing_stage = $31,
+          processing_percent = $32,
+          processing_message = $33,
+          processing_updated_at = $34::timestamptz,
           updated_at = now()
         WHERE id = $1
         RETURNING id
@@ -2806,6 +2827,7 @@ export class CatalogStore {
         item.sourceRemoteId,
         item.thumbnailRelativePath,
         toJsonParameter(item.hoverPreviewSprite),
+        item.hoverPreviewRevision,
         toJsonParameter(item.probe),
         item.viewerVisualAdjustments.contrast,
         item.viewerVisualAdjustments.brightness,
