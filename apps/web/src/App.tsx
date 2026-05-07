@@ -329,6 +329,48 @@ type IconButtonProps = {
   children: ReactNode;
 };
 
+type CatalogTitleBarProps = {
+  variant: 'desktop' | 'mobile';
+  isFilterPanelOpen: boolean;
+  filterPanelId: string;
+  onToggleFilters: () => void;
+  onRefresh: () => void;
+  onAddVideo: () => void;
+  onOpenSettings: () => void;
+  onLock: () => void;
+};
+
+type CatalogDesktopLayoutProps = {
+  isFilterPanelOpen: boolean;
+  filterPanelId: string;
+  filterPanel: ReactNode;
+  catalogPanel: ReactNode;
+  footer: ReactNode;
+  modalLayer: ReactNode;
+  onToggleFilters: () => void;
+  onRefresh: () => void;
+  onAddVideo: () => void;
+  onOpenSettings: () => void;
+  onLock: () => void;
+};
+
+type CatalogMobileLayoutProps = {
+  layoutMode: Exclude<CatalogLayoutMode, 'desktop'>;
+  isFilterPanelOpen: boolean;
+  filterPanelId: string;
+  filterPanel: ReactNode;
+  catalogPanel: ReactNode;
+  footer: ReactNode;
+  modalLayer: ReactNode;
+  mobileBrowseSummary: string;
+  onToggleFilters: () => void;
+  onCloseFilters: () => void;
+  onRefresh: () => void;
+  onAddVideo: () => void;
+  onOpenSettings: () => void;
+  onLock: () => void;
+};
+
 type NoticeTone = 'info' | 'success' | 'warning' | 'error';
 
 type ModalNotice = {
@@ -393,6 +435,8 @@ type VisibleTagListSettings = {
 };
 
 type TagPickerSortMode = 'labelAsc' | 'labelDesc' | 'usageDesc' | 'usageAsc';
+
+type CatalogLayoutMode = 'desktop' | 'mobile-portrait' | 'mobile-landscape';
 
 type ViewerFitMode = 'fit' | 'fill';
 type ViewerSize = {
@@ -683,6 +727,9 @@ const TAG_LABEL_MAX_LENGTH = 80;
 const DEFAULT_VISIBLE_TAG_LIST_LIMIT = 10;
 const VISIBLE_TAG_LIST_SETTINGS_STORAGE_KEY = 'sugar-spice.visible-tag-list-settings';
 const CATALOG_FILTERS_STORAGE_KEY = 'sugar-spice.catalog-filters';
+const MOBILE_CATALOG_LAYOUT_MEDIA_QUERY =
+  '(max-width: 767px), (max-width: 1024px) and (max-height: 540px) and (orientation: landscape)';
+
 
 function createCatalogRandomSeed(): number {
   if (typeof window !== 'undefined') {
@@ -803,6 +850,80 @@ function readStoredVisibleTagListSettings(): VisibleTagListSettings {
   } catch {
     return getDefaultVisibleTagListSettings();
   }
+}
+
+
+function getCatalogLayoutMode(): CatalogLayoutMode {
+  if (typeof window === 'undefined') {
+    return 'desktop';
+  }
+
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const isSmallViewport =
+    typeof window.matchMedia === 'function'
+      ? window.matchMedia(MOBILE_CATALOG_LAYOUT_MEDIA_QUERY).matches
+      : viewportWidth <= 767 || (viewportWidth <= 1024 && viewportHeight <= 540);
+
+  if (!isSmallViewport) {
+    return 'desktop';
+  }
+
+  return viewportWidth > viewportHeight ? 'mobile-landscape' : 'mobile-portrait';
+}
+
+function getInitialFilterPanelOpenState(): boolean {
+  return getCatalogLayoutMode() === 'desktop';
+}
+
+function useResponsiveCatalogLayoutMode(): CatalogLayoutMode {
+  const [layoutMode, setLayoutMode] = useState<CatalogLayoutMode>(() => getCatalogLayoutMode());
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return undefined;
+    }
+
+    const updateLayoutMode = (): void => {
+      setLayoutMode((currentValue) => {
+        const nextValue = getCatalogLayoutMode();
+        return currentValue === nextValue ? currentValue : nextValue;
+      });
+    };
+
+    updateLayoutMode();
+
+    const mobileLayoutQuery =
+      typeof window.matchMedia === 'function'
+        ? window.matchMedia(MOBILE_CATALOG_LAYOUT_MEDIA_QUERY)
+        : null;
+
+    window.addEventListener('resize', updateLayoutMode);
+    window.addEventListener('orientationchange', updateLayoutMode);
+
+    if (mobileLayoutQuery) {
+      if (typeof mobileLayoutQuery.addEventListener === 'function') {
+        mobileLayoutQuery.addEventListener('change', updateLayoutMode);
+      } else {
+        mobileLayoutQuery.addListener(updateLayoutMode);
+      }
+    }
+
+    return () => {
+      window.removeEventListener('resize', updateLayoutMode);
+      window.removeEventListener('orientationchange', updateLayoutMode);
+
+      if (mobileLayoutQuery) {
+        if (typeof mobileLayoutQuery.removeEventListener === 'function') {
+          mobileLayoutQuery.removeEventListener('change', updateLayoutMode);
+        } else {
+          mobileLayoutQuery.removeListener(updateLayoutMode);
+        }
+      }
+    };
+  }, []);
+
+  return layoutMode;
 }
 
 function compareCatalogTagsForOptions(left: CatalogTag, right: CatalogTag): number {
@@ -3679,6 +3800,204 @@ function TrashIcon(): JSX.Element {
       <path d="m14 11-.35 6" />
       <path d="M6.5 7 7.4 20h9.2l.9-13" />
     </svg>
+  );
+}
+
+
+function CatalogTitleBar({
+  variant,
+  isFilterPanelOpen,
+  filterPanelId,
+  onToggleFilters,
+  onRefresh,
+  onAddVideo,
+  onOpenSettings,
+  onLock
+}: CatalogTitleBarProps): JSX.Element {
+  const filterToggleLabel = isFilterPanelOpen
+    ? 'Close search, sort, and tags panel'
+    : 'Open search, sort, and tags panel';
+
+  return (
+    <header className={`titlebar titlebar-${variant}`}>
+      <div className="titlebar-start">
+        <button
+          type="button"
+          className={`icon-button filter-drawer-toggle${isFilterPanelOpen ? ' is-active' : ''}`}
+          onClick={onToggleFilters}
+          aria-label={filterToggleLabel}
+          aria-expanded={isFilterPanelOpen}
+          aria-controls={filterPanelId}
+          title={filterToggleLabel}
+        >
+          <FilterIcon />
+        </button>
+
+        <div className="titlebar-title">
+          <h1 className="yesteryear-regular">Sugar&amp;Spice</h1>
+        </div>
+      </div>
+
+      <div className="titlebar-actions">
+        <IconButton label="Refresh" onClick={onRefresh}>
+          <RefreshIcon />
+        </IconButton>
+        <IconButton label="Add video" onClick={onAddVideo}>
+          <UploadIcon />
+        </IconButton>
+        <IconButton label="Settings" onClick={onOpenSettings}>
+          <SettingsIcon />
+        </IconButton>
+        <IconButton label="Lock" onClick={onLock}>
+          <LogoutIcon />
+        </IconButton>
+      </div>
+    </header>
+  );
+}
+
+function CatalogDesktopLayout({
+  isFilterPanelOpen,
+  filterPanelId,
+  filterPanel,
+  catalogPanel,
+  footer,
+  modalLayer,
+  onToggleFilters,
+  onRefresh,
+  onAddVideo,
+  onOpenSettings,
+  onLock
+}: CatalogDesktopLayoutProps): JSX.Element {
+  return (
+    <div className="app-shell app-shell-desktop">
+      <CatalogTitleBar
+        variant="desktop"
+        isFilterPanelOpen={isFilterPanelOpen}
+        filterPanelId={filterPanelId}
+        onToggleFilters={onToggleFilters}
+        onRefresh={onRefresh}
+        onAddVideo={onAddVideo}
+        onOpenSettings={onOpenSettings}
+        onLock={onLock}
+      />
+
+      <main className={`app-main${isFilterPanelOpen ? ' is-filter-drawer-open' : ''}`}>
+        <aside
+          id={filterPanelId}
+          className="filter-drawer"
+          aria-label="Catalog search, sort, and tags"
+          aria-hidden={!isFilterPanelOpen}
+        >
+          <div className="filter-drawer-inner">{filterPanel}</div>
+        </aside>
+
+        {catalogPanel}
+      </main>
+
+      {footer}
+      {modalLayer}
+    </div>
+  );
+}
+
+function CatalogMobileLayout({
+  layoutMode,
+  isFilterPanelOpen,
+  filterPanelId,
+  filterPanel,
+  catalogPanel,
+  footer,
+  modalLayer,
+  mobileBrowseSummary,
+  onToggleFilters,
+  onCloseFilters,
+  onRefresh,
+  onAddVideo,
+  onOpenSettings,
+  onLock
+}: CatalogMobileLayoutProps): JSX.Element {
+  useEffect(() => {
+    if (!isFilterPanelOpen) {
+      return undefined;
+    }
+
+    const handleKeydown = (event: globalThis.KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        onCloseFilters();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeydown);
+
+    return () => {
+      document.removeEventListener('keydown', handleKeydown);
+    };
+  }, [isFilterPanelOpen, onCloseFilters]);
+
+  return (
+    <div className={`app-shell app-shell-mobile is-${layoutMode}`}>
+      <CatalogTitleBar
+        variant="mobile"
+        isFilterPanelOpen={isFilterPanelOpen}
+        filterPanelId={filterPanelId}
+        onToggleFilters={onToggleFilters}
+        onRefresh={onRefresh}
+        onAddVideo={onAddVideo}
+        onOpenSettings={onOpenSettings}
+        onLock={onLock}
+      />
+
+      <main className="app-main-mobile">
+        <div className="mobile-browse-bar" aria-label="Mobile catalog controls">
+          <button
+            type="button"
+            className={`app-button secondary mobile-filter-open-button${isFilterPanelOpen ? ' is-active' : ''}`}
+            onClick={onToggleFilters}
+            aria-expanded={isFilterPanelOpen}
+            aria-controls={filterPanelId}
+          >
+            Search, sort &amp; tags
+          </button>
+          <p className="mobile-browse-summary">{mobileBrowseSummary}</p>
+        </div>
+
+        <div className="mobile-catalog-content">{catalogPanel}</div>
+      </main>
+
+      {footer}
+
+      {isFilterPanelOpen ? (
+        <div className="mobile-filter-overlay" role="presentation" onClick={onCloseFilters}>
+          <aside
+            id={filterPanelId}
+            className={`mobile-filter-sheet is-${layoutMode}`}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mobile-filter-sheet-title"
+            onClick={(event: MouseEvent<HTMLElement>) => event.stopPropagation()}
+          >
+            <div className="mobile-filter-sheet-header">
+              <div>
+                <h2 id="mobile-filter-sheet-title">Browse controls</h2>
+                <p>Search, sort, tags, and home sections</p>
+              </div>
+              <button
+                type="button"
+                className="modal-close-button mobile-filter-close-button"
+                onClick={onCloseFilters}
+                aria-label="Close search, sort, and tags panel"
+              >
+                ×
+              </button>
+            </div>
+            <div className="mobile-filter-sheet-body">{filterPanel}</div>
+          </aside>
+        </div>
+      ) : null}
+
+      {modalLayer}
+    </div>
   );
 }
 
@@ -7726,6 +8045,8 @@ function redirectToGoogleSearch(query: string): void {
 }
 
 export default function App(): JSX.Element {
+  const catalogLayoutMode = useResponsiveCatalogLayoutMode();
+  const isMobileCatalogLayout = catalogLayoutMode !== 'desktop';
   const [authenticated, setAuthenticated] = useState(false);
 
   useEffect(() => {
@@ -7768,7 +8089,9 @@ export default function App(): JSX.Element {
   const [visibleTagListSettings, setVisibleTagListSettings] = useState<VisibleTagListSettings>(() =>
     readStoredVisibleTagListSettings()
   );
-  const [isFilterDrawerOpen, setIsFilterDrawerOpen] = useState(true);
+  const [isFilterDrawerOpen, setIsFilterDrawerOpen] = useState(() =>
+    getInitialFilterPanelOpenState()
+  );
   const [filters, setFilters] = useState<CatalogFilters>(() => readStoredCatalogFilters());
   const [tagFilterSuggestions, setTagFilterSuggestions] = useState<CatalogTag[]>([]);
   const [isTagFilterSearchFocused, setIsTagFilterSearchFocused] = useState(false);
@@ -7787,6 +8110,14 @@ export default function App(): JSX.Element {
   const isAddVideoModalOpenRef = useRef(false);
   const viewerCloseRequestedRef = useRef(false);
 
+  useEffect(() => {
+    if (isMobileCatalogLayout) {
+      setIsFilterDrawerOpen(false);
+    }
+  }, [isMobileCatalogLayout]);
+
+  const isMobileFilterSheetOpen = isMobileCatalogLayout && isFilterDrawerOpen;
+
   const duplicateReasonCodes = pendingIngest
     ? getDistinctDuplicateReasonCodes(pendingIngest.duplicateCheck)
     : [];
@@ -7797,7 +8128,8 @@ export default function App(): JSX.Element {
     isTagPickerModalOpen ||
     viewerItem !== null ||
     detailsItemId !== null ||
-    homeStripEditor !== null;
+    homeStripEditor !== null ||
+    isMobileFilterSheetOpen;
   const isToolUpdateRunning = toolUpdateState.status === 'running';
 
   const filteredCatalog = useMemo(() => {
@@ -10534,67 +10866,23 @@ export default function App(): JSX.Element {
     return <GoogleLockScreen onSubmit={login} />;
   }
 
-  return (
-    <div className="app-shell">
-      <header className="titlebar">
-        <div className="titlebar-start">
-          <button
-            type="button"
-            className={`icon-button filter-drawer-toggle${isFilterDrawerOpen ? ' is-active' : ''}`}
-            onClick={() => setIsFilterDrawerOpen((currentValue) => !currentValue)}
-            aria-label={
-              isFilterDrawerOpen
-                ? 'Close search, sort, and tags panel'
-                : 'Open search, sort, and tags panel'
-            }
-            aria-expanded={isFilterDrawerOpen}
-            aria-controls="filter-drawer"
-            title={
-              isFilterDrawerOpen
-                ? 'Close search, sort, and tags panel'
-                : 'Open search, sort, and tags panel'
-            }
-          >
-            <FilterIcon />
-          </button>
+  const filterPanelId = isMobileCatalogLayout ? 'mobile-filter-drawer' : 'filter-drawer';
+  const mobileLayoutMode: Exclude<CatalogLayoutMode, 'desktop'> =
+    catalogLayoutMode === 'desktop' ? 'mobile-portrait' : catalogLayoutMode;
+  const mobileBrowseSummary = isAnyCatalogFilterActive
+    ? catalogCountLabel
+    : isHomeViewActive
+      ? `${homeStrips.length} saved home ${homeStrips.length === 1 ? 'section' : 'sections'}`
+      : catalogCountLabel;
 
-          <div className="titlebar-title">
-            <h1 className="yesteryear-regular">Sugar&amp;Spice</h1>
-          </div>
-        </div>
+  const refreshCatalogState = (): void => {
+    void loadCatalog();
+    void loadRuntime();
+    void loadHomeStrips();
+    requestCatalogList();
+  };
 
-        <div className="titlebar-actions">
-          <IconButton
-            label="Refresh"
-            onClick={() => {
-              void loadCatalog();
-              void loadRuntime();
-              void loadHomeStrips();
-              requestCatalogList();
-            }}
-          >
-            <RefreshIcon />
-          </IconButton>
-          <IconButton label="Add video" onClick={openAddVideoModal}>
-            <UploadIcon />
-          </IconButton>
-          <IconButton label="Settings" onClick={() => setIsSettingsModalOpen(true)}>
-            <SettingsIcon />
-          </IconButton>
-          <IconButton label="Lock" onClick={() => void requestPanicLock()}>
-            <LogoutIcon />
-          </IconButton>
-        </div>
-      </header>
-
-      <main className={`app-main${isFilterDrawerOpen ? ' is-filter-drawer-open' : ''}`}>
-        <aside
-          id="filter-drawer"
-          className="filter-drawer"
-          aria-label="Catalog search, sort, and tags"
-          aria-hidden={!isFilterDrawerOpen}
-        >
-          <div className="filter-drawer-inner">
+  const filterPanel = (
             <section className="sidebar-panel filter-drawer-panel">
               <div className="form-stack">
                 <div>
@@ -10888,9 +11176,9 @@ export default function App(): JSX.Element {
                 </section>
               </div>
             </section>
-          </div>
-        </aside>
+  );
 
+  const catalogPanel = (
         <section className="catalog-panel" aria-label={isHomeViewActive ? 'Home layout sections' : 'Catalog results'}>
           {isHomeViewActive ? (
             <div className="home-view">
@@ -10955,8 +11243,9 @@ export default function App(): JSX.Element {
             </>
           )}
         </section>
-      </main>
+  );
 
+  const footer = (
       <footer className="app-footer">
         <p className="muted footer-summary">
           <span>
@@ -10979,7 +11268,10 @@ export default function App(): JSX.Element {
           </span>
         </div>
       </footer>
+  );
 
+  const modalLayer = (
+    <>
       {homeStripEditor && (
         <Modal
           title={homeStripEditor.mode === 'add' ? 'Add home section' : 'Edit home section'}
@@ -11802,6 +12094,43 @@ export default function App(): JSX.Element {
           attemptFullscreenOnOpen={attemptFullscreenOnOpen}
         />
       )}
-    </div>
+    </>
+  );
+
+  if (isMobileCatalogLayout) {
+    return (
+      <CatalogMobileLayout
+        layoutMode={mobileLayoutMode}
+        isFilterPanelOpen={isFilterDrawerOpen}
+        filterPanelId={filterPanelId}
+        filterPanel={filterPanel}
+        catalogPanel={catalogPanel}
+        footer={footer}
+        modalLayer={modalLayer}
+        mobileBrowseSummary={mobileBrowseSummary}
+        onToggleFilters={() => setIsFilterDrawerOpen((currentValue) => !currentValue)}
+        onCloseFilters={() => setIsFilterDrawerOpen(false)}
+        onRefresh={refreshCatalogState}
+        onAddVideo={openAddVideoModal}
+        onOpenSettings={() => setIsSettingsModalOpen(true)}
+        onLock={() => void requestPanicLock()}
+      />
+    );
+  }
+
+  return (
+    <CatalogDesktopLayout
+      isFilterPanelOpen={isFilterDrawerOpen}
+      filterPanelId={filterPanelId}
+      filterPanel={filterPanel}
+      catalogPanel={catalogPanel}
+      footer={footer}
+      modalLayer={modalLayer}
+      onToggleFilters={() => setIsFilterDrawerOpen((currentValue) => !currentValue)}
+      onRefresh={refreshCatalogState}
+      onAddVideo={openAddVideoModal}
+      onOpenSettings={() => setIsSettingsModalOpen(true)}
+      onLock={() => void requestPanicLock()}
+    />
   );
 }
