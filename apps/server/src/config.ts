@@ -26,6 +26,8 @@ export type AppConfig = {
   wsHeartbeatMs: number;
   wsAllowedOrigins: string[];
   maxUploadBytes: number;
+  hoverPreviewDurationSeconds: number;
+  hoverPreviewFrameCount: number;
   ffmpegCommand: string;
   ffmpegRetentionRemuxArgs: string[];
   ffmpegRetentionTranscodeVideoArgs: string[];
@@ -39,6 +41,16 @@ export type AppConfig = {
 type EnvMap = Record<string, string | undefined>;
 
 function parseInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function parsePositiveNumber(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
@@ -141,6 +153,8 @@ function parseArgumentList(value: string | undefined, fallback: string[]): strin
 }
 
 const DEFAULT_MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024;
+const DEFAULT_HOVER_PREVIEW_DURATION_SECONDS = 10;
+const DEFAULT_HOVER_PREVIEW_FRAME_COUNT = 100;
 
 const DEFAULT_FFMPEG_RETENTION_REMUX_ARGS = ['-map', '0', '-c', 'copy', '-movflags', '+faststart'];
 
@@ -280,6 +294,14 @@ export function loadConfig(): AppConfig {
     wsHeartbeatMs: parseInteger(readSetting(env, dotEnv, 'WS_HEARTBEAT_MS'), 30000),
     wsAllowedOrigins: parseCommaSeparatedList(readSetting(env, dotEnv, 'WS_ALLOWED_ORIGINS')),
     maxUploadBytes: parseInteger(readSetting(env, dotEnv, 'MAX_UPLOAD_BYTES'), DEFAULT_MAX_UPLOAD_BYTES),
+    hoverPreviewDurationSeconds: parsePositiveNumber(
+      readSetting(env, dotEnv, 'HOVER_PREVIEW_DURATION_SECONDS'),
+      DEFAULT_HOVER_PREVIEW_DURATION_SECONDS
+    ),
+    hoverPreviewFrameCount: parsePositiveInteger(
+      readSetting(env, dotEnv, 'HOVER_PREVIEW_FRAME_COUNT'),
+      DEFAULT_HOVER_PREVIEW_FRAME_COUNT
+    ),
     ffmpegCommand: readSetting(env, dotEnv, 'FFMPEG_PATH') ?? 'ffmpeg',
     ffmpegRetentionRemuxArgs: parseArgumentList(
       readSetting(env, dotEnv, 'FFMPEG_RETENTION_REMUX_ARGS'),

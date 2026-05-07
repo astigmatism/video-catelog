@@ -80,11 +80,43 @@ app.addHook('onClose', async () => {
 });
 
 sessionStore.onActivityStateChange((transition) => {
+  const sessionLifecyclePayload = {
+    reason: transition.reason,
+    sessionId: abbreviateIdentifier(transition.sessionId),
+    previousAuthenticatedSessionCount: transition.previous.authenticatedSessionCount,
+    currentAuthenticatedSessionCount: transition.current.authenticatedSessionCount,
+    previousState: transition.previous.state,
+    currentState: transition.current.state
+  };
+
   if (transition.current.idle) {
+    app.log.info(
+      {
+        event: 'session.lifecycle.last_session_left',
+        ...sessionLifecyclePayload
+      },
+      'Last active session left.'
+    );
+    app.log.info(
+      {
+        event: 'hover_preview.idle_audit.idle_detected',
+        ...sessionLifecyclePayload,
+        hoverPreviewDurationSeconds: config.hoverPreviewDurationSeconds,
+        hoverPreviewFrameCount: config.hoverPreviewFrameCount
+      },
+      'Server is idle; starting hover preview audit.'
+    );
     idleHoverPreviewRebuilder.start(transition.reason);
     return;
   }
 
+  app.log.info(
+    {
+      event: 'session.lifecycle.active_detected',
+      ...sessionLifecyclePayload
+    },
+    'A session became active; cancelling idle hover preview audit if one is running.'
+  );
   idleHoverPreviewRebuilder.cancel(transition.reason);
 });
 
@@ -255,6 +287,19 @@ type FfmpegProgressState = {
   speed: string | null;
 };
 
+type HoverPreviewSegment = {
+  startSeconds: number;
+  durationSeconds: number;
+  source: 'video_start' | 'video_middle' | 'bookmark';
+  bookmarkId?: string;
+  bookmarkTimeSeconds?: number;
+};
+
+type HoverPreviewPlan = {
+  segments: HoverPreviewSegment[];
+  effectiveDurationSeconds: number;
+};
+
 const processingQueue: ProcessingQueueEntry[] = [];
 const queuedProcessingItemIds = new Set<string>();
 const activeProcessingItemIds = new Set<string>();
@@ -262,9 +307,12 @@ const activeCommandProcessesByItemId = new Map<string, Set<ChildProcessWithoutNu
 let isProcessingQueueRunning = false;
 let isServerToolUpdateRunning = false;
 
-const HOVER_SPRITE_FRAME_COUNT = 100;
-const HOVER_SPRITE_COLUMNS = 10;
-const HOVER_SPRITE_ROWS = 10;
+const HOVER_PREVIEW_DURATION_SECONDS = config.hoverPreviewDurationSeconds;
+const HOVER_PREVIEW_NO_BOOKMARK_START_THRESHOLD_SECONDS = 20;
+const HOVER_PREVIEW_MIN_CAPTURE_SECONDS = 0.001;
+const HOVER_SPRITE_FRAME_COUNT = Math.max(1, Math.floor(config.hoverPreviewFrameCount));
+const HOVER_SPRITE_COLUMNS = Math.max(1, Math.ceil(Math.sqrt(HOVER_SPRITE_FRAME_COUNT)));
+const HOVER_SPRITE_ROWS = Math.max(1, Math.ceil(HOVER_SPRITE_FRAME_COUNT / HOVER_SPRITE_COLUMNS));
 const HOVER_SPRITE_FRAME_WIDTH = 160;
 const HOVER_SPRITE_FRAME_HEIGHT = 90;
 const POSTER_THUMBNAIL_WIDTH = 480;
@@ -3459,15 +3507,166 @@ async function createCatalogItemBookmarkFromTime(
   }
 }
 
-function createHoverPreviewSprite(relativePath: string): HoverPreviewSprite {
+function createHoverPreviewSprite(
+  relativePath: string,
+  frameCount: number = HOVER_SPRITE_FRAME_COUNT,
+  columns: number = HOVER_SPRITE_COLUMNS,
+  rows: number = HOVER_SPRITE_ROWS
+): HoverPreviewSprite {
   return {
     relativePath,
-    frameCount: HOVER_SPRITE_FRAME_COUNT,
-    columns: HOVER_SPRITE_COLUMNS,
-    rows: HOVER_SPRITE_ROWS,
+    frameCount,
+    columns,
+    rows,
     frameWidth: HOVER_SPRITE_FRAME_WIDTH,
     frameHeight: HOVER_SPRITE_FRAME_HEIGHT
   };
+}
+
+function createHoverPreviewPlan(
+  bookmarks: CatalogBookmark[],
+  durationSeconds: number,
+  previewDurationSeconds: number
+): HoverPreviewPlan {
+  const selectedBookmarks = selectHoverPreviewBookmarks(bookmarks);
+  const rawSegments: Array<Omit<HoverPreviewSegment, 'durationSeconds'>> = [];
+  const segmentBudgetSeconds = selectedBookmarks.length > 0
+    ? previewDurationSeconds / selectedBookmarks.length
+    : previewDurationSeconds;
+
+  if (selectedBookmarks.length === 0) {
+    rawSegments.push({
+      source: durationSeconds < HOVER_PREVIEW_NO_BOOKMARK_START_THRESHOLD_SECONDS ? 'video_start' : 'video_middle',
+      startSeconds: durationSeconds < HOVER_PREVIEW_NO_BOOKMARK_START_THRESHOLD_SECONDS ? 0 : durationSeconds / 2
+    });
+  } else {
+    for (const bookmark of selectedBookmarks) {
+      rawSegments.push({
+        source: 'bookmark',
+        startSeconds: bookmark.timeSeconds,
+        bookmarkId: bookmark.id,
+        bookmarkTimeSeconds: bookmark.timeSeconds
+      });
+    }
+  }
+
+  const segments = rawSegments.map((segment) => createSafeHoverPreviewSegment(segment, durationSeconds, segmentBudgetSeconds));
+  const effectiveDurationSeconds = Math.max(
+    HOVER_PREVIEW_MIN_CAPTURE_SECONDS,
+    segments.reduce((total, segment) => total + segment.durationSeconds, 0)
+  );
+
+  return {
+    segments,
+    effectiveDurationSeconds
+  };
+}
+
+function selectHoverPreviewBookmarks(bookmarks: CatalogBookmark[]): CatalogBookmark[] {
+  if (bookmarks.length <= 3) {
+    return bookmarks;
+  }
+
+  return bookmarks.slice(-3);
+}
+
+function createSafeHoverPreviewSegment(
+  segment: Omit<HoverPreviewSegment, 'durationSeconds'>,
+  durationSeconds: number,
+  segmentBudgetSeconds: number
+): HoverPreviewSegment {
+  const maxStartSeconds = Math.max(0, durationSeconds - HOVER_PREVIEW_MIN_CAPTURE_SECONDS);
+  const safeStartSeconds = Number.isFinite(segment.startSeconds) ? segment.startSeconds : 0;
+  const startSeconds = Math.max(0, Math.min(maxStartSeconds, safeStartSeconds));
+  const availableDurationSeconds = Math.max(HOVER_PREVIEW_MIN_CAPTURE_SECONDS, durationSeconds - startSeconds);
+  const captureDurationSeconds = Math.max(
+    HOVER_PREVIEW_MIN_CAPTURE_SECONDS,
+    Math.min(segmentBudgetSeconds, availableDurationSeconds)
+  );
+
+  return {
+    ...segment,
+    startSeconds,
+    durationSeconds: captureDurationSeconds
+  };
+}
+
+function createHoverPreviewFfmpegArgs(input: {
+  inputPath: string;
+  outputPath: string;
+  segments: HoverPreviewSegment[];
+  samplingFps: string;
+}): string[] {
+  const args = [
+    '-y',
+    '-nostdin',
+    '-v',
+    'error',
+    '-stats_period',
+    '0.5',
+    '-progress',
+    'pipe:1'
+  ];
+
+  for (const segment of input.segments) {
+    args.push(
+      '-ss',
+      formatFfmpegTimestamp(segment.startSeconds),
+      '-t',
+      formatFfmpegTimestamp(segment.durationSeconds),
+      '-i',
+      input.inputPath
+    );
+  }
+
+  args.push(
+    '-an',
+    '-filter_complex',
+    createHoverPreviewFilter(input.segments.length, input.samplingFps),
+    '-map',
+    '[hover_preview_sprite]',
+    '-frames:v',
+    '1',
+    '-vsync',
+    '0',
+    '-q:v',
+    '3',
+    input.outputPath
+  );
+
+  return args;
+}
+
+function createHoverPreviewFilter(segmentCount: number, samplingFps: string): string {
+  const preparedStreams = Array.from({ length: segmentCount }, (_, index) =>
+    `[${index}:v]setpts=PTS-STARTPTS,scale=${HOVER_SPRITE_FRAME_WIDTH}:${HOVER_SPRITE_FRAME_HEIGHT}:force_original_aspect_ratio=decrease,pad=${HOVER_SPRITE_FRAME_WIDTH}:${HOVER_SPRITE_FRAME_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,setsar=1[hover_preview_segment_${index}]`
+  );
+  const tileFilter = `fps=${samplingFps},tile=${HOVER_SPRITE_COLUMNS}x${HOVER_SPRITE_ROWS}:nb_frames=${HOVER_SPRITE_FRAME_COUNT}[hover_preview_sprite]`;
+
+  if (segmentCount === 1) {
+    return [...preparedStreams, `[hover_preview_segment_0]${tileFilter}`].join(';');
+  }
+
+  const concatInputs = Array.from(
+    { length: segmentCount },
+    (_, index) => `[hover_preview_segment_${index}]`
+  ).join('');
+
+  return [
+    ...preparedStreams,
+    `${concatInputs}concat=n=${segmentCount}:v=1:a=0,${tileFilter}`
+  ].join(';');
+}
+
+function serializeHoverPreviewSegments(segments: HoverPreviewSegment[]): Array<Record<string, unknown>> {
+  return segments.map((segment, index) => ({
+    index,
+    source: segment.source,
+    startSeconds: Number(segment.startSeconds.toFixed(3)),
+    durationSeconds: Number(segment.durationSeconds.toFixed(3)),
+    bookmarkId: segment.bookmarkId ?? null,
+    bookmarkTimeSeconds: segment.bookmarkTimeSeconds ?? null
+  }));
 }
 
 async function generateHoverPreviewSprite(
@@ -3500,7 +3699,10 @@ async function generateHoverPreviewSprite(
     );
   }
 
-  const samplingFps = (HOVER_SPRITE_FRAME_COUNT / Math.max(durationSeconds, 0.001)).toFixed(6);
+  const bookmarks = catalogStore.listCatalogItemBookmarks(item.id);
+  const bookmarkCount = bookmarks.length;
+  const previewPlan = createHoverPreviewPlan(bookmarks, durationSeconds, HOVER_PREVIEW_DURATION_SECONDS);
+  const samplingFps = (HOVER_SPRITE_FRAME_COUNT / previewPlan.effectiveDurationSeconds).toFixed(6);
 
   fs.mkdirSync(path.dirname(outputDescriptor.absolutePath), { recursive: true });
 
@@ -3511,29 +3713,13 @@ async function generateHoverPreviewSprite(
       'Generating hover preview sprite.',
       'Generating hover preview sprite',
       'ffmpeg hover preview sprite',
-      [
-        '-y',
-        '-nostdin',
-        '-v',
-        'error',
-        '-stats_period',
-        '0.5',
-        '-progress',
-        'pipe:1',
-        '-i',
+      createHoverPreviewFfmpegArgs({
         inputPath,
-        '-an',
-        '-vf',
-        `fps=${samplingFps},scale=${HOVER_SPRITE_FRAME_WIDTH}:${HOVER_SPRITE_FRAME_HEIGHT}:force_original_aspect_ratio=decrease,pad=${HOVER_SPRITE_FRAME_WIDTH}:${HOVER_SPRITE_FRAME_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,tile=${HOVER_SPRITE_COLUMNS}x${HOVER_SPRITE_ROWS}:nb_frames=${HOVER_SPRITE_FRAME_COUNT}`,
-        '-frames:v',
-        '1',
-        '-vsync',
-        '0',
-        '-q:v',
-        '3',
-        outputDescriptor.absolutePath
-      ],
-      durationSeconds,
+        outputPath: outputDescriptor.absolutePath,
+        segments: previewPlan.segments,
+        samplingFps
+      }),
+      previewPlan.effectiveDurationSeconds,
       sessionId
     );
 
@@ -3545,7 +3731,8 @@ async function generateHoverPreviewSprite(
       'processing',
       sessionId,
       {
-        hoverPreviewSprite: createHoverPreviewSprite(outputDescriptor.relativePath)
+        hoverPreviewSprite: createHoverPreviewSprite(outputDescriptor.relativePath),
+        hoverPreviewRevision: bookmarkCount
       }
     );
 
@@ -3557,7 +3744,14 @@ async function generateHoverPreviewSprite(
       {
         hoverPreviewRelativePath: outputDescriptor.relativePath,
         frameCount: HOVER_SPRITE_FRAME_COUNT,
-        sourceDurationSeconds: durationSeconds
+        columns: HOVER_SPRITE_COLUMNS,
+        rows: HOVER_SPRITE_ROWS,
+        sourceDurationSeconds: durationSeconds,
+        hoverPreviewDurationSeconds: HOVER_PREVIEW_DURATION_SECONDS,
+        effectiveCaptureDurationSeconds: previewPlan.effectiveDurationSeconds,
+        bookmarkCount,
+        hoverPreviewRevision: bookmarkCount,
+        segments: serializeHoverPreviewSegments(previewPlan.segments)
       }
     );
 
@@ -3584,7 +3778,12 @@ async function generateHoverPreviewSprite(
       'processing.hover_thumbnails.failed',
       message,
       getCatalogItemLogContext(continuedItem, sessionId),
-      {},
+      {
+        bookmarkCount,
+        hoverPreviewDurationSeconds: HOVER_PREVIEW_DURATION_SECONDS,
+        frameCount: HOVER_SPRITE_FRAME_COUNT,
+        segments: serializeHoverPreviewSegments(previewPlan.segments)
+      },
       error
     );
 
@@ -8185,10 +8384,6 @@ async function start(): Promise<void> {
       typeof sessionSweepTimer.unref === 'function'
     ) {
       sessionSweepTimer.unref();
-    }
-
-    if (sessionStore.isIdle()) {
-      idleHoverPreviewRebuilder.start('startup.idle');
     }
 
     app.log.info(

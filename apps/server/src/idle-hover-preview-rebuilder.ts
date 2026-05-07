@@ -6,14 +6,11 @@ import type { CatalogStore } from './catalog-store';
 import type { AppConfig } from './config';
 import type { CatalogBookmark, CatalogItem, HoverPreviewSprite, ProcessingSnapshot } from './types';
 
-export const HOVER_PREVIEW_REBUILD_REVISION = 1;
-
-const PREVIEW_PLAYBACK_SECONDS = 5;
-const PREVIEW_TARGET_FRAME_COUNT = 25;
-const PREVIEW_COLUMNS = 5;
+const PREVIEW_NO_BOOKMARK_START_THRESHOLD_SECONDS = 20;
 const PREVIEW_FRAME_WIDTH = 160;
 const PREVIEW_FRAME_HEIGHT = 90;
 const COMMAND_ABORT_GRACE_MS = 2000;
+const MIN_CAPTURE_SECONDS = 0.001;
 
 type Logger = {
   info: (payload: Record<string, unknown>, message: string) => void;
@@ -31,6 +28,42 @@ type HoverPreviewDescriptor = {
   absolutePath: string;
   relativePath: string;
 };
+
+type HoverPreviewSegment = {
+  startSeconds: number;
+  durationSeconds: number;
+  source: 'video_start' | 'video_middle' | 'bookmark';
+  bookmarkId?: string;
+  bookmarkTimeSeconds?: number;
+};
+
+type HoverPreviewPlan = {
+  segments: HoverPreviewSegment[];
+  effectiveDurationSeconds: number;
+};
+
+type HoverPreviewLayout = {
+  frameCount: number;
+  columns: number;
+  rows: number;
+};
+
+type PreviewAuditDecision =
+  | {
+      action: 'skip';
+      bookmarkCount: number;
+      storedRevision: number;
+      previewAbsolutePath: string;
+      previewFileExists: true;
+    }
+  | {
+      action: 'rebuild';
+      reason: 'missing_preview_file' | 'bookmark_count_revision_mismatch';
+      bookmarkCount: number;
+      storedRevision: number;
+      previewAbsolutePath: string | null;
+      previewFileExists: boolean;
+    };
 
 type IdleHoverPreviewRebuilderOptions = {
   catalogStore: CatalogStore;
@@ -68,12 +101,13 @@ export class IdleHoverPreviewRebuilder {
     if (!this.options.isFfmpegAvailable()) {
       this.options.logger.warn(
         {
-          event: 'hover_preview.idle_rebuild.skipped',
+          event: 'hover_preview.idle_audit.skipped',
           reason,
-          targetRevision: HOVER_PREVIEW_REBUILD_REVISION,
-          missingTool: 'ffmpeg'
+          missingTool: 'ffmpeg',
+          hoverPreviewDurationSeconds: this.options.config.hoverPreviewDurationSeconds,
+          hoverPreviewFrameCount: this.options.config.hoverPreviewFrameCount
         },
-        'Skipping idle hover preview rebuild because ffmpeg is unavailable.'
+        'Skipping idle hover preview audit because ffmpeg is unavailable.'
       );
       return;
     }
@@ -107,11 +141,11 @@ export class IdleHoverPreviewRebuilder {
 
     this.options.logger.info(
       {
-        event: 'hover_preview.idle_rebuild.cancel_requested',
+        event: 'hover_preview.idle_audit.cancel_requested',
         reason,
-        targetRevision: HOVER_PREVIEW_REBUILD_REVISION
+        resumeStrategy: 'rescan_and_skip_completed_items'
       },
-      'Cancelling idle hover preview rebuild because the server is active.'
+      'Cancelling idle hover preview audit because the server is active.'
     );
     abortController.abort(new IdleHoverPreviewRebuildCancelledError(reason));
   }
@@ -122,50 +156,130 @@ export class IdleHoverPreviewRebuilder {
   }
 
   private async run(reason: string, runId: number, signal: AbortSignal): Promise<void> {
-    const attemptedItemIds = new Set<string>();
-    let rebuiltCount = 0;
-    let unavailableCount = 0;
-    let failedCount = 0;
+    const auditStartedAt = Date.now();
+    const stats = {
+      totalCatalogItemCount: 0,
+      readyCatalogItemCount: 0,
+      examinedCount: 0,
+      rebuiltCount: 0,
+      skippedCount: 0,
+      missingPreviewCount: 0,
+      revisionMismatchCount: 0,
+      unavailableCount: 0,
+      failedCount: 0
+    };
 
     this.options.logger.info(
       {
-        event: 'hover_preview.idle_rebuild.started',
+        event: 'hover_preview.idle_audit.started',
         reason,
         runId,
-        targetRevision: HOVER_PREVIEW_REBUILD_REVISION
+        hoverPreviewDurationSeconds: this.options.config.hoverPreviewDurationSeconds,
+        hoverPreviewFrameCount: this.options.config.hoverPreviewFrameCount,
+        resumeStrategy: 'rescan_and_skip_completed_items'
       },
-      'Started idle hover preview rebuild audit.'
+      'Started idle hover preview audit.'
     );
 
     try {
-      while (!signal.aborted) {
-        const item = this.findNextCandidate(attemptedItemIds);
-        if (!item) {
-          break;
+      const allItems = this.options.catalogStore.list();
+      const readyItems = allItems
+        .filter((item) => item.status === 'ready')
+        .sort((left, right) => left.uploadedAt.localeCompare(right.uploadedAt));
+
+      stats.totalCatalogItemCount = allItems.length;
+      stats.readyCatalogItemCount = readyItems.length;
+
+      for (const itemSnapshot of readyItems) {
+        throwIfCancelled(signal);
+
+        const item = this.options.catalogStore.findById(itemSnapshot.id);
+        if (!item || item.status !== 'ready') {
+          continue;
         }
 
-        attemptedItemIds.add(item.id);
+        const bookmarks = this.options.catalogStore.listCatalogItemBookmarks(item.id);
+        const bookmarkCount = bookmarks.length;
+        const decision = this.createAuditDecision(item, bookmarkCount);
+        stats.examinedCount += 1;
+
+        this.options.logger.info(
+          {
+            event: 'hover_preview.idle_audit.item_examined',
+            runId,
+            itemId: item.id,
+            visibleName: item.visibleName,
+            bookmarkCount,
+            storedRevision: item.hoverPreviewRevision,
+            hasHoverPreviewSprite: item.hoverPreviewSprite !== null,
+            previewFileExists: decision.previewFileExists,
+            decision: decision.action,
+            rebuildReason: decision.action === 'rebuild' ? decision.reason : null
+          },
+          'Examined catalog item during idle hover preview audit.'
+        );
+
+        if (decision.action === 'skip') {
+          stats.skippedCount += 1;
+          this.options.logger.info(
+            {
+              event: 'hover_preview.idle_audit.item_skipped',
+              runId,
+              itemId: item.id,
+              visibleName: item.visibleName,
+              bookmarkCount,
+              storedRevision: item.hoverPreviewRevision,
+              hoverPreviewAbsolutePath: decision.previewAbsolutePath
+            },
+            'Skipping hover preview rebuild because the preview file exists and revision matches bookmark count.'
+          );
+          await yieldToEventLoop(signal);
+          continue;
+        }
+
+        if (decision.reason === 'missing_preview_file') {
+          stats.missingPreviewCount += 1;
+        } else {
+          stats.revisionMismatchCount += 1;
+        }
+
+        this.options.logger.info(
+          {
+            event: 'hover_preview.idle_audit.item_rebuild_needed',
+            runId,
+            itemId: item.id,
+            visibleName: item.visibleName,
+            reason: decision.reason,
+            bookmarkCount,
+            storedRevision: item.hoverPreviewRevision,
+            hoverPreviewAbsolutePath: decision.previewAbsolutePath
+          },
+          decision.reason === 'missing_preview_file'
+            ? 'Hover preview rebuild required because the preview file is missing.'
+            : 'Hover preview rebuild required because bookmark count differs from stored preview revision.'
+        );
 
         try {
-          const result = await this.rebuildCatalogItemHoverPreview(item, signal);
+          const result = await this.rebuildCatalogItemHoverPreview(item, bookmarks, decision.reason, runId, signal);
           if (result === 'rebuilt') {
-            rebuiltCount += 1;
-          } else if (result === 'unavailable') {
-            unavailableCount += 1;
+            stats.rebuiltCount += 1;
+          } else {
+            stats.unavailableCount += 1;
           }
         } catch (error) {
           if (isCancellationError(error) || signal.aborted) {
             throw error;
           }
 
-          failedCount += 1;
+          stats.failedCount += 1;
           this.options.logger.warn(
             {
-              event: 'hover_preview.idle_rebuild.item_failed',
+              event: 'hover_preview.idle_audit.item_failed',
               runId,
               itemId: item.id,
               visibleName: item.visibleName,
-              targetRevision: HOVER_PREVIEW_REBUILD_REVISION,
+              bookmarkCount,
+              storedRevision: item.hoverPreviewRevision,
               err: error
             },
             'Idle hover preview rebuild failed for one catalog item; continuing with the audit.'
@@ -175,84 +289,121 @@ export class IdleHoverPreviewRebuilder {
         await yieldToEventLoop(signal);
       }
 
-      if (signal.aborted) {
-        throw new IdleHoverPreviewRebuildCancelledError();
-      }
+      throwIfCancelled(signal);
 
       this.options.logger.info(
         {
-          event: 'hover_preview.idle_rebuild.completed',
+          event: 'hover_preview.idle_audit.completed',
           runId,
-          targetRevision: HOVER_PREVIEW_REBUILD_REVISION,
-          attemptedCount: attemptedItemIds.size,
-          rebuiltCount,
-          unavailableCount,
-          failedCount,
-          remainingCount: this.countRemainingCandidates()
+          status: 'completed',
+          elapsedMs: Date.now() - auditStartedAt,
+          remainingRebuildCandidateCount: this.countCurrentRebuildCandidates(),
+          ...stats
         },
-        'Completed idle hover preview rebuild audit.'
+        'Completed idle hover preview audit.'
       );
     } catch (error) {
       if (isCancellationError(error) || signal.aborted) {
         this.options.logger.info(
           {
-            event: 'hover_preview.idle_rebuild.cancelled',
+            event: 'hover_preview.idle_audit.cancelled',
             runId,
-            targetRevision: HOVER_PREVIEW_REBUILD_REVISION,
-            attemptedCount: attemptedItemIds.size,
-            rebuiltCount,
-            unavailableCount,
-            failedCount,
-            remainingCount: this.countRemainingCandidates()
+            status: 'cancelled',
+            elapsedMs: Date.now() - auditStartedAt,
+            remainingRebuildCandidateCount: this.countCurrentRebuildCandidates(),
+            resumeStrategy: 'rescan_and_skip_completed_items',
+            ...stats
           },
-          'Idle hover preview rebuild audit stopped before completion.'
+          'Idle hover preview audit stopped before completion; it will resume by rescanning when the server is idle again.'
         );
         return;
       }
 
       this.options.logger.error(
         {
-          event: 'hover_preview.idle_rebuild.failed',
+          event: 'hover_preview.idle_audit.failed',
           runId,
-          targetRevision: HOVER_PREVIEW_REBUILD_REVISION,
-          attemptedCount: attemptedItemIds.size,
-          rebuiltCount,
-          unavailableCount,
-          failedCount,
+          status: 'failed',
+          elapsedMs: Date.now() - auditStartedAt,
+          remainingRebuildCandidateCount: this.countCurrentRebuildCandidates(),
+          ...stats,
           err: error
         },
-        'Idle hover preview rebuild audit failed unexpectedly.'
+        'Idle hover preview audit failed unexpectedly.'
       );
     }
   }
 
-  private findNextCandidate(attemptedItemIds: Set<string>): CatalogItem | null {
-    return (
-      this.options.catalogStore
-        .list()
-        .filter((item) => item.status === 'ready')
-        .filter((item) => item.hoverPreviewRevision < HOVER_PREVIEW_REBUILD_REVISION)
-        .filter((item) => !attemptedItemIds.has(item.id))
-        .sort((left, right) => left.uploadedAt.localeCompare(right.uploadedAt))[0] ?? null
-    );
+  private createAuditDecision(item: CatalogItem, bookmarkCount: number): PreviewAuditDecision {
+    const previewAbsolutePath = resolveHoverPreviewSpriteAbsolutePath(this.options.config, item);
+    const previewFileExists = previewAbsolutePath !== null && fileExists(previewAbsolutePath);
+
+    if (!previewFileExists) {
+      return {
+        action: 'rebuild',
+        reason: 'missing_preview_file',
+        bookmarkCount,
+        storedRevision: item.hoverPreviewRevision,
+        previewAbsolutePath,
+        previewFileExists
+      };
+    }
+
+    if (item.hoverPreviewRevision !== bookmarkCount) {
+      return {
+        action: 'rebuild',
+        reason: 'bookmark_count_revision_mismatch',
+        bookmarkCount,
+        storedRevision: item.hoverPreviewRevision,
+        previewAbsolutePath,
+        previewFileExists
+      };
+    }
+
+    return {
+      action: 'skip',
+      bookmarkCount,
+      storedRevision: item.hoverPreviewRevision,
+      previewAbsolutePath,
+      previewFileExists: true
+    };
   }
 
-  private countRemainingCandidates(): number {
+  private countCurrentRebuildCandidates(): number {
     return this.options.catalogStore
       .list()
       .filter((item) => item.status === 'ready')
-      .filter((item) => item.hoverPreviewRevision < HOVER_PREVIEW_REBUILD_REVISION).length;
+      .filter((item) => {
+        const bookmarkCount = this.options.catalogStore.listCatalogItemBookmarks(item.id).length;
+        return this.createAuditDecision(item, bookmarkCount).action === 'rebuild';
+      }).length;
   }
 
   private async rebuildCatalogItemHoverPreview(
     item: CatalogItem,
+    bookmarks: CatalogBookmark[],
+    rebuildReason: 'missing_preview_file' | 'bookmark_count_revision_mismatch',
+    runId: number,
     signal: AbortSignal
   ): Promise<'rebuilt' | 'unavailable'> {
     throwIfCancelled(signal);
 
+    const bookmarkCount = bookmarks.length;
     const durationSeconds = item.probe?.durationSeconds ?? null;
     if (durationSeconds === null || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-      await this.markHoverPreviewUnavailable(item, 'duration_unavailable', signal);
+      this.options.logger.warn(
+        {
+          event: 'hover_preview.idle_audit.item_unavailable',
+          runId,
+          itemId: item.id,
+          visibleName: item.visibleName,
+          reason: 'duration_unavailable',
+          rebuildReason,
+          bookmarkCount,
+          storedRevision: item.hoverPreviewRevision
+        },
+        'Cannot rebuild hover preview because the retained asset duration is unavailable.'
+      );
       return 'unavailable';
     }
 
@@ -260,37 +411,27 @@ export class IdleHoverPreviewRebuilder {
     if (!inputPath || !fileExists(inputPath)) {
       this.options.logger.warn(
         {
-          event: 'hover_preview.idle_rebuild.source_missing',
+          event: 'hover_preview.idle_audit.source_missing',
+          runId,
           itemId: item.id,
           visibleName: item.visibleName,
           relativePath: item.relativePath,
-          targetRevision: HOVER_PREVIEW_REBUILD_REVISION
+          rebuildReason,
+          bookmarkCount,
+          storedRevision: item.hoverPreviewRevision
         },
-        'Skipping idle hover preview rebuild because the catalog item media file is missing.'
+        'Cannot rebuild hover preview because the catalog item media file is missing.'
       );
       return 'unavailable';
     }
 
-    const bookmarks = this.options.catalogStore.listCatalogItemBookmarks(item.id);
-    const captureStartSeconds = determineHoverPreviewStartSeconds(item, bookmarks, durationSeconds);
-    const captureDurationSeconds = Math.max(
-      0.001,
-      Math.min(PREVIEW_PLAYBACK_SECONDS, durationSeconds - captureStartSeconds)
-    );
-    const frameCount = Math.max(
-      1,
-      Math.min(
-        PREVIEW_TARGET_FRAME_COUNT,
-        Math.round((PREVIEW_TARGET_FRAME_COUNT * captureDurationSeconds) / PREVIEW_PLAYBACK_SECONDS)
-      )
-    );
-    const columns = Math.max(1, Math.min(PREVIEW_COLUMNS, frameCount));
-    const rows = Math.max(1, Math.ceil(frameCount / columns));
-    const samplingFps = (frameCount / captureDurationSeconds).toFixed(6);
-    const outputDescriptor = createHoverPreviewDescriptor(this.options.config, item, HOVER_PREVIEW_REBUILD_REVISION);
+    const plan = createHoverPreviewPlan(bookmarks, durationSeconds, this.options.config.hoverPreviewDurationSeconds);
+    const layout = createHoverPreviewLayout(this.options.config.hoverPreviewFrameCount);
+    const samplingFps = (layout.frameCount / plan.effectiveDurationSeconds).toFixed(6);
+    const outputDescriptor = createHoverPreviewDescriptor(this.options.config, item, bookmarkCount);
     const temporaryOutputPath = path.join(
       path.dirname(outputDescriptor.absolutePath),
-      `${item.id}-r${HOVER_PREVIEW_REBUILD_REVISION}-${randomUUID()}.tmp.jpg`
+      `${item.id}-r${bookmarkCount}-${randomUUID()}.tmp.jpg`
     );
 
     fs.mkdirSync(path.dirname(outputDescriptor.absolutePath), { recursive: true });
@@ -298,16 +439,22 @@ export class IdleHoverPreviewRebuilder {
 
     this.options.logger.info(
       {
-        event: 'hover_preview.idle_rebuild.item_started',
+        event: 'hover_preview.idle_audit.item_started',
+        runId,
         itemId: item.id,
         visibleName: item.visibleName,
-        targetRevision: HOVER_PREVIEW_REBUILD_REVISION,
-        bookmarkCount: bookmarks.length,
-        captureStartSeconds,
-        captureDurationSeconds,
-        frameCount,
-        columns,
-        rows
+        reason: rebuildReason,
+        bookmarkCount,
+        storedRevision: item.hoverPreviewRevision,
+        targetRevision: bookmarkCount,
+        hoverPreviewRelativePath: outputDescriptor.relativePath,
+        hoverPreviewDurationSeconds: this.options.config.hoverPreviewDurationSeconds,
+        hoverPreviewFrameCount: layout.frameCount,
+        effectiveCaptureDurationSeconds: plan.effectiveDurationSeconds,
+        samplingFps,
+        columns: layout.columns,
+        rows: layout.rows,
+        segments: serializeHoverPreviewSegments(plan.segments)
       },
       'Rebuilding catalog item hover preview during server idle time.'
     );
@@ -315,28 +462,15 @@ export class IdleHoverPreviewRebuilder {
     try {
       const commandResult = await runFfmpegCommand(
         this.options.config.ffmpegCommand,
-        [
-          '-y',
-          '-nostdin',
-          '-v',
-          'error',
-          '-ss',
-          captureStartSeconds.toFixed(3),
-          '-t',
-          captureDurationSeconds.toFixed(3),
-          '-i',
+        createHoverPreviewFfmpegArgs({
           inputPath,
-          '-an',
-          '-vf',
-          `fps=${samplingFps},scale=${PREVIEW_FRAME_WIDTH}:${PREVIEW_FRAME_HEIGHT}:force_original_aspect_ratio=decrease,pad=${PREVIEW_FRAME_WIDTH}:${PREVIEW_FRAME_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,tile=${columns}x${rows}:nb_frames=${frameCount}`,
-          '-frames:v',
-          '1',
-          '-vsync',
-          '0',
-          '-q:v',
-          '3',
-          temporaryOutputPath
-        ],
+          outputPath: temporaryOutputPath,
+          segments: plan.segments,
+          samplingFps,
+          frameCount: layout.frameCount,
+          columns: layout.columns,
+          rows: layout.rows
+        }),
         signal,
         this.options.logger,
         {
@@ -358,7 +492,6 @@ export class IdleHoverPreviewRebuilder {
       }
 
       renameReplacingDestination(temporaryOutputPath, outputDescriptor.absolutePath);
-      throwIfCancelled(signal);
 
       const latestItem = this.options.catalogStore.findById(item.id);
       if (!latestItem) {
@@ -366,8 +499,13 @@ export class IdleHoverPreviewRebuilder {
       }
 
       const updatedItem = await this.options.catalogStore.updateCatalogItem(item.id, {
-        hoverPreviewSprite: createHoverPreviewSprite(outputDescriptor.relativePath, frameCount, columns, rows),
-        hoverPreviewRevision: HOVER_PREVIEW_REBUILD_REVISION,
+        hoverPreviewSprite: createHoverPreviewSprite(
+          outputDescriptor.relativePath,
+          layout.frameCount,
+          layout.columns,
+          layout.rows
+        ),
+        hoverPreviewRevision: bookmarkCount,
         processing: createCacheBustProcessingSnapshot(latestItem)
       });
 
@@ -381,55 +519,29 @@ export class IdleHoverPreviewRebuilder {
 
       this.options.logger.info(
         {
-          event: 'hover_preview.idle_rebuild.item_completed',
+          event: 'hover_preview.idle_audit.item_completed',
+          runId,
           itemId: updatedItem.id,
           visibleName: updatedItem.visibleName,
-          targetRevision: HOVER_PREVIEW_REBUILD_REVISION,
+          reason: rebuildReason,
+          targetRevision: bookmarkCount,
           hoverPreviewRelativePath: outputDescriptor.relativePath,
-          bookmarkCount: bookmarks.length,
-          captureStartSeconds,
-          captureDurationSeconds,
-          frameCount,
-          columns,
-          rows
+          bookmarkCount,
+          hoverPreviewDurationSeconds: this.options.config.hoverPreviewDurationSeconds,
+          hoverPreviewFrameCount: layout.frameCount,
+          effectiveCaptureDurationSeconds: plan.effectiveDurationSeconds,
+          samplingFps,
+          columns: layout.columns,
+          rows: layout.rows,
+          segments: serializeHoverPreviewSegments(plan.segments)
         },
-        'Rebuilt catalog item hover preview during server idle time.'
+        'Rebuilt catalog item hover preview and updated preview revision to the current bookmark count.'
       );
 
       return 'rebuilt';
     } finally {
       removePathIfExists(temporaryOutputPath);
     }
-  }
-
-  private async markHoverPreviewUnavailable(
-    item: CatalogItem,
-    reason: string,
-    signal: AbortSignal
-  ): Promise<void> {
-    throwIfCancelled(signal);
-
-    const latestItem = this.options.catalogStore.findById(item.id);
-    if (!latestItem) {
-      return;
-    }
-
-    await this.options.catalogStore.updateCatalogItem(item.id, {
-      hoverPreviewSprite: null,
-      hoverPreviewRevision: HOVER_PREVIEW_REBUILD_REVISION,
-      processing: createCacheBustProcessingSnapshot(latestItem)
-    });
-
-    this.options.logger.warn(
-      {
-        event: 'hover_preview.idle_rebuild.item_unavailable',
-        itemId: item.id,
-        visibleName: item.visibleName,
-        targetRevision: HOVER_PREVIEW_REBUILD_REVISION,
-        reason
-      },
-      'Marked catalog item hover preview as audited without a sprite because required media metadata is unavailable.'
-    );
   }
 }
 
@@ -449,18 +561,158 @@ function createHoverPreviewSprite(
   };
 }
 
-function determineHoverPreviewStartSeconds(
-  item: CatalogItem,
+function createHoverPreviewPlan(
   bookmarks: CatalogBookmark[],
-  durationSeconds: number
-): number {
-  const maxStartSeconds = Math.max(0, durationSeconds - 0.001);
-  const rawStartSeconds = bookmarks.length > 0
-    ? bookmarks[Math.floor(bookmarks.length / 2)]?.timeSeconds ?? 0
-    : durationSeconds / 2;
+  durationSeconds: number,
+  previewDurationSeconds: number
+): HoverPreviewPlan {
+  const selectedBookmarks = selectHoverPreviewBookmarks(bookmarks);
+  const rawSegments: Array<Omit<HoverPreviewSegment, 'durationSeconds'>> = [];
+  const segmentBudgetSeconds = selectedBookmarks.length > 0
+    ? previewDurationSeconds / selectedBookmarks.length
+    : previewDurationSeconds;
 
-  const safeStartSeconds = Number.isFinite(rawStartSeconds) ? rawStartSeconds : 0;
-  return Math.max(0, Math.min(maxStartSeconds, safeStartSeconds));
+  if (selectedBookmarks.length === 0) {
+    rawSegments.push({
+      source: durationSeconds < PREVIEW_NO_BOOKMARK_START_THRESHOLD_SECONDS ? 'video_start' : 'video_middle',
+      startSeconds: durationSeconds < PREVIEW_NO_BOOKMARK_START_THRESHOLD_SECONDS ? 0 : durationSeconds / 2
+    });
+  } else {
+    for (const bookmark of selectedBookmarks) {
+      rawSegments.push({
+        source: 'bookmark',
+        startSeconds: bookmark.timeSeconds,
+        bookmarkId: bookmark.id,
+        bookmarkTimeSeconds: bookmark.timeSeconds
+      });
+    }
+  }
+
+  const segments = rawSegments.map((segment) => createSafeHoverPreviewSegment(segment, durationSeconds, segmentBudgetSeconds));
+  const effectiveDurationSeconds = Math.max(
+    MIN_CAPTURE_SECONDS,
+    segments.reduce((total, segment) => total + segment.durationSeconds, 0)
+  );
+
+  return {
+    segments,
+    effectiveDurationSeconds
+  };
+}
+
+function selectHoverPreviewBookmarks(bookmarks: CatalogBookmark[]): CatalogBookmark[] {
+  if (bookmarks.length <= 3) {
+    return bookmarks;
+  }
+
+  return bookmarks.slice(-3);
+}
+
+function createSafeHoverPreviewSegment(
+  segment: Omit<HoverPreviewSegment, 'durationSeconds'>,
+  durationSeconds: number,
+  segmentBudgetSeconds: number
+): HoverPreviewSegment {
+  const maxStartSeconds = Math.max(0, durationSeconds - MIN_CAPTURE_SECONDS);
+  const safeStartSeconds = Number.isFinite(segment.startSeconds) ? segment.startSeconds : 0;
+  const startSeconds = Math.max(0, Math.min(maxStartSeconds, safeStartSeconds));
+  const availableDurationSeconds = Math.max(MIN_CAPTURE_SECONDS, durationSeconds - startSeconds);
+  const duration = Math.max(MIN_CAPTURE_SECONDS, Math.min(segmentBudgetSeconds, availableDurationSeconds));
+
+  return {
+    ...segment,
+    startSeconds,
+    durationSeconds: duration
+  };
+}
+
+function createHoverPreviewLayout(configuredFrameCount: number): HoverPreviewLayout {
+  const frameCount = Math.max(1, Math.floor(configuredFrameCount));
+  const columns = Math.max(1, Math.ceil(Math.sqrt(frameCount)));
+  const rows = Math.max(1, Math.ceil(frameCount / columns));
+
+  return {
+    frameCount,
+    columns,
+    rows
+  };
+}
+
+function createHoverPreviewFfmpegArgs(input: {
+  inputPath: string;
+  outputPath: string;
+  segments: HoverPreviewSegment[];
+  samplingFps: string;
+  frameCount: number;
+  columns: number;
+  rows: number;
+}): string[] {
+  const args = ['-y', '-nostdin', '-v', 'error'];
+
+  for (const segment of input.segments) {
+    args.push(
+      '-ss',
+      formatFfmpegTimestamp(segment.startSeconds),
+      '-t',
+      formatFfmpegTimestamp(segment.durationSeconds),
+      '-i',
+      input.inputPath
+    );
+  }
+
+  args.push(
+    '-an',
+    '-filter_complex',
+    createHoverPreviewFilter(input.segments.length, input.samplingFps, input.frameCount, input.columns, input.rows),
+    '-map',
+    '[hover_preview_sprite]',
+    '-frames:v',
+    '1',
+    '-vsync',
+    '0',
+    '-q:v',
+    '3',
+    input.outputPath
+  );
+
+  return args;
+}
+
+function createHoverPreviewFilter(
+  segmentCount: number,
+  samplingFps: string,
+  frameCount: number,
+  columns: number,
+  rows: number
+): string {
+  const preparedStreams = Array.from({ length: segmentCount }, (_, index) =>
+    `[${index}:v]setpts=PTS-STARTPTS,scale=${PREVIEW_FRAME_WIDTH}:${PREVIEW_FRAME_HEIGHT}:force_original_aspect_ratio=decrease,pad=${PREVIEW_FRAME_WIDTH}:${PREVIEW_FRAME_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,setsar=1[hover_preview_segment_${index}]`
+  );
+  const tileFilter = `fps=${samplingFps},tile=${columns}x${rows}:nb_frames=${frameCount}[hover_preview_sprite]`;
+
+  if (segmentCount === 1) {
+    return [...preparedStreams, `[hover_preview_segment_0]${tileFilter}`].join(';');
+  }
+
+  const concatInputs = Array.from(
+    { length: segmentCount },
+    (_, index) => `[hover_preview_segment_${index}]`
+  ).join('');
+  return [
+    ...preparedStreams,
+    `${concatInputs}concat=n=${segmentCount}:v=1:a=0,${tileFilter}`
+  ].join(';');
+}
+
+function serializeHoverPreviewSegments(segments: HoverPreviewSegment[]): Array<Record<string, unknown>> {
+  return segments.map((segment, index) => ({
+    index,
+    source: segment.source,
+    startSeconds: Number(segment.startSeconds.toFixed(3)),
+    durationSeconds: Number(segment.durationSeconds.toFixed(3)),
+    bookmarkId: segment.bookmarkId ?? null,
+    bookmarkTimeSeconds: segment.bookmarkTimeSeconds ?? null
+  }));
 }
 
 function createHoverPreviewDescriptor(
@@ -489,6 +741,15 @@ function createCacheBustProcessingSnapshot(item: CatalogItem): ProcessingSnapsho
     message: 'Media processing complete.',
     updatedAt: new Date().toISOString()
   };
+}
+
+function resolveHoverPreviewSpriteAbsolutePath(config: AppConfig, item: CatalogItem): string | null {
+  const relativePath = item.hoverPreviewSprite?.relativePath ?? null;
+  if (!relativePath) {
+    return null;
+  }
+
+  return resolveManagedMediaAbsolutePath(config.mediaRoot, relativePath);
 }
 
 function resolveManagedMediaAbsolutePath(mediaRoot: string, relativePath: string): string | null {
@@ -552,6 +813,10 @@ function removeObsoleteHoverPreviewFile(config: AppConfig, previousItem: Catalog
   removePathIfExists(previousAbsolutePath);
 }
 
+function formatFfmpegTimestamp(seconds: number): string {
+  return Math.max(0, seconds).toFixed(3);
+}
+
 function sanitizeCommandFailure(value: string): string {
   return value
     .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
@@ -575,7 +840,7 @@ async function runFfmpegCommand(
 
   logger.info(
     {
-      event: 'hover_preview.idle_rebuild.command_started',
+      event: 'hover_preview.idle_audit.command_started',
       itemId: context.itemId,
       commandLabel: context.commandLabel,
       command,
@@ -655,7 +920,7 @@ async function runFfmpegCommand(
 
         logger.error(
           {
-            event: 'hover_preview.idle_rebuild.command_spawn_failed',
+            event: 'hover_preview.idle_audit.command_spawn_failed',
             itemId: context.itemId,
             commandLabel: context.commandLabel,
             err: error
@@ -682,8 +947,8 @@ async function runFfmpegCommand(
         logger.info(
           {
             event: result.exitCode === 0
-              ? 'hover_preview.idle_rebuild.command_completed'
-              : 'hover_preview.idle_rebuild.command_failed',
+              ? 'hover_preview.idle_audit.command_completed'
+              : 'hover_preview.idle_audit.command_failed',
             itemId: context.itemId,
             commandLabel: context.commandLabel,
             exitCode: result.exitCode,

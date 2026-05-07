@@ -403,11 +403,11 @@ function normalizeCatalogItemCounter(value: unknown): number {
 function normalizeHoverPreviewRevision(value: unknown): number {
   const parsed = readNumber(value);
 
-  if (parsed === null || parsed < 0) {
+  if (parsed === null) {
     return 0;
   }
 
-  return Math.floor(parsed);
+  return Math.max(-1, Math.floor(parsed));
 }
 
 function normalizeViewerVisualAdjustmentValue(value: unknown): number {
