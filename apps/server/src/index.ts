@@ -13,7 +13,12 @@ import { CatalogStore, normalizeCatalogTagLabel } from './catalog-store';
 import { loadConfig } from './config';
 import { createDatabasePool } from './db';
 import { SessionStore } from './session-store';
-import { detectToolAvailability, updateServerSideTools, type ServerToolUpdateResult } from './tooling';
+import {
+  detectToolAvailability,
+  updateServerSideTools,
+  type ServerToolUpdateResult,
+  type ToolCommandConfig
+} from './tooling';
 import { ThumbnailMemoryCache, type CachedThumbnailFile } from './thumbnail-cache';
 import { IdleHoverPreviewRebuilder } from './idle-hover-preview-rebuilder';
 import type {
@@ -43,6 +48,7 @@ import type {
   ProcessingSnapshot,
   RuntimeStatePayload,
   SocketAckData,
+  ToolAvailability,
   StorageUsageInfo,
   SocketCommandMessage,
   SocketErrorCode,
@@ -66,7 +72,7 @@ const idleHoverPreviewRebuilder = new IdleHoverPreviewRebuilder({
   catalogStore,
   config,
   logger: app.log,
-  isFfmpegAvailable: () => detectToolAvailability(getToolCommandConfig()).ffmpeg,
+  isFfmpegAvailable: () => getCachedToolAvailability().ffmpeg,
   onCatalogItemUpdated: (item) => {
     broadcastCatalogItemUpdated(item, null, {
       includeProcessingEvents: false
@@ -247,6 +253,7 @@ const WS_RATE_WINDOW_MS = 10_000;
 const WS_MAX_COMMANDS_PER_WINDOW = 120;
 const SESSION_SWEEP_MS = 15_000;
 const STORAGE_USAGE_CACHE_TTL_MS = 30_000;
+const TOOL_AVAILABILITY_CACHE_TTL_MS = 30_000;
 
 const socketsBySessionId = new Map<string, Map<string, SessionSocketState>>();
 
@@ -438,6 +445,58 @@ function getToolCommandConfig(): {
   };
 }
 
+type ToolAvailabilityCacheEntry = {
+  commandKey: string;
+  expiresAt: number;
+  value: ToolAvailability;
+};
+
+let cachedToolAvailability: ToolAvailabilityCacheEntry | null = null;
+
+function createToolAvailabilityCommandKey(commands: ToolCommandConfig): string {
+  return JSON.stringify([
+    commands.ffmpegCommand,
+    commands.ffprobeCommand,
+    commands.ytDlpCommand
+  ]);
+}
+
+function cloneToolAvailability(value: ToolAvailability): ToolAvailability {
+  return {
+    ffmpeg: value.ffmpeg,
+    ffprobe: value.ffprobe,
+    ytDlp: value.ytDlp
+  };
+}
+
+function invalidateToolAvailabilityCache(): void {
+  cachedToolAvailability = null;
+}
+
+function getCachedToolAvailability(forceRefresh: boolean = false): ToolAvailability {
+  const commands = getToolCommandConfig();
+  const commandKey = createToolAvailabilityCommandKey(commands);
+  const now = Date.now();
+
+  if (
+    !forceRefresh &&
+    cachedToolAvailability &&
+    cachedToolAvailability.commandKey === commandKey &&
+    cachedToolAvailability.expiresAt > now
+  ) {
+    return cloneToolAvailability(cachedToolAvailability.value);
+  }
+
+  const value = detectToolAvailability(commands);
+  cachedToolAvailability = {
+    commandKey,
+    expiresAt: now + TOOL_AVAILABILITY_CACHE_TTL_MS,
+    value: cloneToolAvailability(value)
+  };
+
+  return cloneToolAvailability(value);
+}
+
 let cachedStorageUsage: { expiresAt: number; value: StorageUsageInfo | null } | null = null;
 let lastStorageUsageWarningKey: string | null = null;
 
@@ -528,7 +587,7 @@ function createStorageUsagePayload(): StorageUsageInfo | null {
 
 function createRuntimeStatePayload(includePort: boolean = true): RuntimeStatePayload {
   return {
-    toolAvailability: detectToolAvailability(getToolCommandConfig()),
+    toolAvailability: getCachedToolAvailability(),
     config: {
       idleLockMinutes: config.idleLockMinutes,
       wsHeartbeatMs: config.wsHeartbeatMs,
@@ -658,7 +717,8 @@ function queryCatalog(input: CatalogQueryInput = createDefaultCatalogQueryInput(
       break;
     case 'newest':
     default:
-      filtered.sort((left, right) => right.uploadedAt.localeCompare(left.uploadedAt));
+      // catalogStore.list() already returns items newest-first. Filtering preserves that order,
+      // so avoid repeating the same O(n log n) sort during bootstrap/default queries.
       break;
   }
 
@@ -1909,6 +1969,7 @@ function requestHasFreshThumbnail(request: FastifyRequest, thumbnailFile: Cached
 
 function applyThumbnailResponseHeaders(reply: FastifyReply, thumbnailFile: CachedThumbnailFile): void {
   reply.header('Cache-Control', THUMBNAIL_BROWSER_CACHE_CONTROL);
+  reply.header('X-Thumbnail-Cache', thumbnailFile.cacheStatus);
   reply.header('Content-Type', thumbnailFile.contentType);
   reply.header('ETag', thumbnailFile.etag);
   reply.header('Last-Modified', thumbnailFile.lastModified);
@@ -3873,7 +3934,7 @@ async function processCatalogItem(
   let workingItem = item;
 
   try {
-    const toolAvailability = detectToolAvailability(getToolCommandConfig());
+    const toolAvailability = getCachedToolAvailability();
     const missingTools: string[] = [];
     if (catalogItemRequiresSourceDownload(workingItem) && !toolAvailability.ytDlp) {
       missingTools.push('yt-dlp');
@@ -6351,7 +6412,7 @@ async function stageYtDlpImport(
   body: { url: string },
   sessionId: string
 ): Promise<IngestHttpResponse> {
-  const toolAvailability = detectToolAvailability(getToolCommandConfig());
+  const toolAvailability = getCachedToolAvailability();
   if (!toolAvailability.ytDlp) {
     return {
       ok: false,
@@ -6923,6 +6984,7 @@ async function handleServerToolUpdateRoute(
     );
 
     const result = await updateServerSideTools(getToolCommandConfig());
+    invalidateToolAvailabilityCache();
     const response = createServerToolUpdateResponse(result);
     broadcastRuntimeUpdated(response.runtime);
 
@@ -7476,7 +7538,7 @@ app.post('/api/catalog/:id/thumbnail', async (request: FastifyRequest, reply: Fa
     return;
   }
 
-  const toolAvailability = detectToolAvailability(getToolCommandConfig());
+  const toolAvailability = getCachedToolAvailability();
   if (!toolAvailability.ffmpeg) {
     reply.code(503).send({
       ok: false,
@@ -7562,7 +7624,7 @@ app.post('/api/catalog/:id/bookmarks', async (request: FastifyRequest, reply: Fa
     return;
   }
 
-  const toolAvailability = detectToolAvailability(getToolCommandConfig());
+  const toolAvailability = getCachedToolAvailability();
   if (!toolAvailability.ffmpeg) {
     reply.code(503).send({
       ok: false,
@@ -8412,7 +8474,7 @@ async function start(): Promise<void> {
       (item) => item.status === 'pending_processing' || item.status === 'processing'
     );
 
-    const toolAvailability = detectToolAvailability(getToolCommandConfig());
+    const toolAvailability = getCachedToolAvailability();
     const missingProcessingTools = [
       toolAvailability.ffprobe ? null : 'ffprobe',
       toolAvailability.ffmpeg ? null : 'ffmpeg'

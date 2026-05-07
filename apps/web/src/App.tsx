@@ -475,11 +475,13 @@ type CardMediaProps = {
   item: CatalogItem;
   compact?: boolean;
   clickable?: boolean;
+  thumbnailLoading?: 'eager' | 'lazy';
 };
 
 type CatalogCardProps = {
   item: CatalogItem;
   contextKey?: string;
+  thumbnailLoading?: 'eager' | 'lazy';
   onOpenViewer: (item: CatalogItem) => void;
   onOpenDetails: (item: CatalogItem) => void;
   onAddTag: (itemId: string, label: string) => Promise<CatalogItem | null>;
@@ -506,6 +508,7 @@ type CatalogHomeStripSectionProps = {
   view: CatalogHomeStripView;
   index: number;
   totalCount: number;
+  prioritizeInitialThumbnails: boolean;
   onMove: (stripId: string, direction: HomeStripMoveDirection) => void;
   onEdit: (strip: CatalogHomeStrip) => void;
   onDelete: (strip: CatalogHomeStrip) => void;
@@ -3373,6 +3376,41 @@ function compareCatalogItemsWithTieBreakers(left: CatalogItem, right: CatalogIte
   );
 }
 
+const catalogItemSearchTextCache = new WeakMap<CatalogItem, string>();
+const catalogItemTagIdSetCache = new WeakMap<CatalogItem, Set<string>>();
+
+function getCatalogItemSearchText(item: CatalogItem): string {
+  const cachedValue = catalogItemSearchTextCache.get(item);
+  if (cachedValue !== undefined) {
+    return cachedValue;
+  }
+
+  const searchableText = [
+    getCatalogItemDisplayName(item),
+    item.originalIngestName,
+    item.sourceSite ?? '',
+    item.sourceRemoteId ?? '',
+    item.sourceUrl ?? '',
+    ...item.tags.map((tag) => tag.label)
+  ]
+    .join(' ')
+    .toLowerCase();
+
+  catalogItemSearchTextCache.set(item, searchableText);
+  return searchableText;
+}
+
+function getCatalogItemTagIdSet(item: CatalogItem): Set<string> {
+  const cachedValue = catalogItemTagIdSetCache.get(item);
+  if (cachedValue) {
+    return cachedValue;
+  }
+
+  const tagIds = new Set(item.tags.map((tag) => tag.id));
+  catalogItemTagIdSetCache.set(item, tagIds);
+  return tagIds;
+}
+
 function filterCatalogItemsByCriteria(
   items: CatalogItem[],
   search: string,
@@ -3383,7 +3421,7 @@ function filterCatalogItemsByCriteria(
 
   return items.filter((item) => {
     if (selectedTagIds.length > 0 || excludedTagIds.length > 0) {
-      const itemTagIds = new Set(item.tags.map((tag) => tag.id));
+      const itemTagIds = getCatalogItemTagIdSet(item);
       if (!selectedTagIds.every((tagId) => itemTagIds.has(tagId))) {
         return false;
       }
@@ -3393,21 +3431,8 @@ function filterCatalogItemsByCriteria(
       }
     }
 
-    if (normalizedSearch !== '') {
-      const searchableText = [
-        getCatalogItemDisplayName(item),
-        item.originalIngestName,
-        item.sourceSite ?? '',
-        item.sourceRemoteId ?? '',
-        item.sourceUrl ?? '',
-        ...item.tags.map((tag) => tag.label)
-      ]
-        .join(' ')
-        .toLowerCase();
-
-      if (!searchableText.includes(normalizedSearch)) {
-        return false;
-      }
+    if (normalizedSearch !== '' && !getCatalogItemSearchText(item).includes(normalizedSearch)) {
+      return false;
     }
 
     return true;
@@ -3445,6 +3470,7 @@ function getCatalogHomeStripItems(
 }
 
 const HOME_STRIP_MIN_ITEMS_PER_ROW = 1;
+const HOME_STRIP_EAGER_THUMBNAIL_SECTION_LIMIT = 2;
 const HOME_STRIP_CARD_MIN_WIDTH_FALLBACK_PX = 260;
 const HOME_STRIP_COLUMN_GAP_FALLBACK_PX = 16;
 
@@ -4067,7 +4093,12 @@ function CatalogCardMedia(props: CardMediaProps): JSX.Element {
   return <CatalogReadyCardMedia {...props} />;
 }
 
-function CatalogReadyCardMedia({ item, compact = false, clickable = false }: CardMediaProps): JSX.Element {
+function CatalogReadyCardMedia({
+  item,
+  compact = false,
+  clickable = false,
+  thumbnailLoading
+}: CardMediaProps): JSX.Element {
   const hoverPreviewPlaybackRate = useContext(HoverPreviewPlaybackRateContext);
   const [posterCandidateIndex, setPosterCandidateIndex] = useState(0);
   const [isPointerActive, setIsPointerActive] = useState(false);
@@ -4092,6 +4123,7 @@ function CatalogReadyCardMedia({ item, compact = false, clickable = false }: Car
     item.status
   ]);
   const posterUrl = posterCandidates[posterCandidateIndex] ?? null;
+  const resolvedThumbnailLoading = thumbnailLoading ?? (compact ? 'eager' : 'lazy');
   const resolutionBadge = getReadyResolutionBadgeInfo(item);
   const durationSeconds = item.probe?.durationSeconds ?? null;
   const canPreview = item.status === 'ready' && item.hoverPreviewSprite !== null;
@@ -4200,7 +4232,7 @@ function CatalogReadyCardMedia({ item, compact = false, clickable = false }: Car
           className="media-image"
           src={posterUrl}
           alt={getCatalogItemDisplayName(item)}
-          loading={compact ? 'eager' : 'lazy'}
+          loading={resolvedThumbnailLoading}
           decoding="async"
           onError={() => {
             if (posterCandidates.length <= 1) {
@@ -4562,6 +4594,7 @@ function CatalogTagPopover({
 function CatalogCard({
   item,
   contextKey,
+  thumbnailLoading,
   onOpenViewer,
   onOpenDetails,
   onAddTag,
@@ -4623,7 +4656,7 @@ function CatalogCard({
         disabled={!canOpenViewer}
         title={canOpenViewer ? `Open ${getCatalogItemDisplayName(item)}` : 'This item is still processing.'}
       >
-        <CatalogCardMedia item={item} clickable={canOpenViewer} />
+        <CatalogCardMedia item={item} clickable={canOpenViewer} thumbnailLoading={thumbnailLoading} />
       </button>
 
       <div className="card-body">
@@ -4789,6 +4822,7 @@ function CatalogHomeStripSection({
   view,
   index,
   totalCount,
+  prioritizeInitialThumbnails,
   onMove,
   onEdit,
   onDelete,
@@ -4874,10 +4908,13 @@ function CatalogHomeStripSection({
       {items.length > 0 ? (
         <>
           <div id={stripGridId} className="home-strip-grid" ref={gridRef}>
-            {visibleItems.map((item) => (
+            {visibleItems.map((item, itemIndex) => (
               <CatalogCard
                 key={item.id}
                 item={item}
+                thumbnailLoading={
+                  prioritizeInitialThumbnails && itemIndex < itemsPerRow ? 'eager' : undefined
+                }
                 contextKey={strip.id}
                 onOpenViewer={onOpenViewer}
                 onOpenDetails={onOpenDetails}
@@ -10704,7 +10741,6 @@ export default function App(): JSX.Element {
         setSocketConnectionState('connected');
         clearReconnectTimer();
         sendStructuredSocketCommand('jobs.subscribe', { enabled: true });
-        sendStructuredSocketCommand('state.sync');
 
         firstMessageTimer = window.setTimeout(() => {
           if (closed || socketRef.current !== socket || receivedApplicationMessage) {
@@ -11264,6 +11300,7 @@ export default function App(): JSX.Element {
                     view={view}
                     index={index}
                     totalCount={homeStripViews.length}
+                    prioritizeInitialThumbnails={index < HOME_STRIP_EAGER_THUMBNAIL_SECTION_LIMIT}
                     onMove={(stripId, direction) => void moveHomeStrip(stripId, direction)}
                     onEdit={openEditHomeStrip}
                     onDelete={(strip) => void deleteHomeStrip(strip)}
