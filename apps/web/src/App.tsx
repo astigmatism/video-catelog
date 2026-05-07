@@ -9,7 +9,7 @@ import type {
   ReactNode,
   Ref
 } from 'react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { GoogleLockScreen } from './GoogleLockScreen';
 import {
   AUTHENTICATED_BROWSER_IDENTITY,
@@ -211,6 +211,7 @@ type RuntimeInfo = {
   config: {
     idleLockMinutes: number;
     wsHeartbeatMs: number;
+    hoverPreviewPlaybackRate: number;
     port: number | null;
   };
   storageUsage: StorageUsageInfo | null;
@@ -696,7 +697,8 @@ const RESOLUTION_BADGE_TIERS: Array<{ label: ResolutionBadgeLabel; shortEdgeMin:
 const RECENT_ACTIVITY_LIMIT = 12;
 const CARD_HOVER_PREVIEW_DELAY_MS = 200;
 const HOVER_SPRITE_FALLBACK_DURATION_SECONDS = 10;
-const HOVER_SPRITE_MIN_FRAME_INTERVAL_MS = 16;
+const DEFAULT_HOVER_PREVIEW_PLAYBACK_RATE = 1;
+const HoverPreviewPlaybackRateContext = createContext(DEFAULT_HOVER_PREVIEW_PLAYBACK_RATE);
 const VIEWER_MIN_ZOOM = 1;
 const VIEWER_MAX_ZOOM = 2.5;
 const VIEWER_ZOOM_STEP = 0.1;
@@ -1879,17 +1881,39 @@ function createSpriteFrameStyle(
   };
 }
 
-function getHoverPreviewFrameIntervalMs(sprite: HoverPreviewSprite): number {
-  const safeFrameCount = Math.max(1, Math.floor(sprite.frameCount));
+function getHoverPreviewPlaybackDurationMs(sprite: HoverPreviewSprite, playbackRate: number): number {
   const durationSeconds =
     sprite.durationSeconds !== null && Number.isFinite(sprite.durationSeconds) && sprite.durationSeconds > 0
       ? sprite.durationSeconds
       : HOVER_SPRITE_FALLBACK_DURATION_SECONDS;
+  const safePlaybackRate = normalizeHoverPreviewPlaybackRate(playbackRate);
 
-  return Math.max(
-    HOVER_SPRITE_MIN_FRAME_INTERVAL_MS,
-    (durationSeconds * 1000) / safeFrameCount
-  );
+  return Math.max(1, (durationSeconds * 1000) / safePlaybackRate);
+}
+
+function getHoverPreviewFrameIndexAtElapsedMs(
+  sprite: HoverPreviewSprite,
+  playbackRate: number,
+  elapsedMs: number
+): number {
+  const safeFrameCount = Math.max(1, Math.floor(sprite.frameCount));
+  if (safeFrameCount <= 1) {
+    return 0;
+  }
+
+  const playbackDurationMs = getHoverPreviewPlaybackDurationMs(sprite, playbackRate);
+  const normalizedElapsedMs = ((elapsedMs % playbackDurationMs) + playbackDurationMs) % playbackDurationMs;
+  const frameProgress = normalizedElapsedMs / playbackDurationMs;
+
+  return Math.max(0, Math.min(safeFrameCount - 1, Math.floor(frameProgress * safeFrameCount)));
+}
+
+function normalizeHoverPreviewPlaybackRate(value: number | null | undefined): number {
+  if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) {
+    return DEFAULT_HOVER_PREVIEW_PLAYBACK_RATE;
+  }
+
+  return value;
 }
 
 function getMediaPlaceholderText(item: CatalogItem): string {
@@ -2478,6 +2502,7 @@ function hydrateRuntimeInfo(value: unknown): RuntimeInfo | null {
   const wsHeartbeatMs = readNumber(configValue.wsHeartbeatMs);
   const port =
     configValue.port === undefined || configValue.port === null ? null : readNumber(configValue.port);
+  const hoverPreviewPlaybackRate = readNumber(configValue.hoverPreviewPlaybackRate);
   const storageUsage =
     value.storageUsage === undefined || value.storageUsage === null
       ? null
@@ -2486,6 +2511,8 @@ function hydrateRuntimeInfo(value: unknown): RuntimeInfo | null {
   if (
     idleLockMinutes === null ||
     wsHeartbeatMs === null ||
+    hoverPreviewPlaybackRate === null ||
+    hoverPreviewPlaybackRate <= 0 ||
     (value.storageUsage !== undefined && value.storageUsage !== null && storageUsage === null)
   ) {
     return null;
@@ -2496,6 +2523,7 @@ function hydrateRuntimeInfo(value: unknown): RuntimeInfo | null {
     config: {
       idleLockMinutes,
       wsHeartbeatMs,
+      hoverPreviewPlaybackRate,
       port
     },
     storageUsage
@@ -4040,12 +4068,14 @@ function CatalogCardMedia(props: CardMediaProps): JSX.Element {
 }
 
 function CatalogReadyCardMedia({ item, compact = false, clickable = false }: CardMediaProps): JSX.Element {
+  const hoverPreviewPlaybackRate = useContext(HoverPreviewPlaybackRateContext);
   const [posterCandidateIndex, setPosterCandidateIndex] = useState(0);
   const [isPointerActive, setIsPointerActive] = useState(false);
   const [isPreviewVisible, setIsPreviewVisible] = useState(false);
   const [frameIndex, setFrameIndex] = useState(0);
   const hoverTimerRef = useRef<number | null>(null);
-  const frameTimerRef = useRef<number | null>(null);
+  const frameAnimationRef = useRef<number | null>(null);
+  const frameAnimationStartedAtRef = useRef<number | null>(null);
 
   const posterCandidates = useMemo(() => buildPosterUrlCandidates(item), [
     item.id,
@@ -4086,38 +4116,49 @@ function CatalogReadyCardMedia({ item, compact = false, clickable = false }: Car
 
   useEffect(() => {
     if (!canPreview || !isPointerActive || !isPreviewVisible || !item.hoverPreviewSprite) {
-      if (frameTimerRef.current !== null) {
-        window.clearInterval(frameTimerRef.current);
-        frameTimerRef.current = null;
+      if (frameAnimationRef.current !== null) {
+        window.cancelAnimationFrame(frameAnimationRef.current);
+        frameAnimationRef.current = null;
       }
+      frameAnimationStartedAtRef.current = null;
       setFrameIndex(0);
       return;
     }
 
-    const frameIntervalMs = getHoverPreviewFrameIntervalMs(item.hoverPreviewSprite);
-    frameTimerRef.current = window.setInterval(() => {
-      setFrameIndex((currentValue) => {
-        const nextFrameCount = Math.max(1, item.hoverPreviewSprite?.frameCount ?? 1);
-        return (currentValue + 1) % nextFrameCount;
-      });
-    }, frameIntervalMs);
+    const sprite = item.hoverPreviewSprite;
+    frameAnimationStartedAtRef.current = null;
+
+    const updateFrame = (timestamp: number): void => {
+      if (frameAnimationStartedAtRef.current === null) {
+        frameAnimationStartedAtRef.current = timestamp;
+      }
+
+      const elapsedMs = timestamp - frameAnimationStartedAtRef.current;
+      setFrameIndex(getHoverPreviewFrameIndexAtElapsedMs(sprite, hoverPreviewPlaybackRate, elapsedMs));
+      frameAnimationRef.current = window.requestAnimationFrame(updateFrame);
+    };
+
+    frameAnimationRef.current = window.requestAnimationFrame(updateFrame);
 
     return () => {
-      if (frameTimerRef.current !== null) {
-        window.clearInterval(frameTimerRef.current);
-        frameTimerRef.current = null;
+      if (frameAnimationRef.current !== null) {
+        window.cancelAnimationFrame(frameAnimationRef.current);
+        frameAnimationRef.current = null;
       }
+      frameAnimationStartedAtRef.current = null;
     };
-  }, [canPreview, isPointerActive, isPreviewVisible, item.hoverPreviewSprite]);
+  }, [canPreview, hoverPreviewPlaybackRate, isPointerActive, isPreviewVisible, item.hoverPreviewSprite]);
 
   useEffect(() => {
     return () => {
       if (hoverTimerRef.current !== null) {
         window.clearTimeout(hoverTimerRef.current);
       }
-      if (frameTimerRef.current !== null) {
-        window.clearInterval(frameTimerRef.current);
+      if (frameAnimationRef.current !== null) {
+        window.cancelAnimationFrame(frameAnimationRef.current);
+        frameAnimationRef.current = null;
       }
+      frameAnimationStartedAtRef.current = null;
     };
   }, []);
 
@@ -8094,6 +8135,7 @@ export default function App(): JSX.Element {
   const [pendingIngests, setPendingIngests] = useState<PendingIngest[]>([]);
   const [recentActivity, setRecentActivity] = useState<ActivityFeedEntry[]>([]);
   const [idleLockMinutes, setIdleLockMinutes] = useState(30);
+  const [hoverPreviewPlaybackRate, setHoverPreviewPlaybackRate] = useState(DEFAULT_HOVER_PREVIEW_PLAYBACK_RATE);
   const [toolAvailability, setToolAvailability] = useState<ToolAvailability>(
     DEFAULT_TOOL_AVAILABILITY
   );
@@ -9112,6 +9154,7 @@ export default function App(): JSX.Element {
 
   function applyRuntime(data: RuntimeInfo): void {
     setIdleLockMinutes(data.config.idleLockMinutes);
+    setHoverPreviewPlaybackRate(normalizeHoverPreviewPlaybackRate(data.config.hoverPreviewPlaybackRate));
     setToolAvailability(data.toolAvailability);
     setStorageUsage(data.storageUsage);
   }
@@ -12128,28 +12171,24 @@ export default function App(): JSX.Element {
     </>
   );
 
-  if (isMobileCatalogLayout) {
-    return (
-      <CatalogMobileLayout
-        layoutMode={mobileLayoutMode}
-        isFilterPanelOpen={isFilterDrawerOpen}
-        filterPanelId={filterPanelId}
-        filterPanel={filterPanel}
-        catalogPanel={catalogPanel}
-        footer={footer}
-        modalLayer={modalLayer}
-        mobileBrowseSummary={mobileBrowseSummary}
-        onToggleFilters={() => setIsFilterDrawerOpen((currentValue) => !currentValue)}
-        onCloseFilters={() => setIsFilterDrawerOpen(false)}
-        onRefresh={refreshCatalogState}
-        onAddVideo={openAddVideoModal}
-        onOpenSettings={() => setIsSettingsModalOpen(true)}
-        onLock={() => void requestPanicLock()}
-      />
-    );
-  }
-
-  return (
+  const layout = isMobileCatalogLayout ? (
+    <CatalogMobileLayout
+      layoutMode={mobileLayoutMode}
+      isFilterPanelOpen={isFilterDrawerOpen}
+      filterPanelId={filterPanelId}
+      filterPanel={filterPanel}
+      catalogPanel={catalogPanel}
+      footer={footer}
+      modalLayer={modalLayer}
+      mobileBrowseSummary={mobileBrowseSummary}
+      onToggleFilters={() => setIsFilterDrawerOpen((currentValue) => !currentValue)}
+      onCloseFilters={() => setIsFilterDrawerOpen(false)}
+      onRefresh={refreshCatalogState}
+      onAddVideo={openAddVideoModal}
+      onOpenSettings={() => setIsSettingsModalOpen(true)}
+      onLock={() => void requestPanicLock()}
+    />
+  ) : (
     <CatalogDesktopLayout
       isFilterPanelOpen={isFilterDrawerOpen}
       filterPanelId={filterPanelId}
@@ -12163,5 +12202,11 @@ export default function App(): JSX.Element {
       onOpenSettings={() => setIsSettingsModalOpen(true)}
       onLock={() => void requestPanicLock()}
     />
+  );
+
+  return (
+    <HoverPreviewPlaybackRateContext.Provider value={hoverPreviewPlaybackRate}>
+      {layout}
+    </HoverPreviewPlaybackRateContext.Provider>
   );
 }

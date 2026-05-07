@@ -145,7 +145,8 @@ export class IdleHoverPreviewRebuilder {
           reason,
           missingTool: 'ffmpeg',
           hoverPreviewDurationSeconds: this.options.config.hoverPreviewDurationSeconds,
-          hoverPreviewFrameCount: this.options.config.hoverPreviewFrameCount
+          hoverPreviewFrameCount: this.options.config.hoverPreviewFrameCount,
+          hoverPreviewPlaybackRate: this.options.config.hoverPreviewPlaybackRate
         },
         'Skipping idle hover preview audit because ffmpeg is unavailable.'
       );
@@ -259,6 +260,7 @@ export class IdleHoverPreviewRebuilder {
         runId,
         hoverPreviewDurationSeconds: this.options.config.hoverPreviewDurationSeconds,
         hoverPreviewFrameCount: this.options.config.hoverPreviewFrameCount,
+        hoverPreviewPlaybackRate: this.options.config.hoverPreviewPlaybackRate,
         resumeStrategy: 'rescan_and_skip_completed_items'
       },
       'Started idle hover preview audit.'
@@ -481,7 +483,8 @@ export class IdleHoverPreviewRebuilder {
             reason: request.reason,
             missingTool: 'ffmpeg',
             hoverPreviewDurationSeconds: this.options.config.hoverPreviewDurationSeconds,
-            hoverPreviewFrameCount: this.options.config.hoverPreviewFrameCount
+            hoverPreviewFrameCount: this.options.config.hoverPreviewFrameCount,
+            hoverPreviewPlaybackRate: this.options.config.hoverPreviewPlaybackRate
           },
           'Skipping bookmark-triggered hover preview regeneration because ffmpeg is unavailable.'
         );
@@ -798,6 +801,7 @@ export class IdleHoverPreviewRebuilder {
         hoverPreviewRelativePath: outputDescriptor.relativePath,
         hoverPreviewDurationSeconds: this.options.config.hoverPreviewDurationSeconds,
         hoverPreviewFrameCount: layout.frameCount,
+        hoverPreviewPlaybackRate: this.options.config.hoverPreviewPlaybackRate,
         effectiveCaptureDurationSeconds: plan.effectiveDurationSeconds,
         hoverPreviewPlaybackDurationSeconds: normalizeHoverPreviewSpriteDurationSeconds(plan.effectiveDurationSeconds),
         samplingFps,
@@ -890,6 +894,7 @@ export class IdleHoverPreviewRebuilder {
           bookmarkCount,
           hoverPreviewDurationSeconds: this.options.config.hoverPreviewDurationSeconds,
           hoverPreviewFrameCount: layout.frameCount,
+          hoverPreviewPlaybackRate: this.options.config.hoverPreviewPlaybackRate,
           effectiveCaptureDurationSeconds: plan.effectiveDurationSeconds,
           hoverPreviewPlaybackDurationSeconds: normalizeHoverPreviewSpriteDurationSeconds(plan.effectiveDurationSeconds),
           samplingFps,

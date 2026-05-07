@@ -28,6 +28,7 @@ export type AppConfig = {
   maxUploadBytes: number;
   hoverPreviewDurationSeconds: number;
   hoverPreviewFrameCount: number;
+  hoverPreviewPlaybackRate: number;
   ffmpegCommand: string;
   ffmpegRetentionRemuxArgs: string[];
   ffmpegRetentionTranscodeVideoArgs: string[];
@@ -155,6 +156,7 @@ function parseArgumentList(value: string | undefined, fallback: string[]): strin
 const DEFAULT_MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024;
 const DEFAULT_HOVER_PREVIEW_DURATION_SECONDS = 10;
 const DEFAULT_HOVER_PREVIEW_FRAME_COUNT = 100;
+const DEFAULT_HOVER_PREVIEW_PLAYBACK_RATE = 1;
 
 const DEFAULT_FFMPEG_RETENTION_REMUX_ARGS = ['-map', '0', '-c', 'copy', '-movflags', '+faststart'];
 
@@ -301,6 +303,10 @@ export function loadConfig(): AppConfig {
     hoverPreviewFrameCount: parsePositiveInteger(
       readSetting(env, dotEnv, 'HOVER_PREVIEW_FRAME_COUNT'),
       DEFAULT_HOVER_PREVIEW_FRAME_COUNT
+    ),
+    hoverPreviewPlaybackRate: parsePositiveNumber(
+      readSetting(env, dotEnv, 'HOVER_PREVIEW_PLAYBACK_RATE'),
+      DEFAULT_HOVER_PREVIEW_PLAYBACK_RATE
     ),
     ffmpegCommand: readSetting(env, dotEnv, 'FFMPEG_PATH') ?? 'ffmpeg',
     ffmpegRetentionRemuxArgs: parseArgumentList(

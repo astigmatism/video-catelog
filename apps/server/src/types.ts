@@ -223,6 +223,7 @@ export type RuntimeStatePayload = {
   config: {
     idleLockMinutes: number;
     wsHeartbeatMs: number;
+    hoverPreviewPlaybackRate: number;
     port?: number;
   };
   storageUsage: StorageUsageInfo | null;

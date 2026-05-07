@@ -116,7 +116,8 @@ sessionStore.onActivityStateChange((transition) => {
         event: 'hover_preview.idle_audit.idle_detected',
         ...sessionLifecyclePayload,
         hoverPreviewDurationSeconds: config.hoverPreviewDurationSeconds,
-        hoverPreviewFrameCount: config.hoverPreviewFrameCount
+        hoverPreviewFrameCount: config.hoverPreviewFrameCount,
+        hoverPreviewPlaybackRate: config.hoverPreviewPlaybackRate
       },
       'Server is idle; starting hover preview audit.'
     );
@@ -531,6 +532,7 @@ function createRuntimeStatePayload(includePort: boolean = true): RuntimeStatePay
     config: {
       idleLockMinutes: config.idleLockMinutes,
       wsHeartbeatMs: config.wsHeartbeatMs,
+      hoverPreviewPlaybackRate: config.hoverPreviewPlaybackRate,
       ...(includePort ? { port: config.port } : {})
     },
     storageUsage: createStorageUsagePayload()
