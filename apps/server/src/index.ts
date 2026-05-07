@@ -592,6 +592,8 @@ function createRuntimeStatePayload(includePort: boolean = true): RuntimeStatePay
       idleLockMinutes: config.idleLockMinutes,
       wsHeartbeatMs: config.wsHeartbeatMs,
       hoverPreviewPlaybackRate: config.hoverPreviewPlaybackRate,
+      viewerShortSeekSeconds: config.viewerShortSeekSeconds,
+      viewerLongSeekSeconds: config.viewerLongSeekSeconds,
       ...(includePort ? { port: config.port } : {})
     },
     storageUsage: createStorageUsagePayload()

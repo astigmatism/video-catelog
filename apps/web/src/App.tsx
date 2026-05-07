@@ -212,6 +212,8 @@ type RuntimeInfo = {
     idleLockMinutes: number;
     wsHeartbeatMs: number;
     hoverPreviewPlaybackRate: number;
+    viewerShortSeekSeconds: number;
+    viewerLongSeekSeconds: number;
     port: number | null;
   };
   storageUsage: StorageUsageInfo | null;
@@ -563,6 +565,8 @@ type ViewerOverlayProps = {
     itemId: string,
     adjustments: ViewerVisualAdjustments
   ) => Promise<CatalogItem | null>;
+  shortSeekSeconds: number;
+  longSeekSeconds: number;
   attemptFullscreenOnOpen: boolean;
 };
 
@@ -708,7 +712,8 @@ const VIEWER_ZOOM_STEP = 0.1;
 const VIEWER_PAN_STEP_FRACTION = 0.08;
 const VIEWER_PAN_STEP_MIN_PX = 24;
 const VIEWER_PAN_STEP_MAX_PX = 96;
-const VIEWER_SEEK_SECONDS = 5;
+const DEFAULT_VIEWER_SHORT_SEEK_SECONDS = 5;
+const DEFAULT_VIEWER_LONG_SEEK_SECONDS = 30;
 const VIEWER_LOOP_MIN_DURATION_SECONDS = 0.1;
 const VIEWER_LOOP_BOUNDARY_EPSILON_SECONDS = 0.035;
 const VIEWER_FALLBACK_FRAME_RATE = 30;
@@ -1595,6 +1600,30 @@ function areViewerVisualAdjustmentValuesDefault(value: ViewerVisualAdjustments):
     clampViewerVisualAdjustmentValue(value.brightness) === DEFAULT_VIEWER_VISUAL_ADJUSTMENTS.brightness &&
     clampViewerVisualAdjustmentValue(value.saturation) === DEFAULT_VIEWER_VISUAL_ADJUSTMENTS.saturation
   );
+}
+
+function normalizeViewerSeekSeconds(value: number, fallback: number): number {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function formatViewerSeekDurationValue(seconds: number): string {
+  const safeSeconds = normalizeViewerSeekSeconds(seconds, DEFAULT_VIEWER_SHORT_SEEK_SECONDS);
+
+  if (Number.isInteger(safeSeconds)) {
+    return String(safeSeconds);
+  }
+
+  const fixedDigits = safeSeconds < 10 ? 2 : 1;
+  return safeSeconds.toFixed(fixedDigits).replace(/\.?0+$/, '');
+}
+
+function formatViewerSeekDurationLabel(seconds: number): string {
+  return `${formatViewerSeekDurationValue(seconds)}s`;
+}
+
+function formatViewerSeekDurationDescription(seconds: number): string {
+  const value = formatViewerSeekDurationValue(seconds);
+  return `${value} ${value === '1' ? 'second' : 'seconds'}`;
 }
 
 function formatViewerVisualAdjustmentPercent(value: number): string {
@@ -2506,6 +2535,14 @@ function hydrateRuntimeInfo(value: unknown): RuntimeInfo | null {
   const port =
     configValue.port === undefined || configValue.port === null ? null : readNumber(configValue.port);
   const hoverPreviewPlaybackRate = readNumber(configValue.hoverPreviewPlaybackRate);
+  const viewerShortSeekSeconds = normalizeViewerSeekSeconds(
+    readNumber(configValue.viewerShortSeekSeconds) ?? DEFAULT_VIEWER_SHORT_SEEK_SECONDS,
+    DEFAULT_VIEWER_SHORT_SEEK_SECONDS
+  );
+  const viewerLongSeekSeconds = normalizeViewerSeekSeconds(
+    readNumber(configValue.viewerLongSeekSeconds) ?? DEFAULT_VIEWER_LONG_SEEK_SECONDS,
+    DEFAULT_VIEWER_LONG_SEEK_SECONDS
+  );
   const storageUsage =
     value.storageUsage === undefined || value.storageUsage === null
       ? null
@@ -2527,6 +2564,8 @@ function hydrateRuntimeInfo(value: unknown): RuntimeInfo | null {
       idleLockMinutes,
       wsHeartbeatMs,
       hoverPreviewPlaybackRate,
+      viewerShortSeekSeconds,
+      viewerLongSeekSeconds,
       port
     },
     storageUsage
@@ -3823,6 +3862,26 @@ function SeekForwardIcon(): JSX.Element {
     <svg viewBox="0 0 24 24" aria-hidden="true" className="viewer-toolbar-solid-icon">
       <path d="M13.25 6.5 19 12l-5.75 5.5v-11Z" />
       <path d="M5.5 6.5 11.25 12 5.5 17.5v-11Z" />
+    </svg>
+  );
+}
+
+function LongSeekBackwardIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="viewer-toolbar-solid-icon">
+      <path d="M8.25 6.5v11L3.5 12l4.75-5.5Z" />
+      <path d="M14.5 6.5v11L9.75 12l4.75-5.5Z" />
+      <path d="M20.75 6.5v11L16 12l4.75-5.5Z" />
+    </svg>
+  );
+}
+
+function LongSeekForwardIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="viewer-toolbar-solid-icon">
+      <path d="M15.75 6.5 20.5 12l-4.75 5.5v-11Z" />
+      <path d="M9.5 6.5 14.25 12 9.5 17.5v-11Z" />
+      <path d="M3.25 6.5 8 12l-4.75 5.5v-11Z" />
     </svg>
   );
 }
@@ -5267,6 +5326,8 @@ function ViewerOverlay({
   onUseBookmark,
   onDeleteBookmark,
   onSaveViewerVisualAdjustments,
+  shortSeekSeconds,
+  longSeekSeconds,
   attemptFullscreenOnOpen
 }: ViewerOverlayProps): JSX.Element {
   const overlayRef = useRef<HTMLDivElement | null>(null);
@@ -5368,6 +5429,12 @@ function ViewerOverlay({
     () => ({ '--viewer-timeline-progress': `${timelinePercent}%` } as CSSProperties),
     [timelinePercent]
   );
+  const viewerShortSeekSeconds = normalizeViewerSeekSeconds(shortSeekSeconds, DEFAULT_VIEWER_SHORT_SEEK_SECONDS);
+  const viewerLongSeekSeconds = normalizeViewerSeekSeconds(longSeekSeconds, DEFAULT_VIEWER_LONG_SEEK_SECONDS);
+  const shortSeekLabel = formatViewerSeekDurationLabel(viewerShortSeekSeconds);
+  const longSeekLabel = formatViewerSeekDurationLabel(viewerLongSeekSeconds);
+  const shortSeekDescription = formatViewerSeekDurationDescription(viewerShortSeekSeconds);
+  const longSeekDescription = formatViewerSeekDurationDescription(viewerLongSeekSeconds);
   const timelineLoopMarkers = useMemo(() => {
     if (resolvedDuration === null || !Number.isFinite(resolvedDuration) || resolvedDuration <= 0) {
       return null;
@@ -7419,11 +7486,11 @@ function ViewerOverlay({
         switch (event.key) {
           case 'ArrowLeft':
             claimViewerKeyboardShortcut(event);
-            panViewerBy(-1, 0);
+            seekVideoBy(-viewerLongSeekSeconds);
             return;
           case 'ArrowRight':
             claimViewerKeyboardShortcut(event);
-            panViewerBy(1, 0);
+            seekVideoBy(viewerLongSeekSeconds);
             return;
           case 'ArrowUp':
             claimViewerKeyboardShortcut(event);
@@ -7441,19 +7508,11 @@ function ViewerOverlay({
       switch (event.key) {
         case 'ArrowLeft':
           claimViewerKeyboardShortcut(event);
-          seekVideoBy(
-            videoElement.paused
-              ? -getViewerFrameDurationSeconds(item.probe, resolvedDuration)
-              : -VIEWER_SEEK_SECONDS
-          );
+          seekVideoBy(-viewerShortSeekSeconds);
           break;
         case 'ArrowRight':
           claimViewerKeyboardShortcut(event);
-          seekVideoBy(
-            videoElement.paused
-              ? getViewerFrameDurationSeconds(item.probe, resolvedDuration)
-              : VIEWER_SEEK_SECONDS
-          );
+          seekVideoBy(viewerShortSeekSeconds);
           break;
         case 'ArrowDown':
         case '[':
@@ -7492,6 +7551,8 @@ function ViewerOverlay({
     item.probe?.fps,
     playbackRate,
     resolvedDuration,
+    viewerLongSeekSeconds,
+    viewerShortSeekSeconds,
     videoUrl,
     volume,
     viewerPanLimit.x,
@@ -7643,16 +7704,35 @@ function ViewerOverlay({
             <div className="viewer-toolbar-group viewer-transport-group">
               <button
                 type="button"
-                className="viewer-toolbar-button viewer-toolbar-button-icon viewer-toolbar-button-transport"
+                className="viewer-toolbar-button viewer-toolbar-button-icon viewer-toolbar-button-transport viewer-toolbar-button-seek viewer-toolbar-button-long-seek"
                 onClick={() => {
                   noteViewerActivity();
-                  seekVideoBy(-VIEWER_SEEK_SECONDS);
+                  seekVideoBy(-viewerLongSeekSeconds);
                 }}
                 disabled={!videoUrl}
-                aria-label="Seek backward 5 seconds"
-                title="Seek backward 5 seconds"
+                aria-label={`Long seek backward ${longSeekDescription}`}
+                title={`Long seek backward ${longSeekDescription} (Shift+Left)`}
               >
-                <SeekBackwardIcon />
+                <span className="viewer-seek-button-content">
+                  <LongSeekBackwardIcon />
+                  <span className="viewer-seek-button-label">{longSeekLabel}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="viewer-toolbar-button viewer-toolbar-button-icon viewer-toolbar-button-transport viewer-toolbar-button-seek"
+                onClick={() => {
+                  noteViewerActivity();
+                  seekVideoBy(-viewerShortSeekSeconds);
+                }}
+                disabled={!videoUrl}
+                aria-label={`Seek backward ${shortSeekDescription}`}
+                title={`Seek backward ${shortSeekDescription} (Left)`}
+              >
+                <span className="viewer-seek-button-content">
+                  <SeekBackwardIcon />
+                  <span className="viewer-seek-button-label">{shortSeekLabel}</span>
+                </span>
               </button>
               <button
                 type="button"
@@ -7668,16 +7748,35 @@ function ViewerOverlay({
               </button>
               <button
                 type="button"
-                className="viewer-toolbar-button viewer-toolbar-button-icon viewer-toolbar-button-transport"
+                className="viewer-toolbar-button viewer-toolbar-button-icon viewer-toolbar-button-transport viewer-toolbar-button-seek"
                 onClick={() => {
                   noteViewerActivity();
-                  seekVideoBy(VIEWER_SEEK_SECONDS);
+                  seekVideoBy(viewerShortSeekSeconds);
                 }}
                 disabled={!videoUrl}
-                aria-label="Seek forward 5 seconds"
-                title="Seek forward 5 seconds"
+                aria-label={`Seek forward ${shortSeekDescription}`}
+                title={`Seek forward ${shortSeekDescription} (Right)`}
               >
-                <SeekForwardIcon />
+                <span className="viewer-seek-button-content">
+                  <SeekForwardIcon />
+                  <span className="viewer-seek-button-label">{shortSeekLabel}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="viewer-toolbar-button viewer-toolbar-button-icon viewer-toolbar-button-transport viewer-toolbar-button-seek viewer-toolbar-button-long-seek"
+                onClick={() => {
+                  noteViewerActivity();
+                  seekVideoBy(viewerLongSeekSeconds);
+                }}
+                disabled={!videoUrl}
+                aria-label={`Long seek forward ${longSeekDescription}`}
+                title={`Long seek forward ${longSeekDescription} (Shift+Right)`}
+              >
+                <span className="viewer-seek-button-content">
+                  <LongSeekForwardIcon />
+                  <span className="viewer-seek-button-label">{longSeekLabel}</span>
+                </span>
               </button>
             </div>
 
@@ -8173,6 +8272,8 @@ export default function App(): JSX.Element {
   const [recentActivity, setRecentActivity] = useState<ActivityFeedEntry[]>([]);
   const [idleLockMinutes, setIdleLockMinutes] = useState(30);
   const [hoverPreviewPlaybackRate, setHoverPreviewPlaybackRate] = useState(DEFAULT_HOVER_PREVIEW_PLAYBACK_RATE);
+  const [viewerShortSeekSeconds, setViewerShortSeekSeconds] = useState(DEFAULT_VIEWER_SHORT_SEEK_SECONDS);
+  const [viewerLongSeekSeconds, setViewerLongSeekSeconds] = useState(DEFAULT_VIEWER_LONG_SEEK_SECONDS);
   const [toolAvailability, setToolAvailability] = useState<ToolAvailability>(
     DEFAULT_TOOL_AVAILABILITY
   );
@@ -9192,6 +9293,12 @@ export default function App(): JSX.Element {
   function applyRuntime(data: RuntimeInfo): void {
     setIdleLockMinutes(data.config.idleLockMinutes);
     setHoverPreviewPlaybackRate(normalizeHoverPreviewPlaybackRate(data.config.hoverPreviewPlaybackRate));
+    setViewerShortSeekSeconds(
+      normalizeViewerSeekSeconds(data.config.viewerShortSeekSeconds, DEFAULT_VIEWER_SHORT_SEEK_SECONDS)
+    );
+    setViewerLongSeekSeconds(
+      normalizeViewerSeekSeconds(data.config.viewerLongSeekSeconds, DEFAULT_VIEWER_LONG_SEEK_SECONDS)
+    );
     setToolAvailability(data.toolAvailability);
     setStorageUsage(data.storageUsage);
   }
@@ -12202,6 +12309,8 @@ export default function App(): JSX.Element {
           onUseBookmark={useCatalogItemBookmark}
           onDeleteBookmark={deleteCatalogItemBookmark}
           onSaveViewerVisualAdjustments={saveCatalogItemViewerVisualAdjustments}
+          shortSeekSeconds={viewerShortSeekSeconds}
+          longSeekSeconds={viewerLongSeekSeconds}
           attemptFullscreenOnOpen={attemptFullscreenOnOpen}
         />
       )}

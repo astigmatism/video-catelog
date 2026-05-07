@@ -224,6 +224,8 @@ export type RuntimeStatePayload = {
     idleLockMinutes: number;
     wsHeartbeatMs: number;
     hoverPreviewPlaybackRate: number;
+    viewerShortSeekSeconds: number;
+    viewerLongSeekSeconds: number;
     port?: number;
   };
   storageUsage: StorageUsageInfo | null;
