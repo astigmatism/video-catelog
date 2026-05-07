@@ -7486,11 +7486,19 @@ function ViewerOverlay({
         switch (event.key) {
           case 'ArrowLeft':
             claimViewerKeyboardShortcut(event);
-            seekVideoBy(-viewerLongSeekSeconds);
+            if (videoElement.paused) {
+              panViewerBy(-1, 0);
+            } else {
+              seekVideoBy(-viewerLongSeekSeconds);
+            }
             return;
           case 'ArrowRight':
             claimViewerKeyboardShortcut(event);
-            seekVideoBy(viewerLongSeekSeconds);
+            if (videoElement.paused) {
+              panViewerBy(1, 0);
+            } else {
+              seekVideoBy(viewerLongSeekSeconds);
+            }
             return;
           case 'ArrowUp':
             claimViewerKeyboardShortcut(event);
@@ -7508,11 +7516,19 @@ function ViewerOverlay({
       switch (event.key) {
         case 'ArrowLeft':
           claimViewerKeyboardShortcut(event);
-          seekVideoBy(-viewerShortSeekSeconds);
+          seekVideoBy(
+            videoElement.paused
+              ? -getViewerFrameDurationSeconds(item.probe, resolvedDuration)
+              : -viewerShortSeekSeconds
+          );
           break;
         case 'ArrowRight':
           claimViewerKeyboardShortcut(event);
-          seekVideoBy(viewerShortSeekSeconds);
+          seekVideoBy(
+            videoElement.paused
+              ? getViewerFrameDurationSeconds(item.probe, resolvedDuration)
+              : viewerShortSeekSeconds
+          );
           break;
         case 'ArrowDown':
         case '[':
@@ -7711,7 +7727,7 @@ function ViewerOverlay({
                 }}
                 disabled={!videoUrl}
                 aria-label={`Long seek backward ${longSeekDescription}`}
-                title={`Long seek backward ${longSeekDescription} (Shift+Left)`}
+                title={`Long seek backward ${longSeekDescription} (Shift+Left while playing)`}
               >
                 <span className="viewer-seek-button-content">
                   <LongSeekBackwardIcon />
@@ -7727,7 +7743,7 @@ function ViewerOverlay({
                 }}
                 disabled={!videoUrl}
                 aria-label={`Seek backward ${shortSeekDescription}`}
-                title={`Seek backward ${shortSeekDescription} (Left)`}
+                title={`Seek backward ${shortSeekDescription} (Left while playing)`}
               >
                 <span className="viewer-seek-button-content">
                   <SeekBackwardIcon />
@@ -7755,7 +7771,7 @@ function ViewerOverlay({
                 }}
                 disabled={!videoUrl}
                 aria-label={`Seek forward ${shortSeekDescription}`}
-                title={`Seek forward ${shortSeekDescription} (Right)`}
+                title={`Seek forward ${shortSeekDescription} (Right while playing)`}
               >
                 <span className="viewer-seek-button-content">
                   <SeekForwardIcon />
@@ -7771,7 +7787,7 @@ function ViewerOverlay({
                 }}
                 disabled={!videoUrl}
                 aria-label={`Long seek forward ${longSeekDescription}`}
-                title={`Long seek forward ${longSeekDescription} (Shift+Right)`}
+                title={`Long seek forward ${longSeekDescription} (Shift+Right while playing)`}
               >
                 <span className="viewer-seek-button-content">
                   <LongSeekForwardIcon />
