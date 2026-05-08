@@ -551,6 +551,7 @@ type ViewerOverlayProps = {
   item: CatalogItem;
   onClose: () => void;
   onMarkUsed: (itemId: string) => Promise<boolean>;
+  onPanicLock: () => Promise<void>;
   onSetThumbnail: (itemId: string, timeSeconds: number) => Promise<boolean>;
   onListBookmarks: (itemId: string) => Promise<CatalogBookmark[] | null>;
   onCreateBookmark: (itemId: string, timeSeconds: number) => Promise<CatalogBookmark | null>;
@@ -568,6 +569,10 @@ type ViewerOverlayProps = {
   shortSeekSeconds: number;
   longSeekSeconds: number;
   attemptFullscreenOnOpen: boolean;
+};
+
+type ViewerMarkUsedOptions = {
+  lockAfterSuccess?: boolean;
 };
 
 const DEFAULT_TOOL_AVAILABILITY: ToolAvailability = {
@@ -5319,6 +5324,7 @@ function ViewerOverlay({
   item,
   onClose,
   onMarkUsed,
+  onPanicLock,
   onSetThumbnail,
   onListBookmarks,
   onCreateBookmark,
@@ -5986,6 +5992,20 @@ function ViewerOverlay({
     onClose();
   }
 
+  function prepareViewerForSessionInvalidation(): void {
+    if (hasClosedRef.current) {
+      return;
+    }
+
+    closeInProgressRef.current = true;
+    stopVideoPlaybackForViewerClose();
+    clearControlsHideTimer();
+    clearFocusRestoreFrame();
+    clearLoopEnforcementFrame();
+    stopPlaybackProgressTimer();
+    hasClosedRef.current = true;
+  }
+
   function syncPlaybackRateFromVideo(videoElement: HTMLVideoElement | null = videoRef.current): void {
     const nextPlaybackRate =
       videoElement && Number.isFinite(videoElement.playbackRate) ? videoElement.playbackRate : 1;
@@ -6527,7 +6547,7 @@ function ViewerOverlay({
     void requestCloseViewer();
   }
 
-  async function requestMarkUsed(): Promise<void> {
+  async function requestMarkUsed(options: ViewerMarkUsedOptions = {}): Promise<void> {
     if (usedActionInProgressRef.current || closeInProgressRef.current || hasClosedRef.current) {
       return;
     }
@@ -6542,6 +6562,12 @@ function ViewerOverlay({
       const didMarkUsed = await onMarkUsed(item.id);
 
       if (didMarkUsed) {
+        if (options.lockAfterSuccess === true) {
+          prepareViewerForSessionInvalidation();
+          await onPanicLock();
+          return;
+        }
+
         await requestCloseViewer();
         return;
       }
@@ -7374,14 +7400,10 @@ function ViewerOverlay({
 
       if (event.key === 'Escape') {
         claimViewerKeyboardShortcut(event, true);
-
-        if (editingBookmarkId !== null) {
-          cancelBookmarkRename();
-          scheduleVideoFocusRestore();
-          return;
+        if (!event.repeat) {
+          prepareViewerForSessionInvalidation();
+          void onPanicLock();
         }
-
-        void requestCloseViewer();
         return;
       }
 
@@ -7404,7 +7426,7 @@ function ViewerOverlay({
       if (isUsedKey && !isTextEditableTarget) {
         claimViewerKeyboardShortcut(event, true);
         if (!event.repeat) {
-          void requestMarkUsed();
+          void requestMarkUsed({ lockAfterSuccess: true });
         }
         return;
       }
@@ -10440,16 +10462,15 @@ export default function App(): JSX.Element {
       socketRef.current.send(JSON.stringify({ type: 'panic' }));
     }
 
-    try {
-      await fetch('/api/panic', {
-        method: 'POST',
-        credentials: 'include'
-      });
-    } catch {
+    const panicRequest = fetch('/api/panic', {
+      method: 'POST',
+      credentials: 'include'
+    }).catch(() => {
       // Keep the client-side panic behavior immediate even if the request fails.
-    } finally {
-      resetAuthenticatedState();
-    }
+    });
+
+    resetAuthenticatedState();
+    await panicRequest;
   }
 
   async function parseIngestResponseFromHttp(response: Response): Promise<ParsedIngestResponse> {
@@ -11026,15 +11047,33 @@ export default function App(): JSX.Element {
   }, [detailsItemId, detailsItem]);
 
   useEffect(() => {
-    const markInteraction = (): void => {
-      lastInteractionRef.current = Date.now();
-    };
+    if (!authenticated) {
+      return undefined;
+    }
 
     const handleKeydown = (event: KeyboardEvent): void => {
-      markInteraction();
-      if (event.key === 'Escape' && !event.repeat && authenticated && viewerItem === null) {
-        void requestPanicLock();
+      lastInteractionRef.current = Date.now();
+
+      if (event.key !== 'Escape' || event.repeat) {
+        return;
       }
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      void requestPanicLock();
+    };
+
+    document.addEventListener('keydown', handleKeydown, true);
+
+    return () => {
+      document.removeEventListener('keydown', handleKeydown, true);
+    };
+  }, [authenticated]);
+
+  useEffect(() => {
+    const markInteraction = (): void => {
+      lastInteractionRef.current = Date.now();
     };
 
     const events: Array<keyof DocumentEventMap> = [
@@ -11042,17 +11081,13 @@ export default function App(): JSX.Element {
       'mousedown',
       'pointerdown',
       'touchstart',
-      'wheel',
-      'keydown'
+      'wheel'
     ];
 
-    document.addEventListener('keydown', handleKeydown);
     for (const eventName of events) {
-      if (eventName !== 'keydown') {
-        document.addEventListener(eventName, markInteraction as EventListener, {
-          passive: true
-        });
-      }
+      document.addEventListener(eventName, markInteraction as EventListener, {
+        passive: true
+      });
     }
 
     const interval = window.setInterval(() => {
@@ -11072,11 +11107,8 @@ export default function App(): JSX.Element {
     }, 10000);
 
     return () => {
-      document.removeEventListener('keydown', handleKeydown);
       for (const eventName of events) {
-        if (eventName !== 'keydown') {
-          document.removeEventListener(eventName, markInteraction as EventListener);
-        }
+        document.removeEventListener(eventName, markInteraction as EventListener);
       }
       window.clearInterval(interval);
     };
@@ -12318,6 +12350,7 @@ export default function App(): JSX.Element {
             setViewerItem(null);
           }}
           onMarkUsed={markCatalogItemUsed}
+          onPanicLock={requestPanicLock}
           onSetThumbnail={setCatalogItemThumbnail}
           onListBookmarks={listCatalogItemBookmarks}
           onCreateBookmark={createCatalogItemBookmark}
