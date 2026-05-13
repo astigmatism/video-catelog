@@ -1,13 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { Readable } from 'node:stream';
-import { inflateRawSync } from 'node:zlib';
+import { Readable, Transform, type TransformCallback } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { createInflateRaw } from 'node:zlib';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppConfig } from './config';
 import {
   createPhotoThumbnailStoredName,
   generatePhotoThumbnailFile,
+  readPhotoImageDimensions,
   getPhotoCollectionStorageRootsForCleanup,
   getPhotoOriginalCollectionStorageRoot,
   isUnsupportedPhotoThumbnailSourceError
@@ -42,9 +44,15 @@ const PHOTO_COLLECTION_NAME_MAX_LENGTH = 160;
 const PHOTO_IMPORT_SKIPPED_FILE_RESPONSE_LIMIT = 25;
 const PHOTO_IMPORT_SKIPPED_FILE_MESSAGE_LIMIT = 6;
 const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
+const ZIP64_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06064b50;
+const ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE = 0x07064b50;
 const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
 const ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
+const ZIP64_EXTENDED_INFORMATION_EXTRA_FIELD_ID = 0x0001;
 const ZIP64_PLACEHOLDER = 0xffffffff;
+const ZIP_END_OF_CENTRAL_DIRECTORY_MIN_LENGTH = 22;
+const ZIP_END_OF_CENTRAL_DIRECTORY_MAX_COMMENT_LENGTH = 0xffff;
+const ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_LENGTH = 20;
 
 export type PhotoRoutesOptions = {
   config: AppConfig;
@@ -85,7 +93,37 @@ type ParsedMultipartUpload = {
   files: BufferedUploadFile[];
 };
 
-type ZipImageEntry = {
+type TemporaryUploadedFile = {
+  fieldName: string;
+  filename: string;
+  mimetype: string | null;
+  path: string;
+  sizeBytes: number;
+};
+
+type ParsedTemporaryMultipartUpload = {
+  fields: Map<string, string[]>;
+  files: TemporaryUploadedFile[];
+  temporaryRoot: string;
+};
+
+type ZipImageFileEntry = {
+  originalName: string;
+  mimeType: string;
+  extension: string;
+  compressionMethod: number;
+  compressedSize: number;
+  uncompressedSize: number;
+  localHeaderOffset: number;
+};
+
+type Zip64ExtendedInformation = {
+  compressedSize: number | null;
+  uncompressedSize: number | null;
+  localHeaderOffset: number | null;
+};
+
+type PreparedImageFile = {
   originalName: string;
   buffer: Buffer;
   sizeBytes: number;
@@ -95,8 +133,6 @@ type ZipImageEntry = {
   height: number | null;
   checksumSha256: string;
 };
-
-type PreparedImageFile = ZipImageEntry;
 
 type PhotoImportSkippedReason = 'unsupported_file_type' | 'unsupported_image_data';
 
@@ -675,7 +711,7 @@ async function ensurePhotoThumbnailFile(
     const generatedThumbnail = await generatePhotoThumbnailFile({
       config,
       collectionId: photo.collectionId,
-      sourceBuffer: fs.readFileSync(originalAbsolutePath),
+      sourcePath: originalAbsolutePath,
       thumbnailStoredName: createPhotoThumbnailStoredName(photo.storedName)
     });
 
@@ -956,48 +992,712 @@ function getMultipartField(fields: Map<string, string[]>, ...names: string[]): s
   return null;
 }
 
-function findZipEndOfCentralDirectory(buffer: Buffer): ZipEndOfCentralDirectory {
-  if (buffer.length < 22) {
+function cleanupTemporaryDirectory(directoryPath: string | null | undefined): void {
+  if (!directoryPath) {
+    return;
+  }
+
+  try {
+    fs.rmSync(directoryPath, { recursive: true, force: true });
+  } catch {
+    // Best-effort cleanup only.
+  }
+}
+
+function createPhotoImportTemporaryDirectory(config: AppConfig, prefix: string): string {
+  fs.mkdirSync(config.photoTempRoot, { recursive: true });
+  return fs.mkdtempSync(path.join(config.photoTempRoot, `${prefix}-`));
+}
+
+function createByteCountingTransform(input: {
+  maxBytes: number;
+  errorMessage: string;
+  statusCode?: number;
+  hash?: ReturnType<typeof createHash>;
+}): { stream: Transform; getTotalBytes: () => number } {
+  let totalBytes = 0;
+  const stream = new Transform({
+    transform(chunk: Buffer | string, _encoding: BufferEncoding, callback: TransformCallback) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buffer.length;
+      if (totalBytes > input.maxBytes) {
+        callback(new PhotoUploadError(input.errorMessage, input.statusCode ?? 400));
+        return;
+      }
+
+      input.hash?.update(buffer);
+      callback(null, buffer);
+    }
+  });
+
+  return {
+    stream,
+    getTotalBytes: () => totalBytes
+  };
+}
+
+async function writeReadableStreamToTemporaryFile(
+  stream: Readable | NodeJS.ReadableStream,
+  filePath: string,
+  maxBytes: number
+): Promise<number> {
+  if (maxBytes <= 0) {
+    throw new PhotoUploadError('Upload exceeds the configured maximum size.', 413);
+  }
+
+  const counter = createByteCountingTransform({
+    maxBytes,
+    errorMessage: 'Upload exceeds the configured maximum size.',
+    statusCode: 413
+  });
+
+  try {
+    await pipeline(
+      stream as NodeJS.ReadableStream,
+      counter.stream,
+      fs.createWriteStream(filePath, { flags: 'wx' })
+    );
+  } catch (error) {
+    try {
+      fs.rmSync(filePath, { force: true });
+    } catch {
+      // Best-effort cleanup only.
+    }
+    throw error;
+  }
+
+  return counter.getTotalBytes();
+}
+
+async function readMultipartUploadToTemporaryFiles(
+  request: FastifyRequest,
+  config: AppConfig,
+  maxBytes: number
+): Promise<ParsedTemporaryMultipartUpload> {
+  if (typeof (request as MultipartRequest).parts !== 'function') {
+    throw new PhotoUploadError('Expected a multipart/form-data request.');
+  }
+
+  const temporaryRoot = createPhotoImportTemporaryDirectory(config, 'zip-import');
+  const fields = new Map<string, string[]>();
+  const files: TemporaryUploadedFile[] = [];
+  let totalBytes = 0;
+
+  try {
+    for await (const part of (request as MultipartRequest).parts()) {
+      if (part.type === 'field') {
+        const value = typeof part.value === 'string' ? part.value : String(part.value ?? '');
+        fields.set(part.fieldname, [...(fields.get(part.fieldname) ?? []), value]);
+        continue;
+      }
+
+      const temporaryPath = path.join(temporaryRoot, `${files.length}-${randomUUID()}.upload`);
+      const sizeBytes = await writeReadableStreamToTemporaryFile(part.file, temporaryPath, maxBytes - totalBytes);
+      totalBytes += sizeBytes;
+      if (totalBytes > maxBytes) {
+        throw new PhotoUploadError('Upload exceeds the configured maximum size.', 413);
+      }
+
+      files.push({
+        fieldName: part.fieldname,
+        filename: sanitizeVisibleFilename(part.filename || 'photo'),
+        mimetype: typeof part.mimetype === 'string' ? part.mimetype : null,
+        path: temporaryPath,
+        sizeBytes
+      });
+    }
+
+    return { fields, files, temporaryRoot };
+  } catch (error) {
+    cleanupTemporaryDirectory(temporaryRoot);
+    throw error;
+  }
+}
+
+function readUInt64LEAsSafeNumber(buffer: Buffer, offset: number, context: string): number {
+  if (offset + 8 > buffer.length) {
+    throw new PhotoUploadError(`${context} is truncated.`);
+  }
+
+  const value = buffer.readBigUInt64LE(offset);
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new PhotoUploadError(`${context} is too large to process safely.`);
+  }
+
+  return Number(value);
+}
+
+function readFileRange(fd: number, filePath: string, offset: number, length: number): Buffer {
+  if (offset < 0 || length < 0) {
+    throw new PhotoUploadError('The uploaded ZIP file has an invalid file range.');
+  }
+
+  if (length === 0) {
+    return Buffer.alloc(0);
+  }
+
+  const buffer = Buffer.alloc(length);
+  const bytesRead = fs.readSync(fd, buffer, 0, length, offset);
+  if (bytesRead !== length) {
+    throw new PhotoUploadError(`The uploaded ZIP file is truncated near ${path.basename(filePath)}.`);
+  }
+
+  return buffer;
+}
+
+function assertZipFileRange(fileSize: number, offset: number, length: number, message: string): void {
+  if (offset < 0 || length < 0 || offset > fileSize || offset + length > fileSize) {
+    throw new PhotoUploadError(message);
+  }
+}
+
+function readZip64EndOfCentralDirectory(
+  fd: number,
+  filePath: string,
+  fileSize: number,
+  eocdOffset: number
+): ZipEndOfCentralDirectory {
+  const locatorOffset = eocdOffset - ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_LENGTH;
+  if (locatorOffset < 0) {
+    throw new PhotoUploadError('The uploaded ZIP file is missing its ZIP64 end-of-central-directory locator.');
+  }
+
+  const locator = readFileRange(fd, filePath, locatorOffset, ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_LENGTH);
+  if (locator.readUInt32LE(0) !== ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE) {
+    throw new PhotoUploadError('The uploaded ZIP file is missing its ZIP64 end-of-central-directory locator.');
+  }
+
+  const zip64EocdDisk = locator.readUInt32LE(4);
+  const zip64EocdOffset = readUInt64LEAsSafeNumber(locator, 8, 'The ZIP64 end-of-central-directory offset');
+  const totalDisks = locator.readUInt32LE(16);
+  if (zip64EocdDisk !== 0 || totalDisks !== 1) {
+    throw new PhotoUploadError('Multi-disk ZIP archives are not supported.');
+  }
+
+  assertZipFileRange(
+    fileSize,
+    zip64EocdOffset,
+    56,
+    'The uploaded ZIP file has a truncated ZIP64 end-of-central-directory record.'
+  );
+  const record = readFileRange(fd, filePath, zip64EocdOffset, 56);
+  if (record.readUInt32LE(0) !== ZIP64_END_OF_CENTRAL_DIRECTORY_SIGNATURE) {
+    throw new PhotoUploadError('The uploaded ZIP file has an invalid ZIP64 end-of-central-directory record.');
+  }
+
+  const diskNumber = record.readUInt32LE(16);
+  const centralDirectoryDisk = record.readUInt32LE(20);
+  const entriesOnDisk = readUInt64LEAsSafeNumber(record, 24, 'The ZIP64 entries-on-disk value');
+  const entryCount = readUInt64LEAsSafeNumber(record, 32, 'The ZIP64 entry count');
+  const centralDirectorySize = readUInt64LEAsSafeNumber(record, 40, 'The ZIP64 central-directory size');
+  const centralDirectoryOffset = readUInt64LEAsSafeNumber(record, 48, 'The ZIP64 central-directory offset');
+
+  if (diskNumber !== 0 || centralDirectoryDisk !== 0 || entriesOnDisk !== entryCount) {
+    throw new PhotoUploadError('Multi-disk ZIP archives are not supported.');
+  }
+
+  if (entryCount > MAX_ZIP_ENTRIES) {
+    throw new PhotoUploadError(`ZIP archives may contain at most ${MAX_ZIP_ENTRIES} entries.`);
+  }
+
+  assertZipFileRange(
+    fileSize,
+    centralDirectoryOffset,
+    centralDirectorySize,
+    'The uploaded ZIP file has an invalid central directory.'
+  );
+
+  return { entryCount, centralDirectorySize, centralDirectoryOffset };
+}
+
+function findZipEndOfCentralDirectoryInFile(zipFilePath: string): ZipEndOfCentralDirectory {
+  const stats = fs.statSync(zipFilePath);
+  if (!stats.isFile() || stats.size < ZIP_END_OF_CENTRAL_DIRECTORY_MIN_LENGTH) {
     throw new PhotoUploadError('The uploaded ZIP file is too small to be a valid ZIP archive.');
   }
 
-  const minimumOffset = Math.max(0, buffer.length - 22 - 0xffff);
-  for (let offset = buffer.length - 22; offset >= minimumOffset; offset -= 1) {
-    if (buffer.readUInt32LE(offset) !== ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE) {
-      continue;
+  const fd = fs.openSync(zipFilePath, 'r');
+  try {
+    const fileSize = stats.size;
+    const tailLength = Math.min(
+      fileSize,
+      ZIP_END_OF_CENTRAL_DIRECTORY_MIN_LENGTH + ZIP_END_OF_CENTRAL_DIRECTORY_MAX_COMMENT_LENGTH
+    );
+    const tailOffset = fileSize - tailLength;
+    const tail = readFileRange(fd, zipFilePath, tailOffset, tailLength);
+
+    for (let offset = tailLength - ZIP_END_OF_CENTRAL_DIRECTORY_MIN_LENGTH; offset >= 0; offset -= 1) {
+      if (tail.readUInt32LE(offset) !== ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE) {
+        continue;
+      }
+
+      const eocdOffset = tailOffset + offset;
+      const commentLength = tail.readUInt16LE(offset + 20);
+      if (eocdOffset + ZIP_END_OF_CENTRAL_DIRECTORY_MIN_LENGTH + commentLength !== fileSize) {
+        continue;
+      }
+
+      const diskNumber = tail.readUInt16LE(offset + 4);
+      const centralDirectoryDisk = tail.readUInt16LE(offset + 6);
+      const entriesOnDisk = tail.readUInt16LE(offset + 8);
+      const entryCount = tail.readUInt16LE(offset + 10);
+      const centralDirectorySize = tail.readUInt32LE(offset + 12);
+      const centralDirectoryOffset = tail.readUInt32LE(offset + 16);
+
+      if (diskNumber !== 0 || centralDirectoryDisk !== 0 || entriesOnDisk !== entryCount) {
+        throw new PhotoUploadError('Multi-disk ZIP archives are not supported.');
+      }
+
+      if (
+        centralDirectoryOffset === ZIP64_PLACEHOLDER ||
+        centralDirectorySize === ZIP64_PLACEHOLDER ||
+        entryCount === 0xffff
+      ) {
+        return readZip64EndOfCentralDirectory(fd, zipFilePath, fileSize, eocdOffset);
+      }
+
+      if (entryCount > MAX_ZIP_ENTRIES) {
+        throw new PhotoUploadError(`ZIP archives may contain at most ${MAX_ZIP_ENTRIES} entries.`);
+      }
+
+      assertZipFileRange(
+        fileSize,
+        centralDirectoryOffset,
+        centralDirectorySize,
+        'The uploaded ZIP file has an invalid central directory.'
+      );
+
+      return { entryCount, centralDirectorySize, centralDirectoryOffset };
     }
-
-    const diskNumber = buffer.readUInt16LE(offset + 4);
-    const centralDirectoryDisk = buffer.readUInt16LE(offset + 6);
-    const entriesOnDisk = buffer.readUInt16LE(offset + 8);
-    const entryCount = buffer.readUInt16LE(offset + 10);
-    const centralDirectorySize = buffer.readUInt32LE(offset + 12);
-    const centralDirectoryOffset = buffer.readUInt32LE(offset + 16);
-
-    if (diskNumber !== 0 || centralDirectoryDisk !== 0 || entriesOnDisk !== entryCount) {
-      throw new PhotoUploadError('Multi-disk ZIP archives are not supported.');
-    }
-
-    if (entryCount > MAX_ZIP_ENTRIES) {
-      throw new PhotoUploadError(`ZIP archives may contain at most ${MAX_ZIP_ENTRIES} entries.`);
-    }
-
-    if (
-      centralDirectoryOffset === ZIP64_PLACEHOLDER ||
-      centralDirectorySize === ZIP64_PLACEHOLDER ||
-      entryCount === 0xffff
-    ) {
-      throw new PhotoUploadError('ZIP64 archives are not supported for photo imports.');
-    }
-
-    if (centralDirectoryOffset + centralDirectorySize > buffer.length) {
-      throw new PhotoUploadError('The uploaded ZIP file has an invalid central directory.');
-    }
-
-    return { entryCount, centralDirectorySize, centralDirectoryOffset };
+  } finally {
+    fs.closeSync(fd);
   }
 
   throw new PhotoUploadError('The uploaded ZIP file is malformed or unsupported.');
+}
+
+function parseZip64ExtendedInformation(
+  extraField: Buffer,
+  needed: { compressedSize: boolean; uncompressedSize: boolean; localHeaderOffset: boolean }
+): Zip64ExtendedInformation {
+  let cursor = 0;
+
+  while (cursor + 4 <= extraField.length) {
+    const headerId = extraField.readUInt16LE(cursor);
+    const dataSize = extraField.readUInt16LE(cursor + 2);
+    const dataStart = cursor + 4;
+    const dataEnd = dataStart + dataSize;
+    if (dataEnd > extraField.length) {
+      throw new PhotoUploadError('The uploaded ZIP file has a truncated ZIP64 extra field.');
+    }
+
+    if (headerId !== ZIP64_EXTENDED_INFORMATION_EXTRA_FIELD_ID) {
+      cursor = dataEnd;
+      continue;
+    }
+
+    let dataCursor = dataStart;
+    const result: Zip64ExtendedInformation = {
+      compressedSize: null,
+      uncompressedSize: null,
+      localHeaderOffset: null
+    };
+    const readZip64Value = (context: string): number => {
+      if (dataCursor + 8 > dataEnd) {
+        throw new PhotoUploadError('The uploaded ZIP file has a truncated ZIP64 extra field.');
+      }
+
+      const value = readUInt64LEAsSafeNumber(extraField, dataCursor, context);
+      dataCursor += 8;
+      return value;
+    };
+
+    if (needed.uncompressedSize) {
+      result.uncompressedSize = readZip64Value('The ZIP64 uncompressed size');
+    }
+
+    if (needed.compressedSize) {
+      result.compressedSize = readZip64Value('The ZIP64 compressed size');
+    }
+
+    if (needed.localHeaderOffset) {
+      result.localHeaderOffset = readZip64Value('The ZIP64 local-header offset');
+    }
+
+    return result;
+  }
+
+  return {
+    compressedSize: null,
+    uncompressedSize: null,
+    localHeaderOffset: null
+  };
+}
+
+function readZipImageEntriesFromFile(
+  zipFilePath: string,
+  skippedFiles: PhotoImportSkippedFile[]
+): ZipImageFileEntry[] {
+  const eocd = findZipEndOfCentralDirectoryInFile(zipFilePath);
+  const stats = fs.statSync(zipFilePath);
+  const fileSize = stats.size;
+  const entries: ZipImageFileEntry[] = [];
+  const fd = fs.openSync(zipFilePath, 'r');
+
+  try {
+    let cursor = eocd.centralDirectoryOffset;
+    const centralDirectoryEnd = eocd.centralDirectoryOffset + eocd.centralDirectorySize;
+
+    for (let entryIndex = 0; entryIndex < eocd.entryCount; entryIndex += 1) {
+      if (cursor + 46 > centralDirectoryEnd) {
+        throw new PhotoUploadError('The uploaded ZIP file has an invalid central directory entry.');
+      }
+
+      assertZipFileRange(
+        fileSize,
+        cursor,
+        46,
+        'The uploaded ZIP file has an invalid central directory entry.'
+      );
+      const header = readFileRange(fd, zipFilePath, cursor, 46);
+      if (header.readUInt32LE(0) !== ZIP_CENTRAL_DIRECTORY_SIGNATURE) {
+        throw new PhotoUploadError('The uploaded ZIP file has an invalid central directory entry.');
+      }
+
+      const generalPurposeFlags = header.readUInt16LE(8);
+      const compressionMethod = header.readUInt16LE(10);
+      const compressedSize32 = header.readUInt32LE(20);
+      const uncompressedSize32 = header.readUInt32LE(24);
+      const fileNameLength = header.readUInt16LE(28);
+      const extraFieldLength = header.readUInt16LE(30);
+      const commentLength = header.readUInt16LE(32);
+      const localHeaderOffset32 = header.readUInt32LE(42);
+      const fileNameStart = cursor + 46;
+      const extraFieldStart = fileNameStart + fileNameLength;
+      const commentStart = extraFieldStart + extraFieldLength;
+      const nextCursor = commentStart + commentLength;
+      if (nextCursor > centralDirectoryEnd) {
+        throw new PhotoUploadError('The uploaded ZIP file has a truncated central directory entry.');
+      }
+
+      assertZipFileRange(fileSize, fileNameStart, fileNameLength, 'The uploaded ZIP file has a truncated entry name.');
+      assertZipFileRange(fileSize, extraFieldStart, extraFieldLength, 'The uploaded ZIP file has a truncated extra field.');
+      assertZipFileRange(fileSize, commentStart, commentLength, 'The uploaded ZIP file has a truncated entry comment.');
+
+      const entryName = decodeZipEntryName(
+        readFileRange(fd, zipFilePath, fileNameStart, fileNameLength),
+        (generalPurposeFlags & 0x0800) !== 0
+      );
+      const extraField = readFileRange(fd, zipFilePath, extraFieldStart, extraFieldLength);
+      cursor = nextCursor;
+
+      if (entryName.endsWith('/') || entryName.endsWith('\\') || isIgnorableZipMetadataEntry(entryName)) {
+        continue;
+      }
+
+      const originalName = sanitizeVisibleFilename(entryName);
+      const declaredMimeType = normalizeImageMimeType(originalName, null);
+      const extension = getImageExtension(originalName, declaredMimeType);
+      if (!declaredMimeType || !extension) {
+        addSkippedPhotoImportFile(skippedFiles, originalName, 'unsupported_file_type');
+        continue;
+      }
+
+      if ((generalPurposeFlags & 0x0001) !== 0) {
+        throw new PhotoUploadError('Encrypted ZIP archives are not supported.');
+      }
+
+      if (compressionMethod !== 0 && compressionMethod !== 8) {
+        throw new PhotoUploadError('Only stored and deflated ZIP entries are supported.');
+      }
+
+      const needsZip64 = {
+        compressedSize: compressedSize32 === ZIP64_PLACEHOLDER,
+        uncompressedSize: uncompressedSize32 === ZIP64_PLACEHOLDER,
+        localHeaderOffset: localHeaderOffset32 === ZIP64_PLACEHOLDER
+      };
+      const zip64 = needsZip64.compressedSize || needsZip64.uncompressedSize || needsZip64.localHeaderOffset
+        ? parseZip64ExtendedInformation(extraField, needsZip64)
+        : { compressedSize: null, uncompressedSize: null, localHeaderOffset: null };
+      const compressedSize = needsZip64.compressedSize ? zip64.compressedSize : compressedSize32;
+      const uncompressedSize = needsZip64.uncompressedSize ? zip64.uncompressedSize : uncompressedSize32;
+      const localHeaderOffset = needsZip64.localHeaderOffset ? zip64.localHeaderOffset : localHeaderOffset32;
+
+      if (compressedSize === null || uncompressedSize === null || localHeaderOffset === null) {
+        throw new PhotoUploadError('The uploaded ZIP file has an incomplete ZIP64 extra field.');
+      }
+
+      assertZipFileRange(
+        fileSize,
+        localHeaderOffset,
+        30,
+        'The uploaded ZIP file has an invalid local file header.'
+      );
+
+      entries.push({
+        originalName,
+        mimeType: declaredMimeType,
+        extension,
+        compressionMethod,
+        compressedSize,
+        uncompressedSize,
+        localHeaderOffset
+      });
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  return entries;
+}
+
+function readZipEntryCompressedDataRange(
+  zipFilePath: string,
+  fileSize: number,
+  entry: ZipImageFileEntry
+): { start: number; length: number } {
+  const fd = fs.openSync(zipFilePath, 'r');
+  try {
+    assertZipFileRange(
+      fileSize,
+      entry.localHeaderOffset,
+      30,
+      'The uploaded ZIP file has an invalid local file header.'
+    );
+    const localHeader = readFileRange(fd, zipFilePath, entry.localHeaderOffset, 30);
+    if (localHeader.readUInt32LE(0) !== ZIP_LOCAL_FILE_HEADER_SIGNATURE) {
+      throw new PhotoUploadError('The uploaded ZIP file has an invalid local file header.');
+    }
+
+    const localFileNameLength = localHeader.readUInt16LE(26);
+    const localExtraFieldLength = localHeader.readUInt16LE(28);
+    const compressedDataStart = entry.localHeaderOffset + 30 + localFileNameLength + localExtraFieldLength;
+    assertZipFileRange(
+      fileSize,
+      compressedDataStart,
+      entry.compressedSize,
+      'The uploaded ZIP file has a truncated file entry.'
+    );
+
+    return { start: compressedDataStart, length: entry.compressedSize };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function createZipCompressedDataStream(zipFilePath: string, start: number, length: number): Readable {
+  if (length === 0) {
+    return Readable.from([]);
+  }
+
+  return fs.createReadStream(zipFilePath, {
+    start,
+    end: start + length - 1
+  });
+}
+
+function isZlibDecompressionError(error: unknown): boolean {
+  if (!isRecord(error)) {
+    return false;
+  }
+
+  const code = typeof error.code === 'string' ? error.code : '';
+  return code.startsWith('Z_');
+}
+
+async function extractZipImageEntryToFile(input: {
+  zipFilePath: string;
+  zipFileSize: number;
+  entry: ZipImageFileEntry;
+  destinationPath: string;
+  remainingUncompressedBytes: number;
+}): Promise<{ sizeBytes: number; checksumSha256: string }> {
+  if (input.entry.uncompressedSize > input.remainingUncompressedBytes) {
+    throw new PhotoUploadError('The uncompressed ZIP contents exceed the configured maximum upload size.', 413);
+  }
+
+  const range = readZipEntryCompressedDataRange(input.zipFilePath, input.zipFileSize, input.entry);
+  const compressedDataStream = createZipCompressedDataStream(input.zipFilePath, range.start, range.length);
+  const checksum = createHash('sha256');
+  const counter = createByteCountingTransform({
+    maxBytes: input.entry.uncompressedSize,
+    errorMessage: 'The uploaded ZIP file has an entry with an invalid uncompressed size.',
+    hash: checksum
+  });
+  const output = fs.createWriteStream(input.destinationPath, { flags: 'wx' });
+
+  try {
+    if (input.entry.compressionMethod === 8) {
+      await pipeline(compressedDataStream, createInflateRaw(), counter.stream, output);
+    } else {
+      await pipeline(compressedDataStream, counter.stream, output);
+    }
+  } catch (error) {
+    try {
+      fs.rmSync(input.destinationPath, { force: true });
+    } catch {
+      // Best-effort cleanup only.
+    }
+
+    if (isZlibDecompressionError(error)) {
+      throw new PhotoUploadError('The uploaded ZIP file has a corrupt deflated entry.');
+    }
+
+    throw error;
+  }
+
+  const sizeBytes = counter.getTotalBytes();
+  if (sizeBytes !== input.entry.uncompressedSize) {
+    try {
+      fs.rmSync(input.destinationPath, { force: true });
+    } catch {
+      // Best-effort cleanup only.
+    }
+    throw new PhotoUploadError('The uploaded ZIP file has an entry with an invalid uncompressed size.');
+  }
+
+  return {
+    sizeBytes,
+    checksumSha256: checksum.digest('hex')
+  };
+}
+
+async function writeZipEntriesToStorage(
+  config: AppConfig,
+  collectionId: string,
+  zipFilePath: string,
+  entries: ZipImageFileEntry[],
+  skippedFiles: PhotoImportSkippedFile[],
+  maxUncompressedBytes: number
+): Promise<StoredPhotoFile[]> {
+  const storedFiles: StoredPhotoFile[] = [];
+  const collectionRoot = getPhotoCollectionStorageRoot(config, collectionId);
+  const zipFileSize = fs.statSync(zipFilePath).size;
+  let totalUncompressedBytes = 0;
+  fs.mkdirSync(collectionRoot, { recursive: true });
+
+  try {
+    for (const entry of entries) {
+      const storedName = createStoredPhotoName(entry.extension);
+      const absolutePath = path.join(collectionRoot, storedName);
+      const temporaryOriginalPath = path.join(
+        collectionRoot,
+        `${storedName}.${process.pid}.${Date.now()}.tmp`
+      );
+      let thumbnailAbsolutePath: string | null = null;
+
+      try {
+        const extracted = await extractZipImageEntryToFile({
+          zipFilePath,
+          zipFileSize,
+          entry,
+          destinationPath: temporaryOriginalPath,
+          remainingUncompressedBytes: maxUncompressedBytes - totalUncompressedBytes
+        });
+        totalUncompressedBytes += extracted.sizeBytes;
+        fs.renameSync(temporaryOriginalPath, absolutePath);
+
+        const dimensions = await readPhotoImageDimensions({ sourcePath: absolutePath });
+        const thumbnail = await generatePhotoThumbnailFile({
+          config,
+          collectionId,
+          sourcePath: absolutePath,
+          thumbnailStoredName: createPhotoThumbnailStoredName(storedName)
+        });
+        thumbnailAbsolutePath = thumbnail.absolutePath;
+
+        storedFiles.push({
+          absolutePath,
+          thumbnailAbsolutePath,
+          input: {
+            originalName: entry.originalName,
+            storedName,
+            relativePath: path.relative(config.mediaRoot, absolutePath),
+            mimeType: entry.mimeType,
+            sizeBytes: extracted.sizeBytes,
+            checksumSha256: extracted.checksumSha256,
+            width: dimensions.width,
+            height: dimensions.height,
+            thumbnailRelativePath: thumbnail.relativePath,
+            thumbnailMimeType: thumbnail.mimeType,
+            thumbnailSizeBytes: thumbnail.sizeBytes,
+            thumbnailWidth: thumbnail.width,
+            thumbnailHeight: thumbnail.height
+          }
+        });
+      } catch (error) {
+        try {
+          fs.rmSync(temporaryOriginalPath, { force: true });
+        } catch {
+          // Best-effort cleanup only.
+        }
+        try {
+          fs.rmSync(absolutePath, { force: true });
+        } catch {
+          // Best-effort cleanup only.
+        }
+        if (thumbnailAbsolutePath) {
+          try {
+            fs.rmSync(thumbnailAbsolutePath, { force: true });
+          } catch {
+            // Best-effort cleanup only.
+          }
+        }
+
+        if (isUnsupportedPhotoThumbnailSourceError(error)) {
+          addSkippedPhotoImportFile(
+            skippedFiles,
+            entry.originalName,
+            'unsupported_image_data',
+            getUnsupportedPhotoDetail(error)
+          );
+          continue;
+        }
+
+        throw error;
+      }
+    }
+  } catch (error) {
+    cleanupStoredFiles(storedFiles);
+    throw error;
+  }
+
+  return storedFiles;
+}
+
+function getPhotoUploadErrorStatusCode(error: unknown): number {
+  if (error instanceof PhotoUploadError) {
+    return error.statusCode;
+  }
+
+  if (isRecord(error)) {
+    const statusCode = error.statusCode;
+    if (typeof statusCode === 'number' && Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599) {
+      return statusCode;
+    }
+
+    const code = typeof error.code === 'string' ? error.code : '';
+    if (code.includes('FILE_TOO_LARGE') || code.includes('LIMIT_FILE_SIZE')) {
+      return 413;
+    }
+  }
+
+  return 500;
+}
+
+function getPhotoUploadErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof PhotoUploadError) {
+    return error.message;
+  }
+
+  if (isRecord(error)) {
+    const code = typeof error.code === 'string' ? error.code : '';
+    if (code.includes('FILE_TOO_LARGE') || code.includes('LIMIT_FILE_SIZE')) {
+      return 'Upload exceeds the configured maximum size.';
+    }
+  }
+
+  return error instanceof Error ? error.message : fallback;
 }
 
 function decodeZipEntryName(buffer: Buffer, isUtf8: boolean): string {
@@ -1016,106 +1716,6 @@ function isIgnorableZipMetadataEntry(entryName: string): boolean {
     basename === 'desktop.ini' ||
     basename.startsWith('._')
   );
-}
-
-function extractZipEntries(
-  buffer: Buffer,
-  maxUncompressedBytes: number,
-  skippedFiles: PhotoImportSkippedFile[]
-): ZipImageEntry[] {
-  const eocd = findZipEndOfCentralDirectory(buffer);
-  const images: ZipImageEntry[] = [];
-  let cursor = eocd.centralDirectoryOffset;
-  let totalUncompressedBytes = 0;
-
-  for (let entryIndex = 0; entryIndex < eocd.entryCount; entryIndex += 1) {
-    if (cursor + 46 > buffer.length || buffer.readUInt32LE(cursor) !== ZIP_CENTRAL_DIRECTORY_SIGNATURE) {
-      throw new PhotoUploadError('The uploaded ZIP file has an invalid central directory entry.');
-    }
-
-    const generalPurposeFlags = buffer.readUInt16LE(cursor + 8);
-    const compressionMethod = buffer.readUInt16LE(cursor + 10);
-    const compressedSize = buffer.readUInt32LE(cursor + 20);
-    const uncompressedSize = buffer.readUInt32LE(cursor + 24);
-    const fileNameLength = buffer.readUInt16LE(cursor + 28);
-    const extraFieldLength = buffer.readUInt16LE(cursor + 30);
-    const commentLength = buffer.readUInt16LE(cursor + 32);
-    const localHeaderOffset = buffer.readUInt32LE(cursor + 42);
-    const fileNameStart = cursor + 46;
-    const fileNameEnd = fileNameStart + fileNameLength;
-
-    if (fileNameEnd > buffer.length) {
-      throw new PhotoUploadError('The uploaded ZIP file has a truncated entry name.');
-    }
-
-    if (
-      compressedSize === ZIP64_PLACEHOLDER ||
-      uncompressedSize === ZIP64_PLACEHOLDER ||
-      localHeaderOffset === ZIP64_PLACEHOLDER
-    ) {
-      throw new PhotoUploadError('ZIP64 archives are not supported for photo imports.');
-    }
-
-    const entryName = decodeZipEntryName(buffer.subarray(fileNameStart, fileNameEnd), (generalPurposeFlags & 0x0800) !== 0);
-    cursor = fileNameEnd + extraFieldLength + commentLength;
-
-    if (entryName.endsWith('/') || entryName.endsWith('\\') || isIgnorableZipMetadataEntry(entryName)) {
-      continue;
-    }
-
-    const originalName = sanitizeVisibleFilename(entryName);
-    const declaredMimeType = normalizeImageMimeType(originalName, null);
-    const extension = getImageExtension(originalName, declaredMimeType);
-    if (!declaredMimeType || !extension) {
-      addSkippedPhotoImportFile(skippedFiles, originalName, 'unsupported_file_type');
-      continue;
-    }
-
-    if ((generalPurposeFlags & 0x0001) !== 0) {
-      throw new PhotoUploadError('Encrypted ZIP archives are not supported.');
-    }
-
-    if (compressionMethod !== 0 && compressionMethod !== 8) {
-      throw new PhotoUploadError('Only stored and deflated ZIP entries are supported.');
-    }
-
-    if (localHeaderOffset + 30 > buffer.length || buffer.readUInt32LE(localHeaderOffset) !== ZIP_LOCAL_FILE_HEADER_SIGNATURE) {
-      throw new PhotoUploadError('The uploaded ZIP file has an invalid local file header.');
-    }
-
-    const localFileNameLength = buffer.readUInt16LE(localHeaderOffset + 26);
-    const localExtraFieldLength = buffer.readUInt16LE(localHeaderOffset + 28);
-    const compressedDataStart = localHeaderOffset + 30 + localFileNameLength + localExtraFieldLength;
-    const compressedDataEnd = compressedDataStart + compressedSize;
-    if (compressedDataStart > buffer.length || compressedDataEnd > buffer.length) {
-      throw new PhotoUploadError('The uploaded ZIP file has a truncated file entry.');
-    }
-
-    const compressedData = buffer.subarray(compressedDataStart, compressedDataEnd);
-    const imageBuffer = compressionMethod === 0 ? Buffer.from(compressedData) : inflateRawSync(compressedData);
-    if (imageBuffer.length !== uncompressedSize) {
-      throw new PhotoUploadError('The uploaded ZIP file has an entry with an invalid uncompressed size.');
-    }
-
-    totalUncompressedBytes += imageBuffer.length;
-    if (totalUncompressedBytes > maxUncompressedBytes) {
-      throw new PhotoUploadError('The uncompressed ZIP contents exceed the configured maximum upload size.', 413);
-    }
-
-    const dimensions = detectImageDimensions(imageBuffer, declaredMimeType);
-    images.push({
-      originalName,
-      buffer: imageBuffer,
-      sizeBytes: imageBuffer.length,
-      mimeType: declaredMimeType,
-      extension,
-      width: dimensions.width,
-      height: dimensions.height,
-      checksumSha256: createHash('sha256').update(imageBuffer).digest('hex')
-    });
-  }
-
-  return images;
 }
 
 function detectImageDimensions(buffer: Buffer, mimeType: string): ImageDimensions {
@@ -1625,8 +2225,9 @@ export function registerPhotoRoutes(app: FastifyInstance, options: PhotoRoutesOp
       return;
     }
 
+    let upload: ParsedTemporaryMultipartUpload | null = null;
     try {
-      const upload = await readMultipartUpload(request, config.maxUploadBytes);
+      upload = await readMultipartUploadToTemporaryFiles(request, config, config.maxUploadBytes);
       const zipFile = upload.files.find((file) => file.fieldName === 'file' || file.fieldName === 'zip') ?? upload.files[0];
       if (!zipFile) {
         throw new PhotoUploadError('Choose a ZIP file to import.');
@@ -1637,8 +2238,8 @@ export function registerPhotoRoutes(app: FastifyInstance, options: PhotoRoutesOp
       }
 
       const skippedFiles: PhotoImportSkippedFile[] = [];
-      const images = extractZipEntries(zipFile.buffer, config.maxUploadBytes, skippedFiles);
-      if (images.length === 0) {
+      const entries = readZipImageEntriesFromFile(zipFile.path, skippedFiles);
+      if (entries.length === 0) {
         throw new PhotoUploadError(createNoImportablePhotosMessage('ZIP file', skippedFiles));
       }
 
@@ -1651,7 +2252,14 @@ export function registerPhotoRoutes(app: FastifyInstance, options: PhotoRoutesOp
       let storedFiles: StoredPhotoFile[] = [];
 
       try {
-        storedFiles = await writePreparedImagesToStorage(config, collection.id, images, skippedFiles);
+        storedFiles = await writeZipEntriesToStorage(
+          config,
+          collection.id,
+          zipFile.path,
+          entries,
+          skippedFiles,
+          config.maxUploadBytes
+        );
         if (storedFiles.length === 0) {
           throw new PhotoUploadError(createNoImportablePhotosMessage('ZIP file', skippedFiles));
         }
@@ -1673,11 +2281,12 @@ export function registerPhotoRoutes(app: FastifyInstance, options: PhotoRoutesOp
         throw error;
       }
     } catch (error) {
-      const statusCode = error instanceof PhotoUploadError ? error.statusCode : 500;
-      reply.code(statusCode).send({
+      reply.code(getPhotoUploadErrorStatusCode(error)).send({
         ok: false,
-        message: error instanceof Error ? error.message : 'Photo ZIP import failed.'
+        message: getPhotoUploadErrorMessage(error, 'Photo ZIP import failed.')
       });
+    } finally {
+      cleanupTemporaryDirectory(upload?.temporaryRoot);
     }
   });
 
@@ -1749,10 +2358,9 @@ export function registerPhotoRoutes(app: FastifyInstance, options: PhotoRoutesOp
         throw error;
       }
     } catch (error) {
-      const statusCode = error instanceof PhotoUploadError ? error.statusCode : 500;
-      reply.code(statusCode).send({
+      reply.code(getPhotoUploadErrorStatusCode(error)).send({
         ok: false,
-        message: error instanceof Error ? error.message : 'Photo import failed.'
+        message: getPhotoUploadErrorMessage(error, 'Photo import failed.')
       });
     }
   });

@@ -9,6 +9,15 @@ export const PHOTO_THUMBNAIL_EXTENSION = '.webp';
 
 const PHOTO_THUMBNAIL_QUALITY = 82;
 
+export type PhotoImageDimensions = {
+  width: number | null;
+  height: number | null;
+};
+
+export type PhotoThumbnailSourceInput =
+  | { sourceBuffer: Buffer; sourcePath?: never }
+  | { sourceBuffer?: never; sourcePath: string };
+
 export type GeneratedPhotoThumbnail = {
   absolutePath: string;
   relativePath: string;
@@ -65,6 +74,38 @@ export function isUnsupportedPhotoThumbnailSourceError(
   return error instanceof UnsupportedPhotoThumbnailSourceError;
 }
 
+function resolvePhotoThumbnailSource(input: PhotoThumbnailSourceInput): Buffer | string {
+  if (input.sourceBuffer !== undefined) {
+    return input.sourceBuffer;
+  }
+
+  if (input.sourcePath !== undefined) {
+    return input.sourcePath;
+  }
+
+  throw new Error('Photo thumbnail generation requires a source buffer or source path.');
+}
+
+function normalizeDimension(value: number | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+}
+
+export async function readPhotoImageDimensions(input: PhotoThumbnailSourceInput): Promise<PhotoImageDimensions> {
+  try {
+    const metadata = await sharp(resolvePhotoThumbnailSource(input), { animated: false, failOn: 'none' }).metadata();
+    return {
+      width: normalizeDimension(metadata.width),
+      height: normalizeDimension(metadata.height)
+    };
+  } catch (error) {
+    if (isSharpDecodeFailure(error)) {
+      throw new UnsupportedPhotoThumbnailSourceError(error);
+    }
+
+    throw error;
+  }
+}
+
 function normalizeStoredNameForDerivative(value: string): string {
   const normalized = value.replace(/\\/g, '/');
   const basename = path.posix.basename(normalized);
@@ -98,10 +139,9 @@ export function createPhotoThumbnailStoredName(originalStoredName: string): stri
   return `${normalizeStoredNameForDerivative(originalStoredName)}-thumb${PHOTO_THUMBNAIL_EXTENSION}`;
 }
 
-export async function generatePhotoThumbnailFile(input: {
+export async function generatePhotoThumbnailFile(input: PhotoThumbnailSourceInput & {
   config: AppConfig;
   collectionId: string;
-  sourceBuffer: Buffer;
   thumbnailStoredName: string;
 }): Promise<GeneratedPhotoThumbnail> {
   const thumbnailRoot = getPhotoThumbnailCollectionStorageRoot(input.config, input.collectionId);
@@ -117,7 +157,7 @@ export async function generatePhotoThumbnailFile(input: {
   let info: sharp.OutputInfo;
 
   try {
-    const thumbnail = await sharp(input.sourceBuffer, { animated: false, failOn: 'none' })
+    const thumbnail = await sharp(resolvePhotoThumbnailSource(input), { animated: false, failOn: 'none' })
       .rotate()
       .resize({
         width: PHOTO_THUMBNAIL_MAX_EDGE,
@@ -155,7 +195,7 @@ export async function generatePhotoThumbnailFile(input: {
     storedName: input.thumbnailStoredName,
     mimeType: PHOTO_THUMBNAIL_MIME_TYPE,
     sizeBytes: data.length,
-    width: Number.isFinite(info.width) && info.width > 0 ? Math.floor(info.width) : null,
-    height: Number.isFinite(info.height) && info.height > 0 ? Math.floor(info.height) : null
+    width: normalizeDimension(info.width),
+    height: normalizeDimension(info.height)
   };
 }
