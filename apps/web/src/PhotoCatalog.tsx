@@ -129,6 +129,7 @@ export type PhotoCatalogViewProps = {
   selectedCollectionId: string | null;
   viewerPhotoId: string | null;
   isActive: boolean;
+  attemptFullscreenOnOpen: boolean;
   onSelectCollection: (collectionId: string) => void;
   onBackToCollections: () => void;
   onOpenPhoto: (photoId: string) => void;
@@ -1608,6 +1609,7 @@ export function PhotoCatalogView({
   selectedCollectionId,
   viewerPhotoId,
   isActive,
+  attemptFullscreenOnOpen,
   onSelectCollection,
   onBackToCollections,
   onOpenPhoto,
@@ -1637,6 +1639,7 @@ export function PhotoCatalogView({
   const photoViewerStageRef = useRef<HTMLDivElement | null>(null);
   const photoViewerControlsHideTimerRef = useRef<number | null>(null);
   const photoViewerSlideshowTimerRef = useRef<number | null>(null);
+  const photoViewerCloseInProgressRef = useRef(false);
   const preserveControlsVisibilityForNextPhotoChangeRef = useRef(false);
   const photoViewerDragRef = useRef<{
     pointerId: number;
@@ -1769,6 +1772,7 @@ export function PhotoCatalogView({
     if (!viewerPhotoId) {
       clearPhotoViewerControlsHideTimer();
       clearPhotoViewerSlideshowTimer();
+      photoViewerCloseInProgressRef.current = false;
       preserveControlsVisibilityForNextPhotoChangeRef.current = false;
       photoViewerDragRef.current = null;
       setIsPhotoViewerSlideshowActive(false);
@@ -1776,6 +1780,7 @@ export function PhotoCatalogView({
       return;
     }
 
+    photoViewerCloseInProgressRef.current = false;
     const shouldPreserveControlsVisibility = preserveControlsVisibilityForNextPhotoChangeRef.current;
     preserveControlsVisibilityForNextPhotoChangeRef.current = false;
 
@@ -1861,6 +1866,60 @@ export function PhotoCatalogView({
   const photoViewerSlideDurationLabel = `${formatPhotoViewerSlideDuration(photoViewerSlideshowDelayMs)} / slide`;
   const photoViewerSlideDurationDescription = describePhotoViewerSlideDuration(photoViewerSlideshowDelayMs);
   const canPhotoViewerSlideshowAdvance = viewerOrderedPhotos.length > 1;
+
+  useEffect(() => {
+    if (!viewerPhoto) {
+      return;
+    }
+
+    let previousFullscreenElement = document.fullscreenElement;
+
+    const handleFullscreenChange = (): void => {
+      const overlayElement = viewerOverlayRef.current;
+      const currentFullscreenElement = document.fullscreenElement;
+      const photoViewerWasFullscreen = overlayElement !== null && previousFullscreenElement === overlayElement;
+      const photoViewerIsFullscreen = overlayElement !== null && currentFullscreenElement === overlayElement;
+
+      previousFullscreenElement = currentFullscreenElement;
+
+      if (photoViewerIsFullscreen || !photoViewerWasFullscreen) {
+        return;
+      }
+
+      clearPhotoViewerControlsHideTimer();
+      clearPhotoViewerSlideshowTimer();
+      photoViewerDragRef.current = null;
+      setIsPhotoViewerSlideshowActive(false);
+      setIsPhotoViewerPanning(false);
+
+      if (photoViewerCloseInProgressRef.current) {
+        return;
+      }
+
+      photoViewerCloseInProgressRef.current = true;
+      onClosePhotoViewer();
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, [onClosePhotoViewer, viewerPhoto?.id]);
+
+  useEffect(() => {
+    if (!viewerPhoto || !attemptFullscreenOnOpen) {
+      return;
+    }
+
+    const overlayElement = viewerOverlayRef.current;
+    if (!overlayElement || document.fullscreenElement !== null) {
+      return;
+    }
+
+    void overlayElement.requestFullscreen?.().catch(() => {
+      // Fullscreen is best-effort only, matching the video viewer behavior.
+    });
+  }, [attemptFullscreenOnOpen, viewerPhoto?.id]);
 
   const isViewerPhotoFavorite = viewerPhoto !== null && selectedFavoritePhotoIds.has(viewerPhoto.id);
   const photoGridSortDirectionLabel = photoGridSortDirection === 'asc' ? 'ascending' : 'descending';
@@ -2022,6 +2081,28 @@ export function PhotoCatalogView({
   function notePhotoViewerActivity(): void {
     setArePhotoViewerControlsVisible((currentValue) => (currentValue ? currentValue : true));
     schedulePhotoViewerControlsHide();
+  }
+
+  function requestClosePhotoViewer(): void {
+    if (photoViewerCloseInProgressRef.current) {
+      return;
+    }
+
+    photoViewerCloseInProgressRef.current = true;
+    clearPhotoViewerControlsHideTimer();
+    clearPhotoViewerSlideshowTimer();
+    photoViewerDragRef.current = null;
+    setIsPhotoViewerSlideshowActive(false);
+    setIsPhotoViewerPanning(false);
+
+    const overlayElement = viewerOverlayRef.current;
+    onClosePhotoViewer();
+
+    if (overlayElement !== null && document.fullscreenElement === overlayElement) {
+      void document.exitFullscreen().catch(() => {
+        // Fullscreen exit is best-effort only.
+      });
+    }
   }
 
   function resetPhotoViewerViewport(): void {
@@ -2506,7 +2587,7 @@ export function PhotoCatalogView({
 
     if (lowerKey === 'c' || lowerKey === 'x') {
       event.preventDefault();
-      onClosePhotoViewer();
+      requestClosePhotoViewer();
     }
   };
 
@@ -2697,7 +2778,7 @@ export function PhotoCatalogView({
                 <button
                   type="button"
                   className="viewer-toolbar-button viewer-toolbar-button-text viewer-toolbar-button-close"
-                  onClick={onClosePhotoViewer}
+                  onClick={requestClosePhotoViewer}
                   aria-label="Close photo viewer. Shortcuts: C or X"
                   title="Close photo viewer. Shortcuts: C or X"
                 >

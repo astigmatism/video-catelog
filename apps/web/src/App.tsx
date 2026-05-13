@@ -12427,6 +12427,7 @@ export default function App(): JSX.Element {
         selectedCollectionId={selectedPhotoCollectionId}
         viewerPhotoId={photoViewerPhotoId}
         isActive={catalogMode === 'photos'}
+        attemptFullscreenOnOpen={attemptFullscreenOnOpen}
         onSelectCollection={(collectionId) => {
           setSelectedPhotoCollectionId(collectionId);
           setPhotoViewerPhotoId(null);
@@ -13256,7 +13257,7 @@ export default function App(): JSX.Element {
                 <label className="settings-label" htmlFor="attemptFullscreenOnOpen">
                   Viewer fullscreen
                 </label>
-                <p className="settings-description">Try to enter browser fullscreen when a video opens.</p>
+                <p className="settings-description">Try to enter browser fullscreen when a viewer opens.</p>
               </div>
               <div className="settings-row-control">
                 <label className="settings-toggle">
