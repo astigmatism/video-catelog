@@ -14,6 +14,8 @@ export type AppConfig = {
   uploadTempRoot: string;
   ytDlpTempRoot: string;
   mediaStoreRoot: string;
+  photoStoreRoot: string;
+  photoTempRoot: string;
   thumbsRoot: string;
   previewsRoot: string;
   dbConnectionString: string | null;
@@ -271,6 +273,8 @@ export function loadConfig(): AppConfig {
   const uploadTempRoot = path.join(tmpRoot, 'uploads');
   const ytDlpTempRoot = path.join(tmpRoot, 'ytdlp');
   const mediaStoreRoot = path.join(mediaRoot, 'media');
+  const photoStoreRoot = path.join(mediaRoot, 'photos');
+  const photoTempRoot = path.join(tmpRoot, 'photos');
   const thumbsRoot = path.join(mediaRoot, 'thumbs');
   const previewsRoot = path.join(mediaRoot, 'previews');
   const webDistRoot = path.resolve(repoRoot, 'apps', 'web', 'dist');
@@ -288,6 +292,8 @@ export function loadConfig(): AppConfig {
     uploadTempRoot,
     ytDlpTempRoot,
     mediaStoreRoot,
+    photoStoreRoot,
+    photoTempRoot,
     thumbsRoot,
     previewsRoot,
     dbConnectionString: readSetting(env, dotEnv, 'DATABASE_URL') ?? null,

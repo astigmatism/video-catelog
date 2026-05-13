@@ -10,6 +10,8 @@ import fastifyMultipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import { CatalogStore, normalizeCatalogTagLabel } from './catalog-store';
+import { PhotoCatalogStore } from './photo-store';
+import { registerPhotoRoutes } from './photo-routes';
 import { loadConfig } from './config';
 import { createDatabasePool } from './db';
 import { SessionStore } from './session-store';
@@ -61,6 +63,9 @@ import type {
 const config = loadConfig();
 const databasePool = createDatabasePool(config);
 const catalogStore = new CatalogStore({
+  pool: databasePool
+});
+const photoStore = new PhotoCatalogStore({
   pool: databasePool
 });
 const sessionStore = new SessionStore(config.sessionTtlMinutes);
@@ -382,6 +387,12 @@ app.register(fastifyMultipart, {
   }
 });
 app.register(fastifyWebsocket);
+
+registerPhotoRoutes(app, {
+  config,
+  photoStore,
+  sessionStore
+});
 
 function parseCookieHeader(
   cookieHeader: string | string[] | undefined
@@ -8447,6 +8458,7 @@ process.once('SIGTERM', () => {
 async function start(): Promise<void> {
   try {
     await catalogStore.initialize();
+    await photoStore.initialize();
 
     await app.listen({
       port: config.port,

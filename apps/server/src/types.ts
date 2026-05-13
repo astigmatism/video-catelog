@@ -101,6 +101,73 @@ export type CatalogTag = {
   updatedAt: string;
 };
 
+export type Photo = {
+  id: string;
+  collectionId: string;
+  originalName: string;
+  storedName: string;
+  relativePath: string;
+  mimeType: string;
+  sizeBytes: number;
+  checksumSha256: string;
+  width: number | null;
+  height: number | null;
+  thumbnailRelativePath: string | null;
+  thumbnailMimeType: string | null;
+  thumbnailSizeBytes: number | null;
+  thumbnailWidth: number | null;
+  thumbnailHeight: number | null;
+  sortOrder: number;
+  viewCount: number;
+  lastViewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PhotoCollection = {
+  id: string;
+  name: string;
+  normalizedName: string;
+  description: string | null;
+  coverPhotoId: string | null;
+  coverPhoto: Photo | null;
+  photoCount: number;
+  totalSizeBytes: number;
+  viewCount: number;
+  lastViewedAt: string | null;
+  tags: CatalogTag[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PhotoCollectionSort =
+  | 'newest'
+  | 'oldest'
+  | 'name_asc'
+  | 'name_desc'
+  | 'photo_count_desc'
+  | 'photo_count_asc'
+  | 'last_viewed_desc'
+  | 'view_count_desc';
+
+export type PhotoCollectionQueryInput = {
+  search: string | null;
+  tagIds: string[];
+  excludedTagIds: string[];
+  sort: PhotoCollectionSort;
+};
+
+export type PhotoCollectionListPayload = {
+  collections: PhotoCollection[];
+  totalCount: number;
+  filter: PhotoCollectionQueryInput;
+};
+
+export type PhotoCollectionDetailPayload = {
+  collection: PhotoCollection;
+  photos: Photo[];
+};
+
 export type CatalogHomeStripRowCount = 1 | 2 | 3;
 
 export type CatalogHomeStripSortCategory =

@@ -109,6 +109,32 @@ export default defineConfig(({ mode }) => {
     backendWsOrigin,
     getOriginPort(backendHttpOrigin, configuredBackendPort)
   );
+  const createBackendProxy = () => ({
+    '/api': {
+      target: backendHttpOrigin,
+      changeOrigin: true,
+      ws: true,
+      rewriteWsOrigin: true
+    },
+    '/media/photos': {
+      target: backendHttpOrigin,
+      changeOrigin: true
+    },
+    '/media': {
+      target: backendHttpOrigin,
+      changeOrigin: true
+    },
+    '/download': {
+      target: backendHttpOrigin,
+      changeOrigin: true
+    },
+    '/ws': {
+      target: backendHttpOrigin,
+      ws: true,
+      changeOrigin: true,
+      rewriteWsOrigin: true
+    }
+  });
 
   return {
     plugins: [react()],
@@ -122,28 +148,10 @@ export default defineConfig(({ mode }) => {
       hmr: {
         path: '/__vite_hmr'
       },
-      proxy: {
-        '/api': {
-          target: backendHttpOrigin,
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true
-        },
-        '/media': {
-          target: backendHttpOrigin,
-          changeOrigin: true
-        },
-        '/download': {
-          target: backendHttpOrigin,
-          changeOrigin: true
-        },
-        '/ws': {
-          target: backendHttpOrigin,
-          ws: true,
-          changeOrigin: true,
-          rewriteWsOrigin: true
-        }
-      }
+      proxy: createBackendProxy()
+    },
+    preview: {
+      proxy: createBackendProxy()
     }
   };
 });

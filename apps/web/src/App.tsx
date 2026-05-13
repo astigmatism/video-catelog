@@ -12,6 +12,20 @@ import type {
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { GoogleLockScreen } from './GoogleLockScreen';
 import {
+  PHOTO_COLLECTION_SORT_CATEGORY_LABELS,
+  PhotoCatalogView,
+  filterAndSortPhotoCollections,
+  getDefaultPhotoCollectionFilters,
+  parsePhotoCatalogTagsPayload,
+  parsePhotoCollectionsPayload,
+  parsePhotoCollectionDetailPayload,
+  type PhotoCatalogTag,
+  type PhotoCollection,
+  type PhotoCollectionDetailPayload,
+  type PhotoCollectionFilters,
+  type PhotoCollectionSortCategory
+} from './PhotoCatalog';
+import {
   AUTHENTICATED_BROWSER_IDENTITY,
   GOOGLE_LOCK_BROWSER_IDENTITY,
   applyBrowserIdentity
@@ -24,6 +38,8 @@ type ToolAvailability = {
 };
 
 type CatalogItemSourceType = 'upload' | 'yt_dlp';
+type CatalogMode = 'videos' | 'photos';
+type AddMediaMode = CatalogItemSourceType | 'photo_zip' | 'photo_files';
 type CatalogItemStatus =
   | 'uploaded'
   | 'pending_duplicate_check'
@@ -335,6 +351,8 @@ type IconButtonProps = {
 
 type CatalogTitleBarProps = {
   variant: 'desktop' | 'mobile';
+  catalogMode: CatalogMode;
+  onCatalogModeChange: (mode: CatalogMode) => void;
   isFilterPanelOpen: boolean;
   filterPanelId: string;
   onToggleFilters: () => void;
@@ -345,6 +363,8 @@ type CatalogTitleBarProps = {
 };
 
 type CatalogDesktopLayoutProps = {
+  catalogMode: CatalogMode;
+  onCatalogModeChange: (mode: CatalogMode) => void;
   isFilterPanelOpen: boolean;
   filterPanelId: string;
   filterPanel: ReactNode;
@@ -360,6 +380,8 @@ type CatalogDesktopLayoutProps = {
 
 type CatalogMobileLayoutProps = {
   layoutMode: Exclude<CatalogLayoutMode, 'desktop'>;
+  catalogMode: CatalogMode;
+  onCatalogModeChange: (mode: CatalogMode) => void;
   isFilterPanelOpen: boolean;
   filterPanelId: string;
   filterPanel: ReactNode;
@@ -380,6 +402,26 @@ type NoticeTone = 'info' | 'success' | 'warning' | 'error';
 type ModalNotice = {
   tone: NoticeTone;
   text: string;
+};
+
+type PhotoImportSkippedReason = 'unsupported_file_type' | 'unsupported_image_data';
+
+type PhotoImportSkippedFile = {
+  originalName: string;
+  reason: PhotoImportSkippedReason;
+  detail: string | null;
+};
+
+type PhotoImportReport = {
+  importedCount: number;
+  skippedCount: number;
+  skippedFiles: PhotoImportSkippedFile[];
+  skippedFilesTruncated: boolean;
+  message: string | null;
+};
+
+type PhotoImportRequestResult = PhotoCollectionDetailPayload & {
+  importReport: PhotoImportReport | null;
 };
 
 type ResolutionBadgeLabel = '480' | '720' | '1080' | '2K' | '4K' | '8K';
@@ -592,6 +634,10 @@ const DEFAULT_UPLOAD_MESSAGE =
   'Choose a local video file. After staging, you can confirm or edit the catalog title before finalizing.';
 const DEFAULT_IMPORT_MESSAGE =
   'Enter a supported video URL. Metadata lookup will suggest a catalog title for you to confirm before finalizing.';
+const DEFAULT_PHOTO_ZIP_MESSAGE =
+  'Upload a ZIP archive of image files to create a new photo collection.';
+const DEFAULT_PHOTO_FILES_MESSAGE =
+  'Upload one or more image files into a new or existing photo collection.';
 const DEFAULT_TOOL_UPDATE_MESSAGE =
   'Check for and install updates to ffmpeg and yt-dlp on this server.';
 
@@ -1066,6 +1112,75 @@ function readNumber(value: unknown): number | null {
   }
 
   return null;
+}
+
+function readNonNegativeInteger(value: unknown): number {
+  const parsed = readNumber(value);
+  return parsed === null || parsed < 0 ? 0 : Math.floor(parsed);
+}
+
+function parsePhotoImportSkippedReason(value: unknown): PhotoImportSkippedReason | null {
+  return value === 'unsupported_file_type' || value === 'unsupported_image_data' ? value : null;
+}
+
+function parsePhotoImportSkippedFile(value: unknown): PhotoImportSkippedFile | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const originalName = readString(value.originalName);
+  const reason = parsePhotoImportSkippedReason(value.reason);
+  if (!originalName || !reason) {
+    return null;
+  }
+
+  return {
+    originalName,
+    reason,
+    detail: readString(value.detail)
+  };
+}
+
+function parsePhotoImportReport(payload: unknown): PhotoImportReport | null {
+  if (!isRecord(payload) || !isRecord(payload.importReport)) {
+    return null;
+  }
+
+  const report = payload.importReport;
+  const skippedFiles = Array.isArray(report.skippedFiles)
+    ? report.skippedFiles
+        .map(parsePhotoImportSkippedFile)
+        .filter((skippedFile): skippedFile is PhotoImportSkippedFile => skippedFile !== null)
+    : [];
+
+  return {
+    importedCount: readNonNegativeInteger(report.importedCount),
+    skippedCount: readNonNegativeInteger(report.skippedCount),
+    skippedFiles,
+    skippedFilesTruncated: readBoolean(report.skippedFilesTruncated) ?? false,
+    message: readString(report.message)
+  };
+}
+
+function formatPhotoImportReportNotice(report: PhotoImportReport | null): string | null {
+  if (!report || report.skippedCount === 0) {
+    return null;
+  }
+
+  if (report.message) {
+    return report.message;
+  }
+
+  const skippedSummary = report.skippedFiles
+    .slice(0, 6)
+    .map((skippedFile) => skippedFile.detail ? `${skippedFile.originalName} (${skippedFile.detail})` : skippedFile.originalName)
+    .join('; ');
+  const remainingCount = Math.max(0, report.skippedCount - report.skippedFiles.length);
+  const remainingSummary = remainingCount > 0 ? `; and ${remainingCount} more` : '';
+
+  return skippedSummary
+    ? `Imported ${report.importedCount} photo${report.importedCount === 1 ? '' : 's'} and skipped ${report.skippedCount} unsupported file${report.skippedCount === 1 ? '' : 's'}: ${skippedSummary}${remainingSummary}.`
+    : `Imported ${report.importedCount} photo${report.importedCount === 1 ? '' : 's'} and skipped ${report.skippedCount} unsupported file${report.skippedCount === 1 ? '' : 's'}.`;
 }
 
 function normalizeCatalogItemCount(value: unknown): number {
@@ -3954,6 +4069,8 @@ function TrashIcon(): JSX.Element {
 
 function CatalogTitleBar({
   variant,
+  catalogMode,
+  onCatalogModeChange,
   isFilterPanelOpen,
   filterPanelId,
   onToggleFilters,
@@ -3984,13 +4101,34 @@ function CatalogTitleBar({
         <div className="titlebar-title">
           <h1 className="yesteryear-regular">Sugar&amp;Spice</h1>
         </div>
+
+        <div className="catalog-mode-switch" role="tablist" aria-label="Catalog mode">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={catalogMode === 'videos'}
+            className={`catalog-mode-switch-button${catalogMode === 'videos' ? ' is-active' : ''}`}
+            onClick={() => onCatalogModeChange('videos')}
+          >
+            Videos
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={catalogMode === 'photos'}
+            className={`catalog-mode-switch-button${catalogMode === 'photos' ? ' is-active' : ''}`}
+            onClick={() => onCatalogModeChange('photos')}
+          >
+            Photos
+          </button>
+        </div>
       </div>
 
       <div className="titlebar-actions">
         <IconButton label="Refresh" onClick={onRefresh}>
           <RefreshIcon />
         </IconButton>
-        <IconButton label="Add video" onClick={onAddVideo}>
+        <IconButton label={catalogMode === 'photos' ? 'Add photos' : 'Add video'} onClick={onAddVideo}>
           <UploadIcon />
         </IconButton>
         <IconButton label="Settings" onClick={onOpenSettings}>
@@ -4005,6 +4143,8 @@ function CatalogTitleBar({
 }
 
 function CatalogDesktopLayout({
+  catalogMode,
+  onCatalogModeChange,
   isFilterPanelOpen,
   filterPanelId,
   filterPanel,
@@ -4021,6 +4161,8 @@ function CatalogDesktopLayout({
     <div className="app-shell app-shell-desktop">
       <CatalogTitleBar
         variant="desktop"
+        catalogMode={catalogMode}
+        onCatalogModeChange={onCatalogModeChange}
         isFilterPanelOpen={isFilterPanelOpen}
         filterPanelId={filterPanelId}
         onToggleFilters={onToggleFilters}
@@ -4051,6 +4193,8 @@ function CatalogDesktopLayout({
 
 function CatalogMobileLayout({
   layoutMode,
+  catalogMode,
+  onCatalogModeChange,
   isFilterPanelOpen,
   filterPanelId,
   filterPanel,
@@ -4087,6 +4231,8 @@ function CatalogMobileLayout({
     <div className={`app-shell app-shell-mobile is-${layoutMode}`}>
       <CatalogTitleBar
         variant="mobile"
+        catalogMode={catalogMode}
+        onCatalogModeChange={onCatalogModeChange}
         isFilterPanelOpen={isFilterPanelOpen}
         filterPanelId={filterPanelId}
         onToggleFilters={onToggleFilters}
@@ -8301,7 +8447,11 @@ export default function App(): JSX.Element {
     );
   }, [authenticated]);
 
+  const [catalogMode, setCatalogMode] = useState<CatalogMode>('videos');
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
+  const [photoCollections, setPhotoCollections] = useState<PhotoCollection[]>([]);
+  const [selectedPhotoCollectionId, setSelectedPhotoCollectionId] = useState<string | null>(null);
+  const [photoViewerPhotoId, setPhotoViewerPhotoId] = useState<string | null>(null);
   const [homeStrips, setHomeStrips] = useState<CatalogHomeStrip[]>([]);
   const [homeStripRandomSeed, setHomeStripRandomSeed] = useState(() => createCatalogRandomSeed());
   const [draggedHomeStripId, setDraggedHomeStripId] = useState<string | null>(null);
@@ -8322,9 +8472,15 @@ export default function App(): JSX.Element {
     result: null
   });
   const [socketConnectionState, setSocketConnectionState] = useState<SocketConnectionState>('disconnected');
-  const [addVideoMode, setAddVideoMode] = useState<CatalogItemSourceType>('upload');
+  const [addVideoMode, setAddVideoMode] = useState<AddMediaMode>('upload');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadInputKey, setUploadInputKey] = useState(0);
+  const [photoZipFile, setPhotoZipFile] = useState<File | null>(null);
+  const [photoFiles, setPhotoFiles] = useState<File[]>([]);
+  const [photoImportCollectionName, setPhotoImportCollectionName] = useState('');
+  const [photoImportTargetCollectionId, setPhotoImportTargetCollectionId] = useState('');
+  const [photoFileImportMode, setPhotoFileImportMode] = useState<'new' | 'existing'>('new');
+  const [photoUploadInputKey, setPhotoUploadInputKey] = useState(0);
   const [importUrl, setImportUrl] = useState('');
   const [pendingIngest, setPendingIngest] = useState<PendingIngest | null>(null);
   const [duplicateVisibleName, setDuplicateVisibleName] = useState('');
@@ -8347,6 +8503,15 @@ export default function App(): JSX.Element {
   const [isTagPickerModalOpen, setIsTagPickerModalOpen] = useState(false);
   const [tagPickerSearch, setTagPickerSearch] = useState('');
   const [tagPickerSortMode, setTagPickerSortMode] = useState<TagPickerSortMode>('labelAsc');
+  const [photoCollectionFilters, setPhotoCollectionFilters] = useState<PhotoCollectionFilters>(() =>
+    getDefaultPhotoCollectionFilters()
+  );
+  const [photoTagFilterSuggestions, setPhotoTagFilterSuggestions] = useState<PhotoCatalogTag[]>([]);
+  const [isPhotoTagFilterSearchFocused, setIsPhotoTagFilterSearchFocused] = useState(false);
+  const [photoTagOptions, setPhotoTagOptions] = useState<PhotoCatalogTag[]>([]);
+  const [isPhotoTagPickerModalOpen, setIsPhotoTagPickerModalOpen] = useState(false);
+  const [photoTagPickerSearch, setPhotoTagPickerSearch] = useState('');
+  const [photoTagPickerSortMode, setPhotoTagPickerSortMode] = useState<TagPickerSortMode>('labelAsc');
   const [homeStripEditor, setHomeStripEditor] = useState<HomeStripEditorState | null>(null);
   const [homeStripTagSuggestions, setHomeStripTagSuggestions] = useState<CatalogTag[]>([]);
   const [isHomeStripTagSearchFocused, setIsHomeStripTagSearchFocused] = useState(false);
@@ -8375,7 +8540,9 @@ export default function App(): JSX.Element {
     isAddVideoModalOpen ||
     isSettingsModalOpen ||
     isTagPickerModalOpen ||
+    isPhotoTagPickerModalOpen ||
     viewerItem !== null ||
+    photoViewerPhotoId !== null ||
     detailsItemId !== null ||
     homeStripEditor !== null ||
     isMobileFilterSheetOpen;
@@ -8499,6 +8666,109 @@ export default function App(): JSX.Element {
       compareCatalogTagsForPicker(left, right, tagPickerSortMode)
     );
   }, [availableTagOptions, tagPickerSearch, tagPickerSortMode]);
+
+  const availablePhotoTagOptions = useMemo(() => {
+    const tagsById = new Map<string, PhotoCatalogTag>();
+
+    for (const tag of photoTagOptions) {
+      const existingTag = tagsById.get(tag.id);
+      if (!existingTag || tag.usageCount > existingTag.usageCount) {
+        tagsById.set(tag.id, tag);
+      }
+    }
+
+    for (const collection of photoCollections) {
+      for (const tag of collection.tags) {
+        const existingTag = tagsById.get(tag.id);
+        if (!existingTag || tag.usageCount > existingTag.usageCount) {
+          tagsById.set(tag.id, tag);
+        }
+      }
+    }
+
+    return Array.from(tagsById.values()).sort(compareCatalogTagsForOptions);
+  }, [photoCollections, photoTagOptions]);
+
+  const popularPhotoTagOptions = useMemo(() => {
+    if (visibleTagListSettings.mode === 'unlimited') {
+      return availablePhotoTagOptions;
+    }
+
+    return availablePhotoTagOptions.slice(0, visibleTagListSettings.limit);
+  }, [availablePhotoTagOptions, visibleTagListSettings.limit, visibleTagListSettings.mode]);
+
+  const photoCatalogTagById = useMemo(() => {
+    const tagsById = new Map<string, PhotoCatalogTag>();
+
+    for (const tag of availablePhotoTagOptions) {
+      tagsById.set(tag.id, tag);
+    }
+
+    for (const tag of photoTagFilterSuggestions) {
+      tagsById.set(tag.id, tag);
+    }
+
+    return tagsById;
+  }, [availablePhotoTagOptions, photoTagFilterSuggestions]);
+
+  const selectedPhotoFilterTags = photoCollectionFilters.selectedTagIds
+    .map((tagId) => photoCatalogTagById.get(tagId))
+    .filter((tag): tag is PhotoCatalogTag => tag !== undefined);
+  const excludedPhotoFilterTags = photoCollectionFilters.excludedTagIds
+    .map((tagId) => photoCatalogTagById.get(tagId))
+    .filter((tag): tag is PhotoCatalogTag => tag !== undefined);
+  const activePhotoTagFilterCount =
+    photoCollectionFilters.selectedTagIds.length + photoCollectionFilters.excludedTagIds.length;
+
+  const activePhotoTagOptions: PhotoCatalogTag[] = [];
+  const activePhotoTagOptionIds = new Set<string>();
+  for (const tag of [...selectedPhotoFilterTags, ...excludedPhotoFilterTags]) {
+    if (!activePhotoTagOptionIds.has(tag.id)) {
+      activePhotoTagOptions.push(tag);
+      activePhotoTagOptionIds.add(tag.id);
+    }
+  }
+  const popularPhotoTagOptionIds = new Set(popularPhotoTagOptions.map((tag) => tag.id));
+  const visiblePhotoTagOptions = [
+    ...activePhotoTagOptions,
+    ...popularPhotoTagOptions.filter((tag) => !activePhotoTagOptionIds.has(tag.id))
+  ];
+  const hiddenPhotoTagOptionCount = availablePhotoTagOptions.length - popularPhotoTagOptions.length;
+  const activePhotoTagOptionsBeyondLimitCount = activePhotoTagOptions.filter(
+    (tag) => !popularPhotoTagOptionIds.has(tag.id)
+  ).length;
+  const photoTagListLimitNote =
+    hiddenPhotoTagOptionCount > 0
+      ? `Showing top ${popularPhotoTagOptions.length} of ${availablePhotoTagOptions.length} tags${
+          activePhotoTagOptionsBeyondLimitCount > 0
+            ? `, plus ${activePhotoTagOptionsBeyondLimitCount} active ${
+                activePhotoTagOptionsBeyondLimitCount === 1 ? 'tag' : 'tags'
+              }`
+            : ''
+        }. Adjust the tag list limit in Settings.`
+      : null;
+
+  const visiblePhotoTagFilterSuggestions = photoTagFilterSuggestions.filter(
+    (tag) =>
+      !photoCollectionFilters.selectedTagIds.includes(tag.id) &&
+      !photoCollectionFilters.excludedTagIds.includes(tag.id)
+  );
+  const visiblePhotoTagPickerOptions = useMemo(() => {
+    const query = normalizeCatalogTagKey(photoTagPickerSearch);
+    const matchingTags =
+      query === ''
+        ? availablePhotoTagOptions
+        : availablePhotoTagOptions.filter((tag) => tag.normalizedLabel.includes(query));
+
+    return [...matchingTags].sort((left, right) =>
+      compareCatalogTagsForPicker(left, right, photoTagPickerSortMode)
+    );
+  }, [availablePhotoTagOptions, photoTagPickerSearch, photoTagPickerSortMode]);
+
+  const filteredPhotoCollections = useMemo(
+    () => filterAndSortPhotoCollections(photoCollections, photoCollectionFilters),
+    [photoCollections, photoCollectionFilters]
+  );
   const homeStripDraftSelectedTags = homeStripEditor
     ? homeStripEditor.draft.selectedTagIds
         .map((tagId) => catalogTagById.get(tagId))
@@ -8535,6 +8805,16 @@ export default function App(): JSX.Element {
     : [];
   const isCatalogSortActive = filters.sortCategory !== 'none';
   const isRandomSortActive = filters.sortCategory === 'random';
+  const isPhotoCollectionSortActive = photoCollectionFilters.sortCategory !== 'none';
+  const isAnyPhotoCollectionFilterActive =
+    photoCollectionFilters.search.trim() !== '' ||
+    photoCollectionFilters.tagSearch.trim() !== '' ||
+    photoCollectionFilters.selectedTagIds.length > 0 ||
+    photoCollectionFilters.excludedTagIds.length > 0 ||
+    isPhotoCollectionSortActive;
+  const photoCollectionCountLabel = `${filteredPhotoCollections.length} ${
+    filteredPhotoCollections.length === 1 ? 'collection' : 'collections'
+  } shown`;
 
   const detailsItem = useMemo(
     () => catalog.find((candidate) => candidate.id === detailsItemId) ?? null,
@@ -8550,7 +8830,14 @@ export default function App(): JSX.Element {
   const isHomeViewActive = !isAnyCatalogFilterActive;
   const catalogCountLabel = `${filteredCatalog.length} ${filteredCatalog.length === 1 ? 'item' : 'items'} shown`;
   const storageUsageSummary = storageUsage ? formatStorageUsageSummary(storageUsage) : null;
-  const addVideoPrimaryMessage = addVideoMode === 'upload' ? DEFAULT_UPLOAD_MESSAGE : DEFAULT_IMPORT_MESSAGE;
+  const addVideoPrimaryMessage =
+    addVideoMode === 'upload'
+      ? DEFAULT_UPLOAD_MESSAGE
+      : addVideoMode === 'yt_dlp'
+        ? DEFAULT_IMPORT_MESSAGE
+        : addVideoMode === 'photo_zip'
+          ? DEFAULT_PHOTO_ZIP_MESSAGE
+          : DEFAULT_PHOTO_FILES_MESSAGE;
 
   function clearCatalogFilters(): void {
     setFilters(getDefaultCatalogFilters());
@@ -8614,6 +8901,63 @@ export default function App(): JSX.Element {
       excludedTagIds: currentValue.excludedTagIds.filter((excludedTagId) => excludedTagId !== tagId)
     }));
   }
+
+  function clearPhotoCollectionFilters(): void {
+    setPhotoCollectionFilters(getDefaultPhotoCollectionFilters());
+    setPhotoTagFilterSuggestions([]);
+  }
+
+  function openPhotoTagPickerModal(): void {
+    setPhotoTagPickerSearch('');
+    setPhotoTagPickerSortMode('labelAsc');
+    setIsPhotoTagPickerModalOpen(true);
+    void loadPhotoTagOptions();
+  }
+
+  function closePhotoTagPickerModal(): void {
+    setIsPhotoTagPickerModalOpen(false);
+    setPhotoTagPickerSearch('');
+    setPhotoTagPickerSortMode('labelAsc');
+  }
+
+  function includePhotoTagFilter(tag: PhotoCatalogTag): void {
+    setPhotoCollectionFilters((currentValue) => ({
+      ...currentValue,
+      tagSearch: '',
+      selectedTagIds: Array.from(new Set([...currentValue.selectedTagIds, tag.id])),
+      excludedTagIds: currentValue.excludedTagIds.filter((excludedTagId) => excludedTagId !== tag.id)
+    }));
+    setPhotoTagFilterSuggestions([]);
+  }
+
+  function selectPhotoTagFilterFromPicker(tag: PhotoCatalogTag): void {
+    includePhotoTagFilter(tag);
+    closePhotoTagPickerModal();
+  }
+
+  function cyclePhotoTagFilter(tag: PhotoCatalogTag): void {
+    setPhotoCollectionFilters((currentValue) => {
+      const isIncluded = currentValue.selectedTagIds.includes(tag.id);
+      const isExcluded = currentValue.excludedTagIds.includes(tag.id);
+      const selectedTagIds = currentValue.selectedTagIds.filter((selectedTagId) => selectedTagId !== tag.id);
+      const excludedTagIds = currentValue.excludedTagIds.filter((excludedTagId) => excludedTagId !== tag.id);
+
+      if (!isIncluded && !isExcluded) {
+        selectedTagIds.push(tag.id);
+      } else if (isIncluded) {
+        excludedTagIds.push(tag.id);
+      }
+
+      return {
+        ...currentValue,
+        tagSearch: '',
+        selectedTagIds: Array.from(new Set(selectedTagIds)),
+        excludedTagIds: Array.from(new Set(excludedTagIds))
+      };
+    });
+    setPhotoTagFilterSuggestions([]);
+  }
+
 
   function reshuffleCatalogSort(): void {
     setFilters((currentValue) => ({
@@ -9133,6 +9477,41 @@ export default function App(): JSX.Element {
   }, [authenticated, filters.tagSearch]);
 
   useEffect(() => {
+    if (!authenticated || catalogMode !== 'photos') {
+      setPhotoTagFilterSuggestions([]);
+      return undefined;
+    }
+
+    const query = photoCollectionFilters.tagSearch.trim();
+    if (query === '') {
+      setPhotoTagFilterSuggestions([]);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void fetchPhotoTagSuggestions(query, 10).then((tags) => {
+        if (!cancelled) {
+          setPhotoTagFilterSuggestions(tags);
+        }
+      });
+    }, 160);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [authenticated, catalogMode, photoCollectionFilters.tagSearch]);
+
+  useEffect(() => {
+    if (!authenticated || catalogMode !== 'photos') {
+      return;
+    }
+
+    void loadPhotoTagOptions();
+  }, [authenticated, catalogMode]);
+
+  useEffect(() => {
     if (!authenticated || !homeStripEditor) {
       setHomeStripTagSuggestions([]);
       return undefined;
@@ -9164,8 +9543,18 @@ export default function App(): JSX.Element {
     setUploadInputKey((currentValue) => currentValue + 1);
   }
 
+  function resetPhotoImportSelection(): void {
+    setPhotoZipFile(null);
+    setPhotoFiles([]);
+    setPhotoImportCollectionName('');
+    setPhotoImportTargetCollectionId('');
+    setPhotoFileImportMode('new');
+    setPhotoUploadInputKey((currentValue) => currentValue + 1);
+  }
+
   function resetAddVideoState(): void {
     resetUploadSelection();
+    resetPhotoImportSelection();
     setImportUrl('');
     setPendingIngest(null);
     setDuplicateVisibleName('');
@@ -9174,6 +9563,12 @@ export default function App(): JSX.Element {
     setAddVideoMode((currentMode) => {
       if (currentMode === 'yt_dlp' && !toolAvailability.ytDlp) {
         return 'upload';
+      }
+      if ((currentMode === 'photo_zip' || currentMode === 'photo_files') && catalogMode === 'videos') {
+        return 'upload';
+      }
+      if ((currentMode === 'upload' || currentMode === 'yt_dlp') && catalogMode === 'photos') {
+        return 'photo_zip';
       }
       return currentMode;
     });
@@ -9203,7 +9598,11 @@ export default function App(): JSX.Element {
   function resetAuthenticatedState(): void {
     closeActiveSocket();
     setAuthenticated(false);
+    setCatalogMode('videos');
     setCatalog([]);
+    setPhotoCollections([]);
+    setSelectedPhotoCollectionId(null);
+    setPhotoViewerPhotoId(null);
     setHomeStrips([]);
     setHomeStripRandomSeed(createCatalogRandomSeed());
     setPendingIngests([]);
@@ -9211,6 +9610,13 @@ export default function App(): JSX.Element {
     setFilters(getDefaultCatalogFilters());
     setTagFilterSuggestions([]);
     setIsTagFilterSearchFocused(false);
+    setPhotoCollectionFilters(getDefaultPhotoCollectionFilters());
+    setPhotoTagFilterSuggestions([]);
+    setIsPhotoTagFilterSearchFocused(false);
+    setPhotoTagOptions([]);
+    setIsPhotoTagPickerModalOpen(false);
+    setPhotoTagPickerSearch('');
+    setPhotoTagPickerSortMode('labelAsc');
     setHomeStripEditor(null);
     setHomeStripTagSuggestions([]);
     setIsHomeStripTagSearchFocused(false);
@@ -9235,14 +9641,25 @@ export default function App(): JSX.Element {
   function openAddVideoModal(): void {
     setIsAddVideoModalOpen(true);
     setAddVideoNotice(null);
-    if (!toolAvailability.ytDlp && addVideoMode === 'yt_dlp') {
-      setAddVideoMode('upload');
+    if (catalogMode === 'photos') {
+      setAddVideoMode((currentMode) =>
+        currentMode === 'photo_zip' || currentMode === 'photo_files' ? currentMode : 'photo_zip'
+      );
+      return;
     }
+
+    setAddVideoMode((currentMode) => {
+      if (currentMode === 'yt_dlp' && !toolAvailability.ytDlp) {
+        return 'upload';
+      }
+      return currentMode === 'upload' || currentMode === 'yt_dlp' ? currentMode : 'upload';
+    });
   }
 
   function openPendingIngestForResolution(activePendingIngest: PendingIngest): void {
     const hasDuplicateConflicts = activePendingIngest.duplicateCheck.hasConflicts;
 
+    setCatalogMode('videos');
     setPendingIngest(activePendingIngest);
     setDuplicateVisibleName(activePendingIngest.visibleName);
     setAddVideoMode(activePendingIngest.sourceType);
@@ -9675,6 +10092,98 @@ export default function App(): JSX.Element {
     }
 
     applyLoadedCatalogItems(items);
+  }
+
+  async function loadPhotoCollections(): Promise<void> {
+    const response = await fetch('/api/photos/collections', {
+      credentials: 'include'
+    });
+
+    if (response.status === 401) {
+      resetAuthenticatedState();
+      return;
+    }
+
+    if (!response.ok) {
+      return;
+    }
+
+    const payload = await readJsonPayload(response);
+    setPhotoCollections(parsePhotoCollectionsPayload(payload));
+  }
+
+  async function loadPhotoTagOptions(): Promise<void> {
+    try {
+      const searchParameters = new URLSearchParams({
+        limit: '50'
+      });
+      const response = await fetch(`/api/photos/tags?${searchParameters.toString()}`, {
+        credentials: 'include'
+      });
+
+      if (response.status === 401) {
+        resetAuthenticatedState();
+        return;
+      }
+
+      if (!response.ok) {
+        return;
+      }
+
+      const payload = await readJsonPayload(response);
+      setPhotoTagOptions(parsePhotoCatalogTagsPayload(payload));
+    } catch (error) {
+      console.warn('photos.tags.load.failed', {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  async function fetchPhotoTagSuggestions(query: string, limit = 10): Promise<PhotoCatalogTag[]> {
+    try {
+      const searchParameters = new URLSearchParams({
+        search: query,
+        limit: String(limit)
+      });
+      const response = await fetch(`/api/photos/tags?${searchParameters.toString()}`, {
+        credentials: 'include'
+      });
+
+      if (response.status === 401) {
+        resetAuthenticatedState();
+        return [];
+      }
+
+      if (!response.ok) {
+        return [];
+      }
+
+      const payload = await readJsonPayload(response);
+      return parsePhotoCatalogTagsPayload(payload);
+    } catch (error) {
+      console.warn('photos.tags.search.failed', {
+        query,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return [];
+    }
+  }
+
+  function upsertPhotoCollection(collection: PhotoCollection): void {
+    setPhotoCollections((currentCollections) => {
+      const nextCollections = currentCollections.filter((candidate) => candidate.id !== collection.id);
+      return [collection, ...nextCollections].sort((left, right) =>
+        right.createdAt.localeCompare(left.createdAt) || left.name.localeCompare(right.name)
+      );
+    });
+  }
+
+  function removePhotoCollection(collectionId: string): void {
+    setPhotoCollections((currentCollections) =>
+      currentCollections.filter((candidate) => candidate.id !== collectionId)
+    );
+    setSelectedPhotoCollectionId((currentValue) => (currentValue === collectionId ? null : currentValue));
+    setPhotoViewerPhotoId(null);
   }
 
   async function loadHomeStrips(): Promise<void> {
@@ -10430,7 +10939,7 @@ export default function App(): JSX.Element {
     }
 
     setAuthenticated(true);
-    await Promise.all([loadCatalog(), loadRuntime(), loadHomeStrips()]);
+    await Promise.all([loadCatalog(), loadPhotoCollections(), loadRuntime(), loadHomeStrips()]);
   }
 
   async function login(query: string): Promise<void> {
@@ -10450,7 +10959,7 @@ export default function App(): JSX.Element {
       }
 
       setAuthenticated(true);
-      await Promise.all([loadCatalog(), loadRuntime(), loadHomeStrips()]);
+      await Promise.all([loadCatalog(), loadPhotoCollections(), loadRuntime(), loadHomeStrips()]);
     } catch {
       redirectToGoogleSearch(query);
     }
@@ -10706,6 +11215,163 @@ export default function App(): JSX.Element {
       setAddVideoNotice({
         tone: 'error',
         text: 'URL import failed.'
+      });
+    } finally {
+      setIsAddVideoBusy(false);
+    }
+  }
+
+  async function performPhotoImportRequest(
+    formData: FormData,
+    endpoint: string
+  ): Promise<PhotoImportRequestResult | null> {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      credentials: 'include',
+      body: formData
+    });
+
+    if (response.status === 401) {
+      resetAuthenticatedState();
+      return null;
+    }
+
+    const payload = await readJsonPayload(response);
+    if (!response.ok) {
+      const message = isRecord(payload) ? readString(payload.message) : null;
+      throw new Error(message ?? 'Photo import failed.');
+    }
+
+    const parsed = parsePhotoCollectionDetailPayload(payload);
+    if (!parsed) {
+      throw new Error('The photo import response could not be read.');
+    }
+
+    return {
+      ...parsed,
+      importReport: parsePhotoImportReport(payload)
+    };
+  }
+
+  async function handlePhotoZipSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    if (!photoZipFile) {
+      setAddVideoNotice({
+        tone: 'error',
+        text: 'Choose a ZIP file first.'
+      });
+      return;
+    }
+
+    setIsAddVideoBusy(true);
+    setAddVideoNotice({
+      tone: 'info',
+      text: 'Importing ZIP archive into a new photo collection.'
+    });
+
+    const formData = new FormData();
+    formData.append('file', photoZipFile);
+    if (photoImportCollectionName.trim() !== '') {
+      formData.append('collectionName', photoImportCollectionName.trim());
+    }
+
+    try {
+      const result = await performPhotoImportRequest(formData, '/api/photos/imports/zip');
+      if (!result) {
+        return;
+      }
+
+      const importNotice = formatPhotoImportReportNotice(result.importReport);
+      upsertPhotoCollection(result.collection);
+      setSelectedPhotoCollectionId(result.collection.id);
+      setPhotoViewerPhotoId(null);
+      setCatalogMode('photos');
+      resetAddVideoState();
+      if (importNotice) {
+        setAddVideoMode('photo_zip');
+        setAddVideoNotice({ tone: 'warning', text: importNotice });
+        setIsAddVideoModalOpen(true);
+      } else {
+        setIsAddVideoModalOpen(false);
+      }
+    } catch (error) {
+      setAddVideoNotice({
+        tone: 'error',
+        text: error instanceof Error ? error.message : 'ZIP photo import failed.'
+      });
+    } finally {
+      setIsAddVideoBusy(false);
+    }
+  }
+
+  async function handlePhotoFilesSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    if (photoFiles.length === 0) {
+      setAddVideoNotice({
+        tone: 'error',
+        text: 'Choose one or more image files first.'
+      });
+      return;
+    }
+
+    if (photoFileImportMode === 'existing' && photoImportTargetCollectionId.trim() === '') {
+      setAddVideoNotice({
+        tone: 'error',
+        text: 'Choose the existing photo collection to receive these files.'
+      });
+      return;
+    }
+
+    if (photoFileImportMode === 'new' && photoImportCollectionName.trim() === '') {
+      setAddVideoNotice({
+        tone: 'error',
+        text: 'Enter a name for the new photo collection.'
+      });
+      return;
+    }
+
+    setIsAddVideoBusy(true);
+    setAddVideoNotice({
+      tone: 'info',
+      text: 'Uploading image files into the photo catalog.'
+    });
+
+    const formData = new FormData();
+    for (const file of photoFiles) {
+      formData.append('files', file);
+    }
+
+    if (photoFileImportMode === 'existing') {
+      formData.append('collectionId', photoImportTargetCollectionId.trim());
+    } else {
+      formData.append('collectionName', photoImportCollectionName.trim());
+    }
+
+    try {
+      const result = await performPhotoImportRequest(formData, '/api/photos/imports/files');
+      if (!result) {
+        return;
+      }
+
+      const importNotice = formatPhotoImportReportNotice(result.importReport);
+      upsertPhotoCollection(result.collection);
+      setSelectedPhotoCollectionId(result.collection.id);
+      setPhotoViewerPhotoId(null);
+      setCatalogMode('photos');
+      resetAddVideoState();
+      if (importNotice) {
+        setAddVideoMode('photo_files');
+        setAddVideoNotice({ tone: 'warning', text: importNotice });
+        setIsAddVideoModalOpen(true);
+      } else {
+        setIsAddVideoModalOpen(false);
+      }
+    } catch (error) {
+      setAddVideoNotice({
+        tone: 'error',
+        text: error instanceof Error ? error.message : 'Photo file upload failed.'
       });
     } finally {
       setIsAddVideoBusy(false);
@@ -11009,10 +11675,24 @@ export default function App(): JSX.Element {
   }, [authenticated]);
 
   useEffect(() => {
-    if (!toolAvailability.ytDlp && addVideoMode === 'yt_dlp' && pendingIngest === null) {
+    if (pendingIngest !== null) {
+      return;
+    }
+
+    if (catalogMode === 'photos' && (addVideoMode === 'upload' || addVideoMode === 'yt_dlp')) {
+      setAddVideoMode('photo_zip');
+      return;
+    }
+
+    if (catalogMode === 'videos' && (addVideoMode === 'photo_zip' || addVideoMode === 'photo_files')) {
+      setAddVideoMode('upload');
+      return;
+    }
+
+    if (!toolAvailability.ytDlp && addVideoMode === 'yt_dlp') {
       setAddVideoMode('upload');
     }
-  }, [toolAvailability.ytDlp, addVideoMode, pendingIngest]);
+  }, [toolAvailability.ytDlp, addVideoMode, pendingIngest, catalogMode]);
 
   useEffect(() => {
     if (!pendingIngest) {
@@ -11131,23 +11811,57 @@ export default function App(): JSX.Element {
     return <GoogleLockScreen onSubmit={login} />;
   }
 
+  function handleCatalogModeChange(mode: CatalogMode): void {
+    setCatalogMode(mode);
+
+    if (mode === 'photos') {
+      setViewerItem(null);
+      setDetailsItemId(null);
+      setPhotoViewerPhotoId(null);
+      void loadPhotoCollections();
+      void loadPhotoTagOptions();
+      return;
+    }
+
+    setPhotoViewerPhotoId(null);
+    setSelectedPhotoCollectionId(null);
+  }
+
   const filterPanelId = isMobileCatalogLayout ? 'mobile-filter-drawer' : 'filter-drawer';
   const mobileLayoutMode: Exclude<CatalogLayoutMode, 'desktop'> =
     catalogLayoutMode === 'desktop' ? 'mobile-portrait' : catalogLayoutMode;
-  const mobileBrowseSummary = isAnyCatalogFilterActive
-    ? catalogCountLabel
-    : isHomeViewActive
-      ? `${homeStrips.length} saved home ${homeStrips.length === 1 ? 'section' : 'sections'}`
-      : catalogCountLabel;
+  const selectedPhotoCollection = selectedPhotoCollectionId
+    ? photoCollections.find((collection) => collection.id === selectedPhotoCollectionId) ?? null
+    : null;
+  const photoBrowseSummary = selectedPhotoCollection
+    ? `${selectedPhotoCollection.name} · ${selectedPhotoCollection.photoCount} ${selectedPhotoCollection.photoCount === 1 ? 'photo' : 'photos'}`
+    : isAnyPhotoCollectionFilterActive
+      ? photoCollectionCountLabel
+      : `${photoCollections.length} photo ${photoCollections.length === 1 ? 'collection' : 'collections'}`;
+  const mobileBrowseSummary =
+    catalogMode === 'photos'
+      ? photoBrowseSummary
+      : isAnyCatalogFilterActive
+        ? catalogCountLabel
+        : isHomeViewActive
+          ? `${homeStrips.length} saved home ${homeStrips.length === 1 ? 'section' : 'sections'}`
+          : catalogCountLabel;
 
   const refreshCatalogState = (): void => {
+    if (catalogMode === 'photos') {
+      void loadPhotoCollections();
+      void loadPhotoTagOptions();
+      return;
+    }
+
     void loadCatalog();
+    void loadPhotoCollections();
     void loadRuntime();
     void loadHomeStrips();
     requestCatalogList();
   };
 
-  const filterPanel = (
+  const videoFilterPanel = (
             <section className="sidebar-panel filter-drawer-panel">
               <div className="form-stack">
                 <div>
@@ -11443,7 +12157,202 @@ export default function App(): JSX.Element {
             </section>
   );
 
-  const catalogPanel = (
+  const photoFilterPanel = (
+    <section className="sidebar-panel filter-drawer-panel photo-filter-drawer-panel">
+      <div className="form-stack">
+        <div>
+          <label className="field-label" htmlFor="photo-collection-search">
+            Search
+          </label>
+          {isAnyPhotoCollectionFilterActive ? (
+            <button
+              type="button"
+              className="clear-filter-text link-button filter-clear-button"
+              disabled={!isFilterDrawerOpen}
+              onClick={clearPhotoCollectionFilters}
+            >
+              Clear all filters
+            </button>
+          ) : null}
+          <input
+            id="photo-collection-search"
+            type="search"
+            value={photoCollectionFilters.search}
+            placeholder="Search by name, description, or tag"
+            disabled={!isFilterDrawerOpen}
+            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+              setPhotoCollectionFilters((currentValue) => ({
+                ...currentValue,
+                search: event.target.value
+              }))
+            }
+          />
+        </div>
+
+        <div className="sort-control-group">
+          <div className="sort-control-row">
+            <div>
+              <label className="field-label" htmlFor="photo-collection-sort-filter">
+                Sort by
+              </label>
+              <select
+                id="photo-collection-sort-filter"
+                value={photoCollectionFilters.sortCategory}
+                disabled={!isFilterDrawerOpen}
+                onChange={(event: ChangeEvent<HTMLSelectElement>) => {
+                  setPhotoCollectionFilters((currentValue) => ({
+                    ...currentValue,
+                    sortCategory: event.target.value as PhotoCollectionSortCategory
+                  }));
+                }}
+              >
+                {Object.entries(PHOTO_COLLECTION_SORT_CATEGORY_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <button
+              type="button"
+              className="sort-direction-button"
+              disabled={!isFilterDrawerOpen || !isPhotoCollectionSortActive}
+              onClick={() => {
+                setPhotoCollectionFilters((currentValue) => ({
+                  ...currentValue,
+                  sortDirection: currentValue.sortDirection === 'asc' ? 'desc' : 'asc'
+                }));
+              }}
+              aria-label={
+                !isPhotoCollectionSortActive
+                  ? 'Sort direction is not used when no sort is selected.'
+                  : `Sort order: ${
+                      photoCollectionFilters.sortDirection === 'asc' ? 'ascending' : 'descending'
+                    }. Toggle sort direction.`
+              }
+              title={
+                !isPhotoCollectionSortActive
+                  ? 'No sort selected'
+                  : `Sort ${photoCollectionFilters.sortDirection === 'asc' ? 'ascending' : 'descending'}`
+              }
+            >
+              <span className="sort-direction-icon" aria-hidden="true">
+                {photoCollectionFilters.sortDirection === 'asc' ? '↑' : '↓'}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <section className="tag-filter-section" aria-labelledby="photo-tag-filter-heading">
+          <div className="filter-section-heading">
+            <label className="field-label" id="photo-tag-filter-heading" htmlFor="photo-tag-filter-search">
+              Tags
+            </label>
+            {activePhotoTagFilterCount > 0 ? (
+              <span className="tag-selected-count">{activePhotoTagFilterCount}</span>
+            ) : null}
+          </div>
+          <p className="filter-section-description">
+            Click once to include a tag, again to exclude it, and a third time to clear it.
+          </p>
+
+          <div className="tag-filter-input-wrap">
+            <input
+              id="photo-tag-filter-search"
+              type="search"
+              value={photoCollectionFilters.tagSearch}
+              placeholder="Search tags"
+              disabled={!isFilterDrawerOpen}
+              autoComplete="off"
+              onFocus={() => setIsPhotoTagFilterSearchFocused(true)}
+              onBlur={() => {
+                window.setTimeout(() => setIsPhotoTagFilterSearchFocused(false), 120);
+              }}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                setPhotoCollectionFilters((currentValue) => ({
+                  ...currentValue,
+                  tagSearch: event.target.value
+                }))
+              }
+            />
+            <button
+              type="button"
+              className="tag-filter-picker-button"
+              disabled={!isFilterDrawerOpen}
+              onClick={openPhotoTagPickerModal}
+              aria-label="Browse all photo collection tags"
+              title="Browse all tags"
+            >
+              All
+            </button>
+
+            {isFilterDrawerOpen &&
+            photoCollectionFilters.tagSearch.trim() !== '' &&
+            isPhotoTagFilterSearchFocused ? (
+              <div className="tag-filter-suggestion-list" role="group" aria-label="Matching tags">
+                {visiblePhotoTagFilterSuggestions.length > 0 ? (
+                  visiblePhotoTagFilterSuggestions.map((tag) => (
+                    <button
+                      type="button"
+                      className="tag-filter-option tag-filter-pill tag-filter-suggestion-pill"
+                      key={tag.id}
+                      aria-pressed={getTagFilterPillAriaPressed('inactive')}
+                      aria-label={getTagFilterPillAccessibilityLabel(tag, 'inactive')}
+                      title={getTagFilterPillAccessibilityLabel(tag, 'inactive')}
+                      onMouseDown={(event: MouseEvent<HTMLButtonElement>) => event.preventDefault()}
+                      onClick={() => cyclePhotoTagFilter(tag)}
+                    >
+                      <span className="tag-filter-option-label">{tag.label}</span>
+                      <span className="tag-usage-count">{tag.usageCount}</span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="empty-inline-state">No matching tags.</div>
+                )}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="tag-options-list tag-filter-action-list" role="group" aria-label="Available tags">
+            {visiblePhotoTagOptions.length > 0 ? (
+              visiblePhotoTagOptions.map((tag) => {
+                const isIncluded = photoCollectionFilters.selectedTagIds.includes(tag.id);
+                const isExcluded = photoCollectionFilters.excludedTagIds.includes(tag.id);
+                const tagFilterState = getTagFilterState(isIncluded, isExcluded);
+                const tagFilterLabel = getTagFilterPillAccessibilityLabel(tag, tagFilterState);
+
+                return (
+                  <button
+                    type="button"
+                    className={`tag-filter-option tag-filter-pill${getTagFilterPillStateClassName(
+                      tagFilterState
+                    )}`}
+                    key={tag.id}
+                    disabled={!isFilterDrawerOpen}
+                    onClick={() => cyclePhotoTagFilter(tag)}
+                    aria-pressed={getTagFilterPillAriaPressed(tagFilterState)}
+                    aria-label={tagFilterLabel}
+                    title={tagFilterLabel}
+                  >
+                    <span className="tag-filter-option-label">{tag.label}</span>
+                    <span className="tag-usage-count">{tag.usageCount}</span>
+                  </button>
+                );
+              })
+            ) : (
+              <div className="empty-inline-state">No photo collection tags in use yet.</div>
+            )}
+          </div>
+          {photoTagListLimitNote ? <p className="tag-list-limit-note">{photoTagListLimitNote}</p> : null}
+        </section>
+      </div>
+    </section>
+  );
+
+  const filterPanel = catalogMode === 'photos' ? photoFilterPanel : videoFilterPanel;
+
+  const videoCatalogPanel = (
         <section className="catalog-panel" aria-label={isHomeViewActive ? 'Home layout sections' : 'Catalog results'}>
           {isHomeViewActive ? (
             <div className="home-view">
@@ -11510,6 +12419,35 @@ export default function App(): JSX.Element {
           )}
         </section>
   );
+
+  const catalogPanel =
+    catalogMode === 'photos' ? (
+      <PhotoCatalogView
+        collections={photoCollections}
+        selectedCollectionId={selectedPhotoCollectionId}
+        viewerPhotoId={photoViewerPhotoId}
+        isActive={catalogMode === 'photos'}
+        onSelectCollection={(collectionId) => {
+          setSelectedPhotoCollectionId(collectionId);
+          setPhotoViewerPhotoId(null);
+        }}
+        onBackToCollections={() => {
+          setSelectedPhotoCollectionId(null);
+          setPhotoViewerPhotoId(null);
+        }}
+        onOpenPhoto={(photoId) => setPhotoViewerPhotoId(photoId)}
+        onClosePhotoViewer={() => setPhotoViewerPhotoId(null)}
+        onOpenImport={openAddVideoModal}
+        onRefresh={loadPhotoCollections}
+        onCollectionUpdated={upsertPhotoCollection}
+        onCollectionDeleted={removePhotoCollection}
+        onUnauthorized={resetAuthenticatedState}
+        filters={photoCollectionFilters}
+        onTagsChanged={loadPhotoTagOptions}
+      />
+    ) : (
+      videoCatalogPanel
+    );
 
   const footer = (
       <footer className="app-footer">
@@ -11788,7 +12726,7 @@ export default function App(): JSX.Element {
 
       {isAddVideoModalOpen && (
         <Modal
-          title="Add Video"
+          title={catalogMode === 'photos' && !pendingIngest ? 'Add Photos' : 'Add Video'}
           titleId="add-video-modal-title"
           onClose={() => {
             void closeAddVideoModal();
@@ -11796,7 +12734,7 @@ export default function App(): JSX.Element {
           disableClose={isAddVideoBusy}
           size="wide"
         >
-          <div className="mode-switch" role="tablist" aria-label="Add video mode">
+          <div className="mode-switch" role="tablist" aria-label="Add media mode">
             <button
               type="button"
               role="tab"
@@ -11817,6 +12755,26 @@ export default function App(): JSX.Element {
             >
               Import URL
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={addVideoMode === 'photo_zip'}
+              className={`mode-switch-button${addVideoMode === 'photo_zip' ? ' is-active' : ''}`}
+              onClick={() => setAddVideoMode('photo_zip')}
+              disabled={pendingIngest !== null || isAddVideoBusy}
+            >
+              Photo ZIP
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={addVideoMode === 'photo_files'}
+              className={`mode-switch-button${addVideoMode === 'photo_files' ? ' is-active' : ''}`}
+              onClick={() => setAddVideoMode('photo_files')}
+              disabled={pendingIngest !== null || isAddVideoBusy}
+            >
+              Photo files
+            </button>
           </div>
 
           <div className="info-panel">
@@ -11826,11 +12784,22 @@ export default function App(): JSX.Element {
                 before finalization, duplicate checks still run before processing, and downstream FFmpeg
                 processing is shown live over WebSocket.
               </p>
-            ) : (
+            ) : addVideoMode === 'yt_dlp' ? (
               <p>
                 yt-dlp imports run metadata preflight first, suggest an extracted catalog title for
                 confirmation, resolve duplicates before download, and then expose source download plus
                 post-download processing live over WebSocket.
+              </p>
+            ) : addVideoMode === 'photo_zip' ? (
+              <p>
+                A ZIP archive creates one new photo collection from every supported image inside the
+                archive. The collection appears in Photos, where its tags, search, and sorting stay
+                separate from the video catalog.
+              </p>
+            ) : (
+              <p>
+                Upload image files into either a new photo collection or an existing one. Collections,
+                not individual photos, are shown in the main Photos catalog.
               </p>
             )}
           </div>
@@ -12046,7 +13015,7 @@ export default function App(): JSX.Element {
                 </button>
               </div>
             </form>
-          ) : (
+          ) : addVideoMode === 'yt_dlp' ? (
             <form
               className="add-video-form"
               onSubmit={(event: FormEvent<HTMLFormElement>) => {
@@ -12087,6 +13056,171 @@ export default function App(): JSX.Element {
                   disabled={isAddVideoBusy || !toolAvailability.ytDlp}
                 >
                   {isAddVideoBusy ? 'Starting import…' : 'Start import'}
+                </button>
+              </div>
+            </form>
+          ) : addVideoMode === 'photo_zip' ? (
+            <form
+              className="add-video-form photo-import-form"
+              onSubmit={(event: FormEvent<HTMLFormElement>) => {
+                void handlePhotoZipSubmit(event);
+              }}
+            >
+              <label htmlFor="photo-zip-file-input">Photo collection ZIP file</label>
+              <input
+                key={`photo-zip-${photoUploadInputKey}`}
+                id="photo-zip-file-input"
+                type="file"
+                accept=".zip,application/zip"
+                onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                  setPhotoZipFile(event.target.files?.[0] ?? null);
+                  setAddVideoNotice(null);
+                }}
+                disabled={isAddVideoBusy}
+              />
+              <label htmlFor="photo-zip-collection-name">Collection name</label>
+              <input
+                id="photo-zip-collection-name"
+                type="text"
+                value={photoImportCollectionName}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                  setPhotoImportCollectionName(event.target.value);
+                  setAddVideoNotice(null);
+                }}
+                placeholder="Leave blank to use the ZIP filename"
+                disabled={isAddVideoBusy}
+              />
+              <p className="muted" aria-live="polite">
+                {photoZipFile
+                  ? `Selected: ${photoZipFile.name} (${formatBytes(photoZipFile.size)})`
+                  : addVideoPrimaryMessage}
+              </p>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="app-button secondary"
+                  onClick={() => {
+                    void closeAddVideoModal();
+                  }}
+                  disabled={isAddVideoBusy}
+                >
+                  Close
+                </button>
+                <button type="submit" className="app-button" disabled={isAddVideoBusy || !photoZipFile}>
+                  {isAddVideoBusy ? 'Importing ZIP…' : 'Import ZIP'}
+                </button>
+              </div>
+            </form>
+          ) : (
+            <form
+              className="add-video-form photo-import-form"
+              onSubmit={(event: FormEvent<HTMLFormElement>) => {
+                void handlePhotoFilesSubmit(event);
+              }}
+            >
+              <fieldset className="segmented-fieldset" disabled={isAddVideoBusy}>
+                <legend>Destination</legend>
+                <label>
+                  <input
+                    type="radio"
+                    name="photo-file-import-mode"
+                    value="new"
+                    checked={photoFileImportMode === 'new'}
+                    onChange={() => {
+                      setPhotoFileImportMode('new');
+                      setAddVideoNotice(null);
+                    }}
+                  />
+                  New collection
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="photo-file-import-mode"
+                    value="existing"
+                    checked={photoFileImportMode === 'existing'}
+                    onChange={() => {
+                      setPhotoFileImportMode('existing');
+                      setAddVideoNotice(null);
+                    }}
+                  />
+                  Existing collection
+                </label>
+              </fieldset>
+
+              {photoFileImportMode === 'new' ? (
+                <>
+                  <label htmlFor="photo-files-collection-name">New collection name</label>
+                  <input
+                    id="photo-files-collection-name"
+                    type="text"
+                    value={photoImportCollectionName}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                      setPhotoImportCollectionName(event.target.value);
+                      setAddVideoNotice(null);
+                    }}
+                    placeholder="Collection title"
+                    disabled={isAddVideoBusy}
+                  />
+                </>
+              ) : (
+                <>
+                  <label htmlFor="photo-files-existing-collection">Existing collection</label>
+                  <select
+                    id="photo-files-existing-collection"
+                    value={photoImportTargetCollectionId}
+                    onChange={(event: ChangeEvent<HTMLSelectElement>) => {
+                      setPhotoImportTargetCollectionId(event.target.value);
+                      setAddVideoNotice(null);
+                    }}
+                    disabled={isAddVideoBusy || photoCollections.length === 0}
+                  >
+                    <option value="">Choose a collection…</option>
+                    {photoCollections.map((collection) => (
+                      <option key={collection.id} value={collection.id}>
+                        {collection.name} ({collection.photoCount})
+                      </option>
+                    ))}
+                  </select>
+                  {photoCollections.length === 0 ? (
+                    <p className="muted">Create a new collection first, then you can add more photos to it.</p>
+                  ) : null}
+                </>
+              )}
+
+              <label htmlFor="photo-files-input">Image files</label>
+              <input
+                key={`photo-files-${photoUploadInputKey}`}
+                id="photo-files-input"
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                  setPhotoFiles(Array.from(event.target.files ?? []));
+                  setAddVideoNotice(null);
+                }}
+                disabled={isAddVideoBusy}
+              />
+              <p className="muted" aria-live="polite">
+                {photoFiles.length > 0
+                  ? `${photoFiles.length} ${photoFiles.length === 1 ? 'file' : 'files'} selected (${formatBytes(
+                      photoFiles.reduce((total, file) => total + file.size, 0)
+                    )})`
+                  : addVideoPrimaryMessage}
+              </p>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="app-button secondary"
+                  onClick={() => {
+                    void closeAddVideoModal();
+                  }}
+                  disabled={isAddVideoBusy}
+                >
+                  Close
+                </button>
+                <button type="submit" className="app-button" disabled={isAddVideoBusy || photoFiles.length === 0}>
+                  {isAddVideoBusy ? 'Uploading photos…' : 'Upload photos'}
                 </button>
               </div>
             </form>
@@ -12247,6 +13381,98 @@ export default function App(): JSX.Element {
         </Modal>
       )}
 
+      {isPhotoTagPickerModalOpen && (
+        <Modal
+          title="Select photo collection tags for filter"
+          titleId="photo-tag-picker-modal-title"
+          onClose={closePhotoTagPickerModal}
+          size="wide"
+        >
+          <div className="tag-picker-panel">
+            <p className="tag-picker-description">
+              Choose any photo collection tag to add it as an include filter. Excluded tags will switch
+              to included.
+            </p>
+            <div className="tag-picker-controls">
+              <div className="tag-picker-search-field">
+                <label className="field-label" htmlFor="photo-tag-picker-search">
+                  Search tags
+                </label>
+                <input
+                  id="photo-tag-picker-search"
+                  type="search"
+                  value={photoTagPickerSearch}
+                  placeholder="Search all tags"
+                  autoComplete="off"
+                  autoFocus
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    setPhotoTagPickerSearch(event.target.value)
+                  }
+                />
+              </div>
+              <div className="tag-picker-sort-field">
+                <label className="field-label" htmlFor="photo-tag-picker-sort">
+                  Sort
+                </label>
+                <select
+                  id="photo-tag-picker-sort"
+                  value={photoTagPickerSortMode}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                    setPhotoTagPickerSortMode(event.target.value as TagPickerSortMode)
+                  }
+                >
+                  <option value="labelAsc">Alphabetical A-Z</option>
+                  <option value="labelDesc">Alphabetical Z-A</option>
+                  <option value="usageDesc">Most used first</option>
+                  <option value="usageAsc">Least used first</option>
+                </select>
+              </div>
+            </div>
+            {availablePhotoTagOptions.length > 0 ? (
+              <p className="tag-picker-cloud-status">
+                {visiblePhotoTagPickerOptions.length} of {availablePhotoTagOptions.length} tags shown
+              </p>
+            ) : null}
+            <div className="tag-picker-cloud" role="group" aria-label="All available photo collection tags">
+              {visiblePhotoTagPickerOptions.length > 0 ? (
+                visiblePhotoTagPickerOptions.map((tag) => {
+                  const isIncluded = photoCollectionFilters.selectedTagIds.includes(tag.id);
+                  const isExcluded = photoCollectionFilters.excludedTagIds.includes(tag.id);
+                  const tagFilterState = getTagFilterState(isIncluded, isExcluded);
+                  const tagPickerLabel = getTagPickerOptionAccessibilityLabel(tag, tagFilterState);
+
+                  return (
+                    <button
+                      type="button"
+                      className={`tag-filter-option tag-filter-pill tag-picker-pill${getTagFilterPillStateClassName(
+                        tagFilterState
+                      )}`}
+                      key={tag.id}
+                      onClick={() => selectPhotoTagFilterFromPicker(tag)}
+                      aria-pressed={getTagFilterPillAriaPressed(tagFilterState)}
+                      aria-label={tagPickerLabel}
+                      title={tagPickerLabel}
+                    >
+                      <span className="tag-filter-option-label">{tag.label}</span>
+                      <span className="tag-usage-count">{tag.usageCount}</span>
+                    </button>
+                  );
+                })
+              ) : (
+                <div className="empty-inline-state">
+                  {availablePhotoTagOptions.length > 0 ? 'No matching tags.' : 'No tags in use yet.'}
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="modal-actions">
+            <button type="button" className="app-button secondary" onClick={closePhotoTagPickerModal}>
+              Close
+            </button>
+          </div>
+        </Modal>
+      )}
+
       {isTagPickerModalOpen && (
         <Modal title="Select tags for filter" titleId="tag-picker-modal-title" onClose={closeTagPickerModal} size="wide">
           <div className="tag-picker-panel">
@@ -12369,6 +13595,8 @@ export default function App(): JSX.Element {
   const layout = isMobileCatalogLayout ? (
     <CatalogMobileLayout
       layoutMode={mobileLayoutMode}
+      catalogMode={catalogMode}
+      onCatalogModeChange={handleCatalogModeChange}
       isFilterPanelOpen={isFilterDrawerOpen}
       filterPanelId={filterPanelId}
       filterPanel={filterPanel}
@@ -12385,6 +13613,8 @@ export default function App(): JSX.Element {
     />
   ) : (
     <CatalogDesktopLayout
+      catalogMode={catalogMode}
+      onCatalogModeChange={handleCatalogModeChange}
       isFilterPanelOpen={isFilterDrawerOpen}
       filterPanelId={filterPanelId}
       filterPanel={filterPanel}
