@@ -879,27 +879,52 @@ function PhotoCatalogTagIcon(): JSX.Element {
   );
 }
 
+function PhotoCatalogTrashIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7h16" />
+      <path d="M9 7V5h6v2" />
+      <path d="m10 11 .35 6" />
+      <path d="m14 11-.35 6" />
+      <path d="M6.5 7 7.4 20h9.2l.9-13" />
+    </svg>
+  );
+}
+
 type PhotoCatalogModalProps = {
   title: string;
   titleId: string;
   onClose: () => void;
   children: ReactNode;
+  disableClose?: boolean;
 };
 
-function PhotoCatalogModal({ title, titleId, onClose, children }: PhotoCatalogModalProps): JSX.Element {
+function PhotoCatalogModal({
+  title,
+  titleId,
+  onClose,
+  children,
+  disableClose = false
+}: PhotoCatalogModalProps): JSX.Element {
   useEffect(() => {
     function handleKeyDown(event: Event): void {
-      if (event instanceof KeyboardEvent && event.key === 'Escape') {
+      if (event instanceof KeyboardEvent && event.key === 'Escape' && !disableClose) {
         onClose();
       }
     }
 
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  }, [disableClose, onClose]);
+
+  const handleBackdropClick = (): void => {
+    if (!disableClose) {
+      onClose();
+    }
+  };
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={handleBackdropClick}>
       <div
         className="modal"
         role="dialog"
@@ -909,7 +934,13 @@ function PhotoCatalogModal({ title, titleId, onClose, children }: PhotoCatalogMo
       >
         <div className="modal-header">
           <h2 id={titleId}>{title}</h2>
-          <button type="button" className="modal-close-button" onClick={onClose} aria-label={`Close ${title}`}>
+          <button
+            type="button"
+            className="modal-close-button"
+            onClick={onClose}
+            aria-label={`Close ${title}`}
+            disabled={disableClose}
+          >
             ×
           </button>
         </div>
@@ -922,16 +953,47 @@ function PhotoCatalogModal({ title, titleId, onClose, children }: PhotoCatalogMo
 type PhotoCollectionDetailsModalProps = {
   collection: PhotoCollection;
   onClose: () => void;
+  onDelete: (collection: PhotoCollection) => Promise<boolean>;
 };
 
-function PhotoCollectionDetailsModal({ collection, onClose }: PhotoCollectionDetailsModalProps): JSX.Element {
+function PhotoCollectionDetailsModal({
+  collection,
+  onClose,
+  onDelete
+}: PhotoCollectionDetailsModalProps): JSX.Element {
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
   const coverPhoto = collection.coverPhoto;
   const coverPhotoSummary = coverPhoto
     ? `${coverPhoto.originalName}${coverPhoto.width && coverPhoto.height ? ` · ${coverPhoto.width}×${coverPhoto.height}` : ''}`
     : 'No cover photo available';
 
+  useEffect(() => {
+    setIsConfirmingDelete(false);
+    setIsDeleting(false);
+    setDeleteError('');
+  }, [collection.id]);
+
+  const handleDelete = async (): Promise<void> => {
+    setIsDeleting(true);
+    setDeleteError('');
+
+    const deleted = await onDelete(collection);
+    if (!deleted) {
+      setDeleteError('Unable to delete this photo collection. Please try again.');
+      setIsDeleting(false);
+    }
+  };
+
   return (
-    <PhotoCatalogModal title="Collection details" titleId="photo-collection-details-title" onClose={onClose}>
+    <PhotoCatalogModal
+      title="Collection details"
+      titleId="photo-collection-details-title"
+      onClose={onClose}
+      disableClose={isDeleting}
+    >
       <div className="details-modal-layout photo-collection-details-modal">
         <section className="details-summary-panel" aria-label="Photo collection summary">
           <div>
@@ -995,6 +1057,66 @@ function PhotoCollectionDetailsModal({ collection, onClose }: PhotoCollectionDet
             </div>
           ) : (
             <p className="photo-empty-inline">No tags yet.</p>
+          )}
+        </section>
+
+        <section className="details-danger-zone" aria-labelledby="photo-collection-details-delete-title">
+          <div>
+            <h3 id="photo-collection-details-delete-title">Delete collection</h3>
+            <p>
+              Delete removes this photo collection from the catalog and cleans up all photos,
+              thumbnails, metadata, and tag associations inside it.
+            </p>
+          </div>
+
+          {!isConfirmingDelete ? (
+            <button
+              type="button"
+              className="details-delete-button"
+              onClick={() => {
+                setIsConfirmingDelete(true);
+                setDeleteError('');
+              }}
+              disabled={isDeleting}
+            >
+              <PhotoCatalogTrashIcon />
+              <span>Delete collection</span>
+            </button>
+          ) : (
+            <div className="details-delete-confirmation">
+              <p>
+                Delete “{collection.name}” and all {pluralize(collection.photoCount, 'photo')} inside it
+                permanently from this catalog?
+              </p>
+              {deleteError && (
+                <p className="notice notice-error" aria-live="polite">
+                  {deleteError}
+                </p>
+              )}
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="app-button secondary"
+                  onClick={() => {
+                    setIsConfirmingDelete(false);
+                    setDeleteError('');
+                  }}
+                  disabled={isDeleting}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="app-button danger"
+                  onClick={() => {
+                    void handleDelete();
+                  }}
+                  disabled={isDeleting}
+                >
+                  {isDeleting ? 'Deleting…' : 'Delete permanently'}
+                </button>
+              </div>
+            </div>
           )}
         </section>
       </div>
@@ -1510,7 +1632,6 @@ export function PhotoCatalogView({
   );
   const [newTagLabel, setNewTagLabel] = useState('');
   const [isTagBusy, setIsTagBusy] = useState(false);
-  const [isDeleteBusy, setIsDeleteBusy] = useState(false);
   const viewerOverlayRef = useRef<HTMLDivElement | null>(null);
   const photoViewerHeaderRef = useRef<HTMLDivElement | null>(null);
   const photoViewerStageRef = useRef<HTMLDivElement | null>(null);
@@ -2252,35 +2373,32 @@ export function PhotoCatalogView({
     }
   };
 
-  const handleDeleteCollection = async (): Promise<void> => {
-    if (!detail) {
-      return;
-    }
-
-    const confirmed = window.confirm(`Delete photo collection “${detail.collection.name}” and all ${detail.collection.photoCount} photos inside it?`);
-    if (!confirmed) {
-      return;
-    }
-
-    setIsDeleteBusy(true);
+  const requestDeleteCollection = async (collection: PhotoCollection): Promise<boolean> => {
     setNotice(null);
     try {
-      await fetchJson(`/api/photos/collections/${encodeURIComponent(detail.collection.id)}`, { method: 'DELETE' }, onUnauthorized);
+      await fetchJson(`/api/photos/collections/${encodeURIComponent(collection.id)}`, { method: 'DELETE' }, onUnauthorized);
       setFavoritePhotoIdsByCollection((currentFavorites) => {
-        if (!currentFavorites[detail.collection.id]) {
+        if (!currentFavorites[collection.id]) {
           return currentFavorites;
         }
 
         const nextFavorites = { ...currentFavorites };
-        delete nextFavorites[detail.collection.id];
+        delete nextFavorites[collection.id];
         return nextFavorites;
       });
-      onCollectionDeleted(detail.collection.id);
-      onBackToCollections();
+      setDetail((currentDetail) => (currentDetail?.collection.id === collection.id ? null : currentDetail));
+      onCollectionDeleted(collection.id);
+      setInfoCollectionId((currentCollectionId) => (currentCollectionId === collection.id ? null : currentCollectionId));
+      if (selectedCollectionId === collection.id) {
+        onBackToCollections();
+      }
+      return true;
     } catch (error) {
-      setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'Photo collection could not be deleted.' });
-    } finally {
-      setIsDeleteBusy(false);
+      console.warn('photo.collection.delete.failed', {
+        collectionId: collection.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return false;
     }
   };
 
@@ -2483,14 +2601,6 @@ export function PhotoCatalogView({
                 onToggleFavorite={handleTogglePhotoFavorite}
               />
             ))}
-          </div>
-        ) : null}
-
-        {detail ? (
-          <div className="photo-danger-zone">
-            <button type="button" className="app-button danger" onClick={() => void handleDeleteCollection()} disabled={isDeleteBusy}>
-              Delete collection
-            </button>
           </div>
         ) : null}
 
@@ -2729,7 +2839,11 @@ export function PhotoCatalogView({
       )}
 
       {infoCollection ? (
-        <PhotoCollectionDetailsModal collection={infoCollection} onClose={() => setInfoCollectionId(null)} />
+        <PhotoCollectionDetailsModal
+          collection={infoCollection}
+          onClose={() => setInfoCollectionId(null)}
+          onDelete={requestDeleteCollection}
+        />
       ) : null}
     </section>
   );

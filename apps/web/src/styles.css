@@ -4819,8 +4819,7 @@ label {
 .photo-catalog-toolbar,
 .photo-detail-header,
 .photo-detail-controls,
-.photo-catalog-controls,
-.photo-danger-zone {
+.photo-catalog-controls {
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 24px;
   background: rgba(14, 14, 20, 0.72);
@@ -5418,11 +5417,6 @@ label {
 
 .photo-catalog-notice.is-warning {
   background: rgba(255, 199, 83, 0.16);
-}
-
-.photo-danger-zone {
-  margin-top: 1.25rem;
-  padding: 1rem;
 }
 
 .photo-viewer-overlay {
