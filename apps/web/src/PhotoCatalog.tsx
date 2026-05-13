@@ -130,6 +130,7 @@ export type PhotoCatalogViewProps = {
   viewerPhotoId: string | null;
   isActive: boolean;
   attemptFullscreenOnOpen: boolean;
+  photoFavoritesBrowseRequestId?: number;
   onSelectCollection: (collectionId: string) => void;
   onBackToCollections: () => void;
   onOpenPhoto: (photoId: string) => void;
@@ -362,6 +363,123 @@ function uniqueStrings(values: string[]): string[] {
 }
 
 type PhotoFavoriteState = Record<string, string[]>;
+
+type PhotoFavoriteTagSummary = {
+  tag: PhotoCatalogTag;
+  photoCount: number;
+  collectionCount: number;
+};
+
+type PhotoFavoriteOverview = {
+  photoCount: number;
+  collectionCount: number;
+  tags: PhotoFavoriteTagSummary[];
+};
+
+type FavoritePhotoEntry = {
+  photo: Photo;
+  collection: PhotoCollection;
+};
+
+type FavoriteCollectionDetailsState = Record<string, PhotoCollectionDetailPayload>;
+
+function getFavoritePhotoIdsForCollection(favorites: PhotoFavoriteState, collectionId: string): string[] {
+  return uniqueStrings(favorites[collectionId] ?? []);
+}
+
+function getFavoritePhotoCountForCollection(favorites: PhotoFavoriteState, collectionId: string): number {
+  return getFavoritePhotoIdsForCollection(favorites, collectionId).length;
+}
+
+function doesPhotoCollectionHaveTag(collection: PhotoCollection, tagId: string | null): boolean {
+  return tagId === null || collection.tags.some((tag) => tag.id === tagId);
+}
+
+function createPhotoFavoriteOverview(collections: PhotoCollection[], favorites: PhotoFavoriteState): PhotoFavoriteOverview {
+  const favoriteTagsById = new Map<string, PhotoFavoriteTagSummary>();
+  let photoCount = 0;
+  let collectionCount = 0;
+
+  for (const collection of collections) {
+    const collectionFavoriteCount = getFavoritePhotoCountForCollection(favorites, collection.id);
+    if (collectionFavoriteCount === 0) {
+      continue;
+    }
+
+    photoCount += collectionFavoriteCount;
+    collectionCount += 1;
+
+    for (const tag of collection.tags) {
+      const existingSummary = favoriteTagsById.get(tag.id);
+      if (existingSummary) {
+        existingSummary.photoCount += collectionFavoriteCount;
+        existingSummary.collectionCount += 1;
+        if (tag.usageCount > existingSummary.tag.usageCount) {
+          existingSummary.tag = tag;
+        }
+      } else {
+        favoriteTagsById.set(tag.id, {
+          tag,
+          photoCount: collectionFavoriteCount,
+          collectionCount: 1
+        });
+      }
+    }
+  }
+
+  return {
+    photoCount,
+    collectionCount,
+    tags: Array.from(favoriteTagsById.values()).sort(
+      (left, right) =>
+        right.photoCount - left.photoCount ||
+        right.collectionCount - left.collectionCount ||
+        left.tag.label.localeCompare(right.tag.label, undefined, { sensitivity: 'base' })
+    )
+  };
+}
+
+function compareFavoritePhotoEntriesForGridSort(
+  left: FavoritePhotoEntry,
+  right: FavoritePhotoEntry,
+  sortCategory: PhotoGridSortCategory
+): number {
+  return (
+    comparePhotosForGridSort(left.photo, right.photo, sortCategory) ||
+    left.collection.name.localeCompare(right.collection.name, undefined, { sensitivity: 'base' }) ||
+    tieBreakPhotosForGridSort(left.photo, right.photo)
+  );
+}
+
+function sortFavoritePhotoEntries(
+  entries: FavoritePhotoEntry[],
+  sortCategory: PhotoGridSortCategory,
+  sortDirection: PhotoGridSortDirection
+): FavoritePhotoEntry[] {
+  return [...entries].sort((left, right) => {
+    const primaryComparison = compareFavoritePhotoEntriesForGridSort(left, right, sortCategory);
+    return sortDirection === 'asc' ? primaryComparison : -primaryComparison;
+  });
+}
+
+function doesFavoritePhotoEntryMatchSearch(entry: FavoritePhotoEntry, normalizedSearch: string): boolean {
+  if (normalizedSearch === '') {
+    return true;
+  }
+
+  const haystack = [
+    entry.photo.originalName,
+    entry.collection.name,
+    entry.collection.description,
+    ...entry.collection.tags.map((tag) => tag.label)
+  ]
+    .filter((value): value is string => typeof value === 'string' && value.trim() !== '')
+    .join(' ')
+    .toLowerCase();
+
+  return haystack.includes(normalizedSearch);
+}
+
 
 const PHOTO_VIEWER_CONTROLS_AUTO_HIDE_DELAY_MS = 2000;
 const PHOTO_VIEWER_DEFAULT_SLIDESHOW_DELAY_MS = 5000;
@@ -1533,12 +1651,14 @@ function PhotoGridCard({
   photo,
   isFavorite,
   onOpen,
-  onToggleFavorite
+  onToggleFavorite,
+  contextLabel
 }: {
   photo: Photo;
   isFavorite: boolean;
   onOpen: (photoId: string) => void;
   onToggleFavorite: (photo: Photo) => void;
+  contextLabel?: string;
 }): JSX.Element {
   const [isFavoriteControlSuppressed, setIsFavoriteControlSuppressed] = useState(false);
 
@@ -1579,6 +1699,11 @@ function PhotoGridCard({
         >
           <PhotoImage className="photo-grid-image" photo={photo} source="thumbnail" alt={photo.originalName} loading="lazy" />
         </button>
+        {contextLabel ? (
+          <div className="photo-grid-context-label" title={contextLabel}>
+            {contextLabel}
+          </div>
+        ) : null}
         <div className="photo-grid-controls">
           <button
             type="button"
@@ -1604,12 +1729,14 @@ function PhotoCatalogNotice({ notice }: { notice: PhotoNotice | null }): JSX.Ele
   return <div className={`photo-catalog-notice is-${notice.tone}`}>{notice.text}</div>;
 }
 
+
 export function PhotoCatalogView({
   collections,
   selectedCollectionId,
   viewerPhotoId,
   isActive,
   attemptFullscreenOnOpen,
+  photoFavoritesBrowseRequestId = 0,
   onSelectCollection,
   onBackToCollections,
   onOpenPhoto,
@@ -1632,6 +1759,11 @@ export function PhotoCatalogView({
   const [favoritePhotoIdsByCollection, setFavoritePhotoIdsByCollection] = useState<PhotoFavoriteState>(() =>
     readStoredPhotoFavorites()
   );
+  const [isFavoriteBrowserOpen, setIsFavoriteBrowserOpen] = useState(false);
+  const [favoriteBrowseTagId, setFavoriteBrowseTagId] = useState<string | null>(null);
+  const [favoriteCollectionDetailsById, setFavoriteCollectionDetailsById] = useState<FavoriteCollectionDetailsState>({});
+  const [isFavoriteBrowseLoading, setIsFavoriteBrowseLoading] = useState(false);
+  const [favoriteBrowseError, setFavoriteBrowseError] = useState<string | null>(null);
   const [newTagLabel, setNewTagLabel] = useState('');
   const [isTagBusy, setIsTagBusy] = useState(false);
   const viewerOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -1674,8 +1806,25 @@ export function PhotoCatalogView({
   useEffect(() => {
     if (selectedCollectionId) {
       setInfoCollectionId(null);
+      setIsFavoriteBrowserOpen(false);
+      setFavoriteBrowseTagId(null);
+      setFavoriteBrowseError(null);
     }
   }, [selectedCollectionId]);
+
+  useEffect(() => {
+    if (photoFavoritesBrowseRequestId <= 0) {
+      return;
+    }
+
+    setInfoCollectionId(null);
+    setIsFavoriteBrowserOpen(true);
+    setFavoriteBrowseTagId(null);
+    setFavoriteBrowseError(null);
+    setPhotoSearch('');
+    setNotice(null);
+    onClosePhotoViewer();
+  }, [photoFavoritesBrowseRequestId]);
 
   useEffect(() => {
     if (!selectedCollectionId) {
@@ -1726,37 +1875,6 @@ export function PhotoCatalogView({
       cancelled = true;
     };
   }, [selectedCollectionId]);
-
-  useEffect(() => {
-    if (!viewerPhotoId || !detail) {
-      return;
-    }
-
-    let cancelled = false;
-    fetchJson(`/api/photos/${encodeURIComponent(viewerPhotoId)}/views`, { method: 'POST' }, onUnauthorized)
-      .then((payload) => {
-        const updatedPhoto = parsePhotoUpdatePayload(payload);
-        if (!updatedPhoto || cancelled) {
-          return;
-        }
-
-        setDetail((current) => {
-          if (!current) {
-            return current;
-          }
-
-          return {
-            ...current,
-            photos: current.photos.map((photo) => (photo.id === updatedPhoto.id ? updatedPhoto : photo))
-          };
-        });
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-    };
-  }, [viewerPhotoId, detail?.collection.id]);
 
   useEffect(() => {
     if (!selectedCollectionId) {
@@ -1822,6 +1940,196 @@ export function PhotoCatalogView({
     );
   }, [collections, detail, infoCollectionId]);
 
+  const isFavoriteBrowserActive = !selectedCollectionId && isFavoriteBrowserOpen;
+
+  const photoFavoriteOverview = useMemo(
+    () => createPhotoFavoriteOverview(collections, favoritePhotoIdsByCollection),
+    [collections, favoritePhotoIdsByCollection]
+  );
+
+  const favoriteBrowseTag = useMemo<PhotoCatalogTag | null>(() => {
+    if (!favoriteBrowseTagId) {
+      return null;
+    }
+
+    const favoriteTagSummary = photoFavoriteOverview.tags.find((summary) => summary.tag.id === favoriteBrowseTagId);
+    if (favoriteTagSummary) {
+      return favoriteTagSummary.tag;
+    }
+
+    for (const collection of collections) {
+      const tag = collection.tags.find((candidate) => candidate.id === favoriteBrowseTagId);
+      if (tag) {
+        return tag;
+      }
+    }
+
+    return null;
+  }, [collections, favoriteBrowseTagId, photoFavoriteOverview.tags]);
+
+  const favoriteBrowseCollections = useMemo(
+    () =>
+      collections.filter(
+        (collection) =>
+          getFavoritePhotoCountForCollection(favoritePhotoIdsByCollection, collection.id) > 0 &&
+          doesPhotoCollectionHaveTag(collection, favoriteBrowseTagId)
+      ),
+    [collections, favoriteBrowseTagId, favoritePhotoIdsByCollection]
+  );
+
+  const favoriteBrowseCollectionKey = favoriteBrowseCollections.map((collection) => collection.id).join('|');
+
+  const favoriteBrowseMissingCollectionIds = useMemo(
+    () =>
+      isFavoriteBrowserActive
+        ? favoriteBrowseCollections
+            .filter((collection) => !favoriteCollectionDetailsById[collection.id])
+            .map((collection) => collection.id)
+        : [],
+    [favoriteBrowseCollectionKey, favoriteCollectionDetailsById, isFavoriteBrowserActive]
+  );
+
+  const favoriteBrowseMissingCollectionKey = favoriteBrowseMissingCollectionIds.join('|');
+
+  const favoriteBrowseKnownFavoriteCount = useMemo(
+    () =>
+      favoriteBrowseCollections.reduce(
+        (total, collection) => total + getFavoritePhotoCountForCollection(favoritePhotoIdsByCollection, collection.id),
+        0
+      ),
+    [favoriteBrowseCollections, favoritePhotoIdsByCollection]
+  );
+
+  const favoriteBrowseEntries = useMemo(() => {
+    if (!isFavoriteBrowserActive) {
+      return [];
+    }
+
+    const normalizedSearch = photoSearch.trim().toLowerCase();
+    const entries: FavoritePhotoEntry[] = [];
+
+    for (const collection of favoriteBrowseCollections) {
+      const collectionDetail = favoriteCollectionDetailsById[collection.id];
+      if (!collectionDetail) {
+        continue;
+      }
+
+      const favoritePhotoIds = new Set(getFavoritePhotoIdsForCollection(favoritePhotoIdsByCollection, collection.id));
+      for (const photo of collectionDetail.photos) {
+        if (!favoritePhotoIds.has(photo.id)) {
+          continue;
+        }
+
+        const entry = { photo, collection };
+        if (doesFavoritePhotoEntryMatchSearch(entry, normalizedSearch)) {
+          entries.push(entry);
+        }
+      }
+    }
+
+    return sortFavoritePhotoEntries(entries, photoGridSortCategory, photoGridSortDirection);
+  }, [
+    favoriteBrowseCollections,
+    favoriteCollectionDetailsById,
+    favoritePhotoIdsByCollection,
+    isFavoriteBrowserActive,
+    photoGridSortCategory,
+    photoGridSortDirection,
+    photoSearch
+  ]);
+
+  const favoriteBrowsePhotos = useMemo(() => favoriteBrowseEntries.map((entry) => entry.photo), [favoriteBrowseEntries]);
+
+  const favoriteBrowseLoadedPhotoById = useMemo(() => {
+    const photosById = new Map<string, Photo>();
+    if (!isFavoriteBrowserActive) {
+      return photosById;
+    }
+
+    for (const collection of favoriteBrowseCollections) {
+      const collectionDetail = favoriteCollectionDetailsById[collection.id];
+      if (!collectionDetail) {
+        continue;
+      }
+
+      for (const photo of collectionDetail.photos) {
+        photosById.set(photo.id, photo);
+      }
+    }
+
+    return photosById;
+  }, [favoriteBrowseCollections, favoriteCollectionDetailsById, isFavoriteBrowserActive]);
+
+  useEffect(() => {
+    if (!isFavoriteBrowserActive) {
+      setIsFavoriteBrowseLoading(false);
+      return;
+    }
+
+    if (favoriteBrowseMissingCollectionIds.length === 0) {
+      setIsFavoriteBrowseLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsFavoriteBrowseLoading(true);
+    setFavoriteBrowseError(null);
+
+    Promise.all(
+      favoriteBrowseMissingCollectionIds.map(async (collectionId) => {
+        try {
+          const payload = await fetchJson(
+            `/api/photos/collections/${encodeURIComponent(collectionId)}`,
+            undefined,
+            onUnauthorized
+          );
+          const collectionDetail = parsePhotoCollectionDetailPayload(payload);
+          if (!collectionDetail) {
+            throw new Error('The photo collection response was invalid.');
+          }
+
+          return { collectionId, collectionDetail };
+        } catch {
+          return { collectionId, collectionDetail: null };
+        }
+      })
+    )
+      .then((results) => {
+        if (cancelled) {
+          return;
+        }
+
+        const loadedDetails = results.filter((result) => result.collectionDetail !== null);
+        if (loadedDetails.length > 0) {
+          setFavoriteCollectionDetailsById((currentDetails) => {
+            const nextDetails = { ...currentDetails };
+            for (const result of loadedDetails) {
+              if (result.collectionDetail) {
+                nextDetails[result.collectionId] = result.collectionDetail;
+              }
+            }
+            return nextDetails;
+          });
+        }
+
+        const failureCount = results.length - loadedDetails.length;
+        if (failureCount > 0) {
+          setFavoriteBrowseError(
+            `${failureCount} favorite ${failureCount === 1 ? 'collection' : 'collections'} could not be loaded.`
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsFavoriteBrowseLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [favoriteBrowseMissingCollectionKey, isFavoriteBrowserActive, onUnauthorized]);
+
   const selectedFavoritePhotoIds = useMemo(() => {
     if (!selectedCollectionId) {
       return new Set<string>();
@@ -1829,6 +2137,10 @@ export function PhotoCatalogView({
 
     return new Set(favoritePhotoIdsByCollection[selectedCollectionId] ?? []);
   }, [favoritePhotoIdsByCollection, selectedCollectionId]);
+
+  function isFavoritePhoto(photo: Photo): boolean {
+    return (favoritePhotoIdsByCollection[photo.collectionId] ?? []).includes(photo.id);
+  }
 
   const visiblePhotos = useMemo(() => {
     if (!detail) {
@@ -1854,14 +2166,73 @@ export function PhotoCatalogView({
   }, [detail, isPhotoFavoritesOnly, photoGridSortCategory, photoGridSortDirection, photoSearch, selectedFavoritePhotoIds]);
 
   const viewerPhoto = useMemo(() => {
-    if (!viewerPhotoId || !detail) {
+    if (!viewerPhotoId) {
       return null;
     }
 
-    return detail.photos.find((photo) => photo.id === viewerPhotoId) ?? null;
-  }, [viewerPhotoId, detail]);
+    const detailPhoto = detail?.photos.find((photo) => photo.id === viewerPhotoId) ?? null;
+    if (detailPhoto) {
+      return detailPhoto;
+    }
 
-  const viewerOrderedPhotos = visiblePhotos.length > 0 ? visiblePhotos : detail?.photos ?? [];
+    return isFavoriteBrowserActive ? favoriteBrowseLoadedPhotoById.get(viewerPhotoId) ?? null : null;
+  }, [detail, favoriteBrowseLoadedPhotoById, isFavoriteBrowserActive, viewerPhotoId]);
+
+  useEffect(() => {
+    if (!viewerPhotoId || !viewerPhoto) {
+      return;
+    }
+
+    let cancelled = false;
+    fetchJson(`/api/photos/${encodeURIComponent(viewerPhoto.id)}/views`, { method: 'POST' }, onUnauthorized)
+      .then((payload) => {
+        const updatedPhoto = parsePhotoUpdatePayload(payload);
+        if (!updatedPhoto || cancelled) {
+          return;
+        }
+
+        setDetail((current) => {
+          if (!current || current.collection.id !== updatedPhoto.collectionId) {
+            return current;
+          }
+
+          return {
+            ...current,
+            photos: current.photos.map((photo) => (photo.id === updatedPhoto.id ? updatedPhoto : photo))
+          };
+        });
+
+        setFavoriteCollectionDetailsById((currentDetails) => {
+          const currentDetail = currentDetails[updatedPhoto.collectionId];
+          if (!currentDetail || !currentDetail.photos.some((photo) => photo.id === updatedPhoto.id)) {
+            return currentDetails;
+          }
+
+          return {
+            ...currentDetails,
+            [updatedPhoto.collectionId]: {
+              ...currentDetail,
+              photos: currentDetail.photos.map((photo) => (photo.id === updatedPhoto.id ? updatedPhoto : photo))
+            }
+          };
+        });
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [onUnauthorized, viewerPhoto?.id, viewerPhotoId]);
+
+  const viewerOrderedPhotos = isFavoriteBrowserActive
+    ? favoriteBrowsePhotos.length > 0
+      ? favoriteBrowsePhotos
+      : viewerPhoto
+        ? [viewerPhoto]
+        : []
+    : visiblePhotos.length > 0
+      ? visiblePhotos
+      : detail?.photos ?? [];
   const viewerOrderedPhotoIds = viewerOrderedPhotos.map((photo) => photo.id).join('|');
   const photoViewerSlideDurationLabel = `${formatPhotoViewerSlideDuration(photoViewerSlideshowDelayMs)} / slide`;
   const photoViewerSlideDurationDescription = describePhotoViewerSlideDuration(photoViewerSlideshowDelayMs);
@@ -1921,7 +2292,13 @@ export function PhotoCatalogView({
     });
   }, [attemptFullscreenOnOpen, viewerPhoto?.id]);
 
-  const isViewerPhotoFavorite = viewerPhoto !== null && selectedFavoritePhotoIds.has(viewerPhoto.id);
+  const isViewerPhotoFavorite = viewerPhoto !== null && isFavoritePhoto(viewerPhoto);
+  const viewerPhotoCollection = viewerPhoto
+    ? collections.find((collection) => collection.id === viewerPhoto.collectionId) ??
+      (detail?.collection.id === viewerPhoto.collectionId ? detail.collection : null)
+    : null;
+  const isCollectionThumbnailActionAvailable =
+    viewerPhoto !== null && detail !== null && detail.collection.id === viewerPhoto.collectionId;
   const photoGridSortDirectionLabel = photoGridSortDirection === 'asc' ? 'ascending' : 'descending';
   const emptyPhotoStateTitle = isPhotoFavoritesOnly ? 'No favorite photos' : 'No matching photos';
   const emptyPhotoStateMessage = isPhotoFavoritesOnly
@@ -2352,6 +2729,25 @@ export function PhotoCatalogView({
     handleTogglePhotoFavorite(viewerPhoto);
   };
 
+  function openFavoriteBrowser(tagId: string | null = null, options: { resetSearch?: boolean } = {}): void {
+    setFavoriteBrowseTagId(tagId);
+    setIsFavoriteBrowserOpen(true);
+    if (options.resetSearch === true) {
+      setPhotoSearch('');
+    }
+    setNotice(null);
+    setFavoriteBrowseError(null);
+    onClosePhotoViewer();
+  }
+
+  function closeFavoriteBrowser(): void {
+    setIsFavoriteBrowserOpen(false);
+    setFavoriteBrowseTagId(null);
+    setPhotoSearch('');
+    setFavoriteBrowseError(null);
+    onClosePhotoViewer();
+  }
+
   async function searchPhotoCollectionTags(query: string): Promise<PhotoCatalogTag[]> {
     try {
       const searchParameters = new URLSearchParams({
@@ -2467,6 +2863,15 @@ export function PhotoCatalogView({
         delete nextFavorites[collection.id];
         return nextFavorites;
       });
+      setFavoriteCollectionDetailsById((currentDetails) => {
+        if (!currentDetails[collection.id]) {
+          return currentDetails;
+        }
+
+        const nextDetails = { ...currentDetails };
+        delete nextDetails[collection.id];
+        return nextDetails;
+      });
       setDetail((currentDetail) => (currentDetail?.collection.id === collection.id ? null : currentDetail));
       onCollectionDeleted(collection.id);
       setInfoCollectionId((currentCollectionId) => (currentCollectionId === collection.id ? null : currentCollectionId));
@@ -2577,7 +2982,7 @@ export function PhotoCatalogView({
       return;
     }
 
-    if (isThumbnailKey) {
+    if (isThumbnailKey && isCollectionThumbnailActionAvailable) {
       event.preventDefault();
       if (!event.repeat) {
         void handleSetCollectionThumbnail();
@@ -2591,101 +2996,7 @@ export function PhotoCatalogView({
     }
   };
 
-  if (selectedCollectionId) {
-    const collection = detail?.collection ?? collections.find((candidate) => candidate.id === selectedCollectionId) ?? null;
-
-    return (
-      <section className="photo-catalog-view photo-collection-detail-view" aria-label="Photo collection detail">
-
-        <PhotoCatalogNotice notice={notice} />
-
-        {collection ? (
-          <div className="photo-detail-header">
-            <div className="photo-detail-summary">
-              <div className="photo-detail-title-line">
-                <h2 className="photo-detail-title" title={collection.name}>{collection.name}</h2>
-                <div className="photo-detail-inline-meta" aria-label="Collection metadata">
-                  <span>{pluralize(collection.photoCount, 'photo')}</span>
-                  <span className="photo-detail-meta-separator" aria-hidden="true">·</span>
-                  <span>{formatBytes(collection.totalSizeBytes)}</span>
-                  <span className="photo-detail-meta-separator" aria-hidden="true">·</span>
-                  <span>{pluralize(collection.viewCount, 'view')}</span>
-                </div>
-              </div>
-              {collection.description ? <p className="photo-detail-description">{collection.description}</p> : null}
-            </div>
-            <div className="photo-detail-action-cluster" aria-label="Photo grid controls">
-              <label className="photo-grid-sort-control" htmlFor="photo-grid-sort-category">
-                <span>Sort by</span>
-                <select
-                  id="photo-grid-sort-category"
-                  value={photoGridSortCategory}
-                  onChange={(event: ChangeEvent<HTMLSelectElement>) => {
-                    setPhotoGridSortCategory(event.target.value as PhotoGridSortCategory);
-                  }}
-                >
-                  {Object.entries(PHOTO_GRID_SORT_CATEGORY_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="button"
-                className="sort-direction-button photo-grid-sort-direction-button"
-                onClick={() => {
-                  setPhotoGridSortDirection((currentValue) => (currentValue === 'asc' ? 'desc' : 'asc'));
-                }}
-                aria-label={`Sort order: ${photoGridSortDirectionLabel}. Toggle sort direction.`}
-                title={`Sort ${photoGridSortDirectionLabel}`}
-              >
-                <span className="sort-direction-icon" aria-hidden="true">
-                  {photoGridSortDirection === 'asc' ? '↑' : '↓'}
-                </span>
-              </button>
-              <button
-                type="button"
-                className={`app-button secondary photo-grid-favorites-only-toggle${isPhotoFavoritesOnly ? ' is-active' : ''}`}
-                onClick={() => setIsPhotoFavoritesOnly((currentValue) => !currentValue)}
-                aria-pressed={isPhotoFavoritesOnly}
-                aria-label={isPhotoFavoritesOnly ? 'Show all photos' : 'Show favorite photos only'}
-                title={isPhotoFavoritesOnly ? 'Showing favorites only' : 'Show favorites only'}
-              >
-                ♥
-              </button>
-              <button type="button" className="app-button secondary photo-detail-return-button" onClick={onBackToCollections}>
-                Return to home
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-
-        {isDetailLoading ? <div className="photo-empty-state">Loading photo collection…</div> : null}
-
-        {detail && visiblePhotos.length === 0 ? (
-          <div className="photo-empty-state">
-            <h3>{emptyPhotoStateTitle}</h3>
-            <p>{emptyPhotoStateMessage}</p>
-          </div>
-        ) : null}
-
-        {visiblePhotos.length > 0 ? (
-          <div className="photo-grid">
-            {visiblePhotos.map((photo) => (
-              <PhotoGridCard
-                key={photo.id}
-                photo={photo}
-                isFavorite={selectedFavoritePhotoIds.has(photo.id)}
-                onOpen={onOpenPhoto}
-                onToggleFavorite={handleTogglePhotoFavorite}
-              />
-            ))}
-          </div>
-        ) : null}
-
-        {viewerPhoto ? (
+  const photoViewerOverlay = viewerPhoto ? (
           <div
             ref={viewerOverlayRef}
             className="photo-viewer-overlay"
@@ -2724,6 +3035,14 @@ export function PhotoCatalogView({
                     •
                   </span>
                   <span className="viewer-metadata-detail">{pluralize(viewerPhoto.viewCount, 'view')}</span>
+                  {viewerPhotoCollection && isFavoriteBrowserActive ? (
+                    <>
+                      <span className="viewer-metadata-separator" aria-hidden="true">
+                        •
+                      </span>
+                      <span className="viewer-metadata-detail">{viewerPhotoCollection.name}</span>
+                    </>
+                  ) : null}
                 </div>
               </div>
               <div className="viewer-toolbar-group photo-viewer-toolbar-actions">
@@ -2764,17 +3083,19 @@ export function PhotoCatalogView({
                   <span>{photoViewerFitMode === 'fit' ? 'Fill' : 'Fit'}</span>
                   <span className="viewer-shortcut-key" aria-hidden="true">F</span>
                 </button>
-                <button
-                  type="button"
-                  className="viewer-toolbar-button viewer-toolbar-button-text"
-                  onClick={() => void handleSetCollectionThumbnail()}
-                  disabled={isCollectionThumbnailBusy}
-                  aria-label="Set this photo as the collection thumbnail. Shortcut: T"
-                  title="Set this photo as the collection thumbnail. Shortcut: T"
-                >
-                  <span>Set thumbnail</span>
-                  <span className="viewer-shortcut-key" aria-hidden="true">T</span>
-                </button>
+                {isCollectionThumbnailActionAvailable ? (
+                  <button
+                    type="button"
+                    className="viewer-toolbar-button viewer-toolbar-button-text"
+                    onClick={() => void handleSetCollectionThumbnail()}
+                    disabled={isCollectionThumbnailBusy}
+                    aria-label="Set this photo as the collection thumbnail. Shortcut: T"
+                    title="Set this photo as the collection thumbnail. Shortcut: T"
+                  >
+                    <span>Set thumbnail</span>
+                    <span className="viewer-shortcut-key" aria-hidden="true">T</span>
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="viewer-toolbar-button viewer-toolbar-button-text viewer-toolbar-button-close"
@@ -2879,7 +3200,263 @@ export function PhotoCatalogView({
               ›
             </button>
           </div>
+  ) : null;
+
+  if (isFavoriteBrowserActive) {
+    const favoriteBrowserMeta = `${pluralize(favoriteBrowseKnownFavoriteCount, 'favorite photo')} across ${pluralize(
+      favoriteBrowseCollections.length,
+      'collection'
+    )}`;
+    const favoriteBrowserEmptyTitle =
+      favoriteBrowseKnownFavoriteCount === 0
+        ? favoriteBrowseTag
+          ? `No favorites tagged ${favoriteBrowseTag.label}`
+          : 'No favorite photos yet'
+        : photoSearch.trim() !== ''
+          ? 'No matching favorite photos'
+          : 'No favorite photos loaded';
+    const favoriteBrowserEmptyMessage =
+      favoriteBrowseKnownFavoriteCount === 0
+        ? favoriteBrowseTag
+          ? 'Favorite photos from collections with this tag will appear here.'
+          : 'Mark photos with the heart button inside any photo collection to build this view.'
+        : photoSearch.trim() !== ''
+          ? 'Try a different filename, collection, or tag search.'
+          : 'Favorite photos are still loading or could not be loaded.';
+    const isFavoriteBrowserEmpty = favoriteBrowseEntries.length === 0 && !isFavoriteBrowseLoading;
+
+    return (
+      <section className="photo-catalog-view photo-collection-detail-view photo-favorites-browser-view" aria-label="Photo favorites browser">
+        <PhotoCatalogNotice notice={notice} />
+        {favoriteBrowseError ? <PhotoCatalogNotice notice={{ tone: 'warning', text: favoriteBrowseError }} /> : null}
+
+        <div className="photo-favorites-browser-toolbar" aria-label="Photo favorites controls">
+          <div className="photo-favorites-filter-controls" aria-label="Filter favorite photos by collection tag">
+            <button
+              type="button"
+              className={`photo-favorite-tag-chip${favoriteBrowseTagId === null ? ' is-active' : ''}`}
+              onClick={() => openFavoriteBrowser(null)}
+              aria-pressed={favoriteBrowseTagId === null}
+              title="Show all favorite photos"
+            >
+              <span className="photo-favorite-tag-chip-label">All favorites</span>
+              <span className="photo-favorite-tag-chip-count">{photoFavoriteOverview.photoCount}</span>
+            </button>
+            {photoFavoriteOverview.tags.map((summary) => {
+              const isActiveTag = favoriteBrowseTagId === summary.tag.id;
+              return (
+                <button
+                  type="button"
+                  key={summary.tag.id}
+                  className={`photo-favorite-tag-chip${isActiveTag ? ' is-active' : ''}`}
+                  onClick={() => openFavoriteBrowser(isActiveTag ? null : summary.tag.id)}
+                  aria-pressed={isActiveTag}
+                  aria-label={
+                    isActiveTag
+                      ? `Clear ${summary.tag.label} favorite photo filter`
+                      : `Browse ${pluralize(summary.photoCount, 'favorite photo')} tagged ${summary.tag.label}`
+                  }
+                  title={
+                    isActiveTag
+                      ? `Clear ${summary.tag.label} filter`
+                      : `Browse ${pluralize(summary.photoCount, 'favorite photo')} tagged ${summary.tag.label}`
+                  }
+                >
+                  <span className="photo-favorite-tag-chip-label">{summary.tag.label}</span>
+                  {isActiveTag ? <span className="photo-favorite-tag-chip-clear" aria-hidden="true">×</span> : null}
+                  <span className="photo-favorite-tag-chip-count">{summary.photoCount}</span>
+                </button>
+              );
+            })}
+            {photoSearch.trim() !== '' ? (
+              <button
+                type="button"
+                className="photo-favorite-active-filter-chip"
+                onClick={() => setPhotoSearch('')}
+                title="Clear favorite search"
+              >
+                <span className="photo-favorite-active-filter-label">Search: "{photoSearch.trim()}"</span>
+                <span className="photo-favorite-active-filter-clear" aria-hidden="true">×</span>
+              </button>
+            ) : null}
+            <span className="photo-favorites-browser-count" aria-label="Favorite browser metadata">
+              {favoriteBrowserMeta}
+            </span>
+          </div>
+
+          <div className="photo-favorites-browser-controls">
+            <label className="photo-grid-search-control" htmlFor="photo-favorites-search">
+              <span>Search favorites</span>
+              <input
+                id="photo-favorites-search"
+                type="search"
+                value={photoSearch}
+                placeholder="Filename, collection, or tag"
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setPhotoSearch(event.target.value)}
+              />
+            </label>
+            <label className="photo-grid-sort-control" htmlFor="photo-favorites-sort-category">
+              <span>Sort by</span>
+              <select
+                id="photo-favorites-sort-category"
+                value={photoGridSortCategory}
+                onChange={(event: ChangeEvent<HTMLSelectElement>) => {
+                  setPhotoGridSortCategory(event.target.value as PhotoGridSortCategory);
+                }}
+              >
+                {Object.entries(PHOTO_GRID_SORT_CATEGORY_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="sort-direction-button photo-grid-sort-direction-button"
+              onClick={() => {
+                setPhotoGridSortDirection((currentValue) => (currentValue === 'asc' ? 'desc' : 'asc'));
+              }}
+              aria-label={`Sort order: ${photoGridSortDirectionLabel}. Toggle sort direction.`}
+              title={`Sort ${photoGridSortDirectionLabel}`}
+            >
+              <span className="sort-direction-icon" aria-hidden="true">
+                {photoGridSortDirection === 'asc' ? '↑' : '↓'}
+              </span>
+            </button>
+            <button type="button" className="app-button secondary photo-detail-return-button" onClick={closeFavoriteBrowser}>
+              Return to home
+            </button>
+          </div>
+        </div>
+
+        {isFavoriteBrowseLoading && favoriteBrowseEntries.length === 0 ? (
+          <div className="photo-empty-state">Loading favorite photos…</div>
         ) : null}
+
+        {isFavoriteBrowserEmpty ? (
+          <div className="photo-empty-state">
+            <h3>{favoriteBrowserEmptyTitle}</h3>
+            <p>{favoriteBrowserEmptyMessage}</p>
+          </div>
+        ) : null}
+
+        {favoriteBrowseEntries.length > 0 ? (
+          <div className="photo-grid">
+            {favoriteBrowseEntries.map(({ photo, collection }) => (
+              <PhotoGridCard
+                key={`${collection.id}:${photo.id}`}
+                photo={photo}
+                isFavorite={isFavoritePhoto(photo)}
+                onOpen={onOpenPhoto}
+                onToggleFavorite={handleTogglePhotoFavorite}
+                contextLabel={collection.name}
+              />
+            ))}
+          </div>
+        ) : null}
+
+        {photoViewerOverlay}
+      </section>
+    );
+  }
+
+  if (selectedCollectionId) {
+    const collection = detail?.collection ?? collections.find((candidate) => candidate.id === selectedCollectionId) ?? null;
+
+    return (
+      <section className="photo-catalog-view photo-collection-detail-view" aria-label="Photo collection detail">
+
+        <PhotoCatalogNotice notice={notice} />
+
+        {collection ? (
+          <div className="photo-detail-header">
+            <div className="photo-detail-summary">
+              <div className="photo-detail-title-line">
+                <h2 className="photo-detail-title" title={collection.name}>{collection.name}</h2>
+                <div className="photo-detail-inline-meta" aria-label="Collection metadata">
+                  <span>{pluralize(collection.photoCount, 'photo')}</span>
+                  <span className="photo-detail-meta-separator" aria-hidden="true">·</span>
+                  <span>{formatBytes(collection.totalSizeBytes)}</span>
+                  <span className="photo-detail-meta-separator" aria-hidden="true">·</span>
+                  <span>{pluralize(collection.viewCount, 'view')}</span>
+                </div>
+              </div>
+              {collection.description ? <p className="photo-detail-description">{collection.description}</p> : null}
+            </div>
+            <div className="photo-detail-action-cluster" aria-label="Photo grid controls">
+              <label className="photo-grid-sort-control" htmlFor="photo-grid-sort-category">
+                <span>Sort by</span>
+                <select
+                  id="photo-grid-sort-category"
+                  value={photoGridSortCategory}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) => {
+                    setPhotoGridSortCategory(event.target.value as PhotoGridSortCategory);
+                  }}
+                >
+                  {Object.entries(PHOTO_GRID_SORT_CATEGORY_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="sort-direction-button photo-grid-sort-direction-button"
+                onClick={() => {
+                  setPhotoGridSortDirection((currentValue) => (currentValue === 'asc' ? 'desc' : 'asc'));
+                }}
+                aria-label={`Sort order: ${photoGridSortDirectionLabel}. Toggle sort direction.`}
+                title={`Sort ${photoGridSortDirectionLabel}`}
+              >
+                <span className="sort-direction-icon" aria-hidden="true">
+                  {photoGridSortDirection === 'asc' ? '↑' : '↓'}
+                </span>
+              </button>
+              <button
+                type="button"
+                className={`app-button secondary photo-grid-favorites-only-toggle${isPhotoFavoritesOnly ? ' is-active' : ''}`}
+                onClick={() => setIsPhotoFavoritesOnly((currentValue) => !currentValue)}
+                aria-pressed={isPhotoFavoritesOnly}
+                aria-label={isPhotoFavoritesOnly ? 'Show all photos' : 'Show favorite photos only'}
+                title={isPhotoFavoritesOnly ? 'Showing favorites only' : 'Show favorites only'}
+              >
+                ♥
+              </button>
+              <button type="button" className="app-button secondary photo-detail-return-button" onClick={onBackToCollections}>
+                Return to home
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+
+        {isDetailLoading ? <div className="photo-empty-state">Loading photo collection…</div> : null}
+
+        {detail && visiblePhotos.length === 0 ? (
+          <div className="photo-empty-state">
+            <h3>{emptyPhotoStateTitle}</h3>
+            <p>{emptyPhotoStateMessage}</p>
+          </div>
+        ) : null}
+
+        {visiblePhotos.length > 0 ? (
+          <div className="photo-grid">
+            {visiblePhotos.map((photo) => (
+              <PhotoGridCard
+                key={photo.id}
+                photo={photo}
+                isFavorite={selectedFavoritePhotoIds.has(photo.id)}
+                onOpen={onOpenPhoto}
+                onToggleFavorite={handleTogglePhotoFavorite}
+              />
+            ))}
+          </div>
+        ) : null}
+
+        {photoViewerOverlay}
+
       </section>
     );
   }

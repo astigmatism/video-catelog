@@ -8452,6 +8452,7 @@ export default function App(): JSX.Element {
   const [photoCollections, setPhotoCollections] = useState<PhotoCollection[]>([]);
   const [selectedPhotoCollectionId, setSelectedPhotoCollectionId] = useState<string | null>(null);
   const [photoViewerPhotoId, setPhotoViewerPhotoId] = useState<string | null>(null);
+  const [photoFavoritesBrowseRequestId, setPhotoFavoritesBrowseRequestId] = useState(0);
   const [homeStrips, setHomeStrips] = useState<CatalogHomeStrip[]>([]);
   const [homeStripRandomSeed, setHomeStripRandomSeed] = useState(() => createCatalogRandomSeed());
   const [draggedHomeStripId, setDraggedHomeStripId] = useState<string | null>(null);
@@ -8905,6 +8906,15 @@ export default function App(): JSX.Element {
   function clearPhotoCollectionFilters(): void {
     setPhotoCollectionFilters(getDefaultPhotoCollectionFilters());
     setPhotoTagFilterSuggestions([]);
+  }
+
+  function requestBrowseAllPhotoFavorites(): void {
+    setSelectedPhotoCollectionId(null);
+    setPhotoViewerPhotoId(null);
+    setPhotoFavoritesBrowseRequestId((currentValue) => currentValue + 1);
+    if (isMobileCatalogLayout) {
+      setIsFilterDrawerOpen(false);
+    }
   }
 
   function openPhotoTagPickerModal(): void {
@@ -12244,6 +12254,23 @@ export default function App(): JSX.Element {
           </div>
         </div>
 
+        <div className="photo-sidebar-favorites-entry">
+          <button
+            type="button"
+            className="app-button secondary photo-sidebar-favorites-button"
+            disabled={!isFilterDrawerOpen || photoCollections.length === 0}
+            onClick={requestBrowseAllPhotoFavorites}
+            title={
+              photoCollections.length === 0
+                ? 'Import photos before browsing favorites.'
+                : 'Browse favorite photos across all photo collections.'
+            }
+          >
+            <span aria-hidden="true">♥</span>
+            Browse all favorites
+          </button>
+        </div>
+
         <section className="tag-filter-section" aria-labelledby="photo-tag-filter-heading">
           <div className="filter-section-heading">
             <label className="field-label" id="photo-tag-filter-heading" htmlFor="photo-tag-filter-search">
@@ -12428,6 +12455,7 @@ export default function App(): JSX.Element {
         viewerPhotoId={photoViewerPhotoId}
         isActive={catalogMode === 'photos'}
         attemptFullscreenOnOpen={attemptFullscreenOnOpen}
+        photoFavoritesBrowseRequestId={photoFavoritesBrowseRequestId}
         onSelectCollection={(collectionId) => {
           setSelectedPhotoCollectionId(collectionId);
           setPhotoViewerPhotoId(null);
