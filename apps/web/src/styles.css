@@ -4950,6 +4950,7 @@ label {
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.06);
   box-shadow: 0 16px 50px rgba(0, 0, 0, 0.18);
+  min-width: 291px;
   transition:
     transform 160ms ease,
     border-color 160ms ease,
