@@ -359,6 +359,7 @@ CREATE TABLE IF NOT EXISTS photos (
   sort_order integer NOT NULL DEFAULT 0,
   view_count bigint NOT NULL DEFAULT 0 CHECK (view_count >= 0),
   last_viewed_at timestamptz,
+  is_favorite boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT photos_original_name_not_blank CHECK (btrim(original_name) <> ''),
@@ -402,12 +403,26 @@ ALTER TABLE photos
 ALTER TABLE photos
   ADD COLUMN IF NOT EXISTS last_viewed_at timestamptz;
 
+ALTER TABLE photos
+  ADD COLUMN IF NOT EXISTS is_favorite boolean NOT NULL DEFAULT false;
+
+UPDATE photos
+SET is_favorite = false
+WHERE is_favorite IS NULL;
+
+ALTER TABLE photos
+  ALTER COLUMN is_favorite SET DEFAULT false,
+  ALTER COLUMN is_favorite SET NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_photos_collection_sort
   ON photos (collection_id, sort_order ASC, original_name ASC, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_photos_collection_created_at
   ON photos (collection_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_photos_checksum_sha256
   ON photos (checksum_sha256);
+CREATE INDEX IF NOT EXISTS idx_photos_collection_favorites
+  ON photos (collection_id, sort_order ASC, created_at ASC)
+  WHERE is_favorite = true;
 
 DO $$
 BEGIN

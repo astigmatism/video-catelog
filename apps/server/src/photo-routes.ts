@@ -260,6 +260,10 @@ function readOptionalString(value: unknown): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
+function readRequiredBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
 function readPositiveInteger(value: unknown, fallback: number, max: number): number {
   const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -2363,6 +2367,33 @@ export function registerPhotoRoutes(app: FastifyInstance, options: PhotoRoutesOp
         message: getPhotoUploadErrorMessage(error, 'Photo import failed.')
       });
     }
+  });
+
+  app.put('/api/photos/:id/favorite', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!getAuthenticatedSessionId(request, reply, options)) {
+      return;
+    }
+
+    const photoId = getRequestParam(request, 'id');
+    if (!photoId) {
+      sendNotFound(reply, 'Photo not found.');
+      return;
+    }
+
+    const body = readBodyRecord(request);
+    const isFavorite = readRequiredBoolean(body.isFavorite);
+    if (isFavorite === null) {
+      reply.code(400).send({ message: 'Favorite state is required.' });
+      return;
+    }
+
+    const updated = await photoStore.setPhotoFavorite(photoId, isFavorite);
+    if (!updated) {
+      sendNotFound(reply, 'Photo not found.');
+      return;
+    }
+
+    reply.send(updated);
   });
 
   app.post('/api/photos/:id/views', async (request: FastifyRequest, reply: FastifyReply) => {

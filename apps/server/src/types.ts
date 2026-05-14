@@ -120,6 +120,7 @@ export type Photo = {
   sortOrder: number;
   viewCount: number;
   lastViewedAt: string | null;
+  isFavorite: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -132,6 +133,7 @@ export type PhotoCollection = {
   coverPhotoId: string | null;
   coverPhoto: Photo | null;
   photoCount: number;
+  favoritePhotoIds: string[];
   totalSizeBytes: number;
   viewCount: number;
   lastViewedAt: string | null;

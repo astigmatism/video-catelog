@@ -42,6 +42,7 @@ export type Photo = {
   sortOrder: number;
   viewCount: number;
   lastViewedAt: string | null;
+  isFavorite: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -54,6 +55,7 @@ export type PhotoCollection = {
   coverPhotoId: string | null;
   coverPhoto: Photo | null;
   photoCount: number;
+  favoritePhotoIds: string[];
   totalSizeBytes: number;
   viewCount: number;
   lastViewedAt: string | null;
@@ -161,6 +163,10 @@ function readNumber(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function readBoolean(value: unknown, fallback = false): boolean {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
 function readNullablePositiveNumber(value: unknown): number | null {
   const parsed = readNumber(value, Number.NaN);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
@@ -242,6 +248,7 @@ export function hydratePhoto(value: unknown): Photo | null {
     sortOrder: Math.max(0, Math.floor(readNumber(value.sortOrder))),
     viewCount: Math.max(0, Math.floor(readNumber(value.viewCount))),
     lastViewedAt: readNullableIsoString(value.lastViewedAt),
+    isFavorite: readBoolean(value.isFavorite),
     createdAt,
     updatedAt: readIsoString(value.updatedAt, createdAt)
   };
@@ -261,6 +268,7 @@ export function hydratePhotoCollection(value: unknown): PhotoCollection | null {
   const createdAt = readIsoString(value.createdAt);
   const coverPhoto = hydratePhoto(value.coverPhoto);
   const rawTags = Array.isArray(value.tags) ? value.tags : [];
+  const rawFavoritePhotoIds = Array.isArray(value.favoritePhotoIds) ? value.favoritePhotoIds : [];
 
   return {
     id,
@@ -270,6 +278,11 @@ export function hydratePhotoCollection(value: unknown): PhotoCollection | null {
     coverPhotoId: readNullableString(value.coverPhotoId),
     coverPhoto,
     photoCount: Math.max(0, Math.floor(readNumber(value.photoCount))),
+    favoritePhotoIds: uniqueStrings(
+      rawFavoritePhotoIds
+        .filter((photoId): photoId is string => typeof photoId === 'string')
+        .map((photoId) => photoId.trim())
+    ),
     totalSizeBytes: Math.max(0, Math.floor(readNumber(value.totalSizeBytes))),
     viewCount: Math.max(0, Math.floor(readNumber(value.viewCount))),
     lastViewedAt: readNullableIsoString(value.lastViewedAt),
@@ -320,6 +333,27 @@ function parsePhotoUpdatePayload(payload: unknown): Photo | null {
   }
 
   return hydratePhoto(payload.photo);
+}
+
+type PhotoFavoriteUpdatePayload = {
+  photo: Photo;
+  collection: PhotoCollection | null;
+};
+
+function parsePhotoFavoriteUpdatePayload(payload: unknown): PhotoFavoriteUpdatePayload | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  const photo = hydratePhoto(payload.photo);
+  if (!photo) {
+    return null;
+  }
+
+  return {
+    photo,
+    collection: hydratePhotoCollection(payload.collection)
+  };
 }
 
 export function parsePhotoCatalogTagsPayload(payload: unknown): PhotoCatalogTag[] {
@@ -484,7 +518,6 @@ function doesFavoritePhotoEntryMatchSearch(entry: FavoritePhotoEntry, normalized
 const PHOTO_VIEWER_CONTROLS_AUTO_HIDE_DELAY_MS = 2000;
 const PHOTO_VIEWER_DEFAULT_SLIDESHOW_DELAY_MS = 5000;
 const PHOTO_VIEWER_SLIDESHOW_DELAY_OPTIONS_SECONDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-const PHOTO_COLLECTION_FAVORITES_STORAGE_KEY = 'photoCatalog.collectionFavorites.v1';
 const PHOTO_VIEWER_MIN_ZOOM = 1;
 const PHOTO_VIEWER_MAX_ZOOM = 4;
 const PHOTO_VIEWER_WHEEL_ZOOM_FACTOR = 1.12;
@@ -577,66 +610,72 @@ function isKeyboardEventFromInteractiveElement(target: EventTarget | null): bool
   );
 }
 
-function getPhotoFavoritesStorage(): Storage | null {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
-function readStoredPhotoFavorites(): PhotoFavoriteState {
-  const storage = getPhotoFavoritesStorage();
-  if (!storage) {
-    return {};
-  }
-
-  try {
-    const rawValue = storage.getItem(PHOTO_COLLECTION_FAVORITES_STORAGE_KEY);
-    if (!rawValue) {
-      return {};
+function createPhotoFavoriteStateFromCollections(collections: PhotoCollection[]): PhotoFavoriteState {
+  return collections.reduce<PhotoFavoriteState>((result, collection) => {
+    const favoritePhotoIds = uniqueStrings(collection.favoritePhotoIds.map((photoId) => photoId.trim()));
+    if (favoritePhotoIds.length > 0) {
+      result[collection.id] = favoritePhotoIds;
     }
 
-    const parsedValue: unknown = JSON.parse(rawValue);
-    if (!isRecord(parsedValue)) {
-      return {};
-    }
-
-    return Object.entries(parsedValue).reduce<PhotoFavoriteState>((result, [collectionId, photoIds]) => {
-      if (collectionId.trim() === '' || !Array.isArray(photoIds)) {
-        return result;
-      }
-
-      const normalizedPhotoIds = uniqueStrings(
-        photoIds.filter((photoId): photoId is string => typeof photoId === 'string' && photoId.trim() !== '')
-      );
-
-      if (normalizedPhotoIds.length > 0) {
-        result[collectionId] = normalizedPhotoIds;
-      }
-
-      return result;
-    }, {});
-  } catch {
-    return {};
-  }
+    return result;
+  }, {});
 }
 
-function writeStoredPhotoFavorites(favorites: PhotoFavoriteState): void {
-  const storage = getPhotoFavoritesStorage();
-  if (!storage) {
-    return;
+function setFavoritePhotoIdsForCollection(
+  favorites: PhotoFavoriteState,
+  collectionId: string,
+  photoIds: string[]
+): PhotoFavoriteState {
+  const normalizedPhotoIds = uniqueStrings(photoIds.map((photoId) => photoId.trim()).filter(Boolean));
+  const nextFavorites = { ...favorites };
+
+  if (normalizedPhotoIds.length > 0) {
+    nextFavorites[collectionId] = normalizedPhotoIds;
+  } else {
+    delete nextFavorites[collectionId];
   }
 
-  try {
-    storage.setItem(PHOTO_COLLECTION_FAVORITES_STORAGE_KEY, JSON.stringify(favorites));
-  } catch {
-    // Favorite persistence is a best-effort client-side enhancement.
+  return nextFavorites;
+}
+
+function setPhotoFavoriteInState(favorites: PhotoFavoriteState, photo: Photo): PhotoFavoriteState {
+  const currentPhotoIds = new Set(favorites[photo.collectionId] ?? []);
+  if (photo.isFavorite) {
+    currentPhotoIds.add(photo.id);
+  } else {
+    currentPhotoIds.delete(photo.id);
   }
+
+  return setFavoritePhotoIdsForCollection(favorites, photo.collectionId, Array.from(currentPhotoIds));
+}
+
+function updateCollectionFavoritePhotoIds(collection: PhotoCollection, photo: Photo): PhotoCollection {
+  if (collection.id !== photo.collectionId) {
+    return collection;
+  }
+
+  const currentPhotoIds = new Set(collection.favoritePhotoIds);
+  if (photo.isFavorite) {
+    currentPhotoIds.add(photo.id);
+  } else {
+    currentPhotoIds.delete(photo.id);
+  }
+
+  return {
+    ...collection,
+    favoritePhotoIds: uniqueStrings(Array.from(currentPhotoIds))
+  };
+}
+
+function updatePhotoInCollectionDetail(detail: PhotoCollectionDetailPayload, updatedPhoto: Photo): PhotoCollectionDetailPayload {
+  if (detail.collection.id !== updatedPhoto.collectionId) {
+    return detail;
+  }
+
+  return {
+    collection: updateCollectionFavoritePhotoIds(detail.collection, updatedPhoto),
+    photos: detail.photos.map((photo) => (photo.id === updatedPhoto.id ? updatedPhoto : photo))
+  };
 }
 
 function normalizePhotoViewerDimension(value: number | null | undefined): number | null {
@@ -1757,7 +1796,7 @@ export function PhotoCatalogView({
   const [photoGridSortDirection, setPhotoGridSortDirection] = useState<PhotoGridSortDirection>('asc');
   const [isPhotoFavoritesOnly, setIsPhotoFavoritesOnly] = useState(false);
   const [favoritePhotoIdsByCollection, setFavoritePhotoIdsByCollection] = useState<PhotoFavoriteState>(() =>
-    readStoredPhotoFavorites()
+    createPhotoFavoriteStateFromCollections(collections)
   );
   const [isFavoriteBrowserOpen, setIsFavoriteBrowserOpen] = useState(false);
   const [favoriteBrowseTagId, setFavoriteBrowseTagId] = useState<string | null>(null);
@@ -1800,8 +1839,8 @@ export function PhotoCatalogView({
   const [infoCollectionId, setInfoCollectionId] = useState<string | null>(null);
 
   useEffect(() => {
-    writeStoredPhotoFavorites(favoritePhotoIdsByCollection);
-  }, [favoritePhotoIdsByCollection]);
+    setFavoritePhotoIdsByCollection(createPhotoFavoriteStateFromCollections(collections));
+  }, [collections]);
 
   useEffect(() => {
     if (selectedCollectionId) {
@@ -1847,6 +1886,15 @@ export function PhotoCatalogView({
 
         if (!cancelled) {
           setDetail(nextDetail);
+          setFavoritePhotoIdsByCollection((currentFavorites) =>
+            setFavoritePhotoIdsForCollection(
+              currentFavorites,
+              nextDetail.collection.id,
+              nextDetail.collection.favoritePhotoIds.length > 0
+                ? nextDetail.collection.favoritePhotoIds
+                : nextDetail.photos.filter((photo) => photo.isFavorite).map((photo) => photo.id)
+            )
+          );
           onCollectionUpdated(nextDetail.collection);
         }
       })
@@ -2699,25 +2747,68 @@ export function PhotoCatalogView({
     setIsPhotoViewerPanning(false);
   }
 
-  const handleTogglePhotoFavorite = (photo: Photo): void => {
-    setFavoritePhotoIdsByCollection((currentFavorites) => {
-      const currentPhotoIds = new Set(currentFavorites[photo.collectionId] ?? []);
-      if (currentPhotoIds.has(photo.id)) {
-        currentPhotoIds.delete(photo.id);
-      } else {
-        currentPhotoIds.add(photo.id);
+  function applyPhotoFavoriteUpdate(updatedPhoto: Photo, updatedCollection: PhotoCollection | null = null): void {
+    setFavoritePhotoIdsByCollection((currentFavorites) => setPhotoFavoriteInState(currentFavorites, updatedPhoto));
+
+    setDetail((currentDetail) => {
+      if (!currentDetail || currentDetail.collection.id !== updatedPhoto.collectionId) {
+        return currentDetail;
       }
 
-      const nextFavorites = { ...currentFavorites };
-      const nextPhotoIds = Array.from(currentPhotoIds);
-      if (nextPhotoIds.length > 0) {
-        nextFavorites[photo.collectionId] = nextPhotoIds;
-      } else {
-        delete nextFavorites[photo.collectionId];
-      }
-
-      return nextFavorites;
+      const updatedDetail = updatePhotoInCollectionDetail(currentDetail, updatedPhoto);
+      return updatedCollection && updatedCollection.id === updatedDetail.collection.id
+        ? { ...updatedDetail, collection: updatedCollection }
+        : updatedDetail;
     });
+
+    setFavoriteCollectionDetailsById((currentDetails) => {
+      const currentDetail = currentDetails[updatedPhoto.collectionId];
+      if (!currentDetail) {
+        return currentDetails;
+      }
+
+      const updatedDetail = updatePhotoInCollectionDetail(currentDetail, updatedPhoto);
+      return {
+        ...currentDetails,
+        [updatedPhoto.collectionId]: updatedCollection && updatedCollection.id === updatedPhoto.collectionId
+          ? { ...updatedDetail, collection: updatedCollection }
+          : updatedDetail
+      };
+    });
+
+    if (updatedCollection) {
+      onCollectionUpdated(updatedCollection);
+    }
+  }
+
+  const handleTogglePhotoFavorite = (photo: Photo): void => {
+    const wasFavorite = isFavoritePhoto(photo);
+    const nextFavoritePhoto = { ...photo, isFavorite: !wasFavorite };
+
+    setNotice(null);
+    applyPhotoFavoriteUpdate(nextFavoritePhoto);
+
+    void fetchJson(
+      `/api/photos/${encodeURIComponent(photo.id)}/favorite`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isFavorite: nextFavoritePhoto.isFavorite })
+      },
+      onUnauthorized
+    )
+      .then((payload) => {
+        const parsedPayload = parsePhotoFavoriteUpdatePayload(payload);
+        if (!parsedPayload) {
+          throw new Error('The photo favorite response was invalid.');
+        }
+
+        applyPhotoFavoriteUpdate(parsedPayload.photo, parsedPayload.collection);
+      })
+      .catch((error: unknown) => {
+        applyPhotoFavoriteUpdate({ ...photo, isFavorite: wasFavorite });
+        setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'Favorite could not be saved.' });
+      });
   };
 
   const handleToggleViewerPhotoFavorite = (): void => {

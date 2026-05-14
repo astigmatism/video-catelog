@@ -80,6 +80,7 @@ type PhotoRow = {
   sort_order: number | string;
   view_count: number | string;
   last_viewed_at: Date | string | null;
+  is_favorite: boolean | string;
   created_at: Date | string;
   updated_at: Date | string;
 };
@@ -100,6 +101,11 @@ type PhotoCollectionTagHydrationRow = CatalogTagRow & {
 type DeletePhotoCollectionResult = {
   collection: PhotoCollection;
   photos: Photo[];
+};
+
+export type PhotoFavoriteUpdateResult = {
+  photo: Photo;
+  collection: PhotoCollection;
 };
 
 const PHOTO_COLLECTION_NAME_MAX_LENGTH = 160;
@@ -139,6 +145,10 @@ function readIsoString(value: unknown): string | null {
 
 function normalizeNullableTimestamp(value: unknown): string | null {
   return value === null || value === undefined ? null : readIsoString(value);
+}
+
+function normalizeBoolean(value: unknown): boolean {
+  return value === true || value === 'true';
 }
 
 function normalizeNonNegativeInteger(value: unknown): number {
@@ -243,6 +253,7 @@ function hydratePhotoFromRow(row: PhotoRow): Photo {
     sortOrder: normalizeNonNegativeInteger(row.sort_order),
     viewCount: normalizeNonNegativeInteger(row.view_count),
     lastViewedAt: normalizeNullableTimestamp(row.last_viewed_at),
+    isFavorite: normalizeBoolean(row.is_favorite),
     createdAt,
     updatedAt
   };
@@ -256,6 +267,7 @@ function clonePhotoCollection(collection: PhotoCollection): PhotoCollection {
   return {
     ...collection,
     coverPhoto: collection.coverPhoto ? clonePhoto(collection.coverPhoto) : null,
+    favoritePhotoIds: [...collection.favoritePhotoIds],
     tags: collection.tags.map((tag) => ({ ...tag }))
   };
 }
@@ -285,6 +297,7 @@ function createPhotoFromInput(collectionId: string, input: AddPhotoInput, sortOr
     sortOrder,
     viewCount: 0,
     lastViewedAt: null,
+    isFavorite: false,
     createdAt: now,
     updatedAt: now
   };
@@ -302,6 +315,7 @@ function createCollectionFromInput(input: CreatePhotoCollectionInput): PhotoColl
     coverPhotoId: null,
     coverPhoto: null,
     photoCount: 0,
+    favoritePhotoIds: [],
     totalSizeBytes: 0,
     viewCount: 0,
     lastViewedAt: null,
@@ -323,6 +337,7 @@ function hydratePhotoCollectionFromRow(row: PhotoCollectionRow): PhotoCollection
     coverPhotoId: row.cover_photo_id,
     coverPhoto: null,
     photoCount: 0,
+    favoritePhotoIds: [],
     totalSizeBytes: 0,
     viewCount: normalizeNonNegativeInteger(row.view_count),
     lastViewedAt: normalizeNullableTimestamp(row.last_viewed_at),
@@ -591,6 +606,53 @@ export class PhotoCatalogStore {
       this.photoById.set(photoId, updatedPhoto);
       this.refreshCollectionSummaryInCache(currentPhoto.collectionId);
       return clonePhoto(updatedPhoto);
+    });
+  }
+
+  async setPhotoFavorite(photoId: string, isFavorite: boolean): Promise<PhotoFavoriteUpdateResult | undefined> {
+    this.assertInitialized();
+
+    return this.enqueueWrite(this.getPhotoWriteKey(photoId), async () => {
+      const currentPhoto = this.photoById.get(photoId);
+      if (!currentPhoto) {
+        return undefined;
+      }
+
+      if (currentPhoto.isFavorite === isFavorite) {
+        const currentCollection = this.collectionById.get(currentPhoto.collectionId);
+        return currentCollection
+          ? {
+              photo: clonePhoto(currentPhoto),
+              collection: clonePhotoCollection(currentCollection)
+            }
+          : undefined;
+      }
+
+      const updatedPhoto = {
+        ...currentPhoto,
+        isFavorite,
+        updatedAt: new Date().toISOString()
+      };
+      const persistedPhoto = await this.updatePhotoFavoriteRow(this.options.pool, updatedPhoto);
+      if (!persistedPhoto) {
+        this.photoById.delete(photoId);
+        this.photoIdsByCollectionId.set(
+          currentPhoto.collectionId,
+          (this.photoIdsByCollectionId.get(currentPhoto.collectionId) ?? []).filter((id) => id !== photoId)
+        );
+        this.refreshCollectionSummaryInCache(currentPhoto.collectionId);
+        return undefined;
+      }
+
+      this.photoById.set(photoId, persistedPhoto);
+      this.refreshCollectionSummaryInCache(persistedPhoto.collectionId);
+      const updatedCollection = this.collectionById.get(persistedPhoto.collectionId);
+      return updatedCollection
+        ? {
+            photo: clonePhoto(persistedPhoto),
+            collection: clonePhotoCollection(updatedCollection)
+          }
+        : undefined;
     });
   }
 
@@ -923,6 +985,7 @@ export class PhotoCatalogStore {
             sort_order,
             view_count,
             last_viewed_at,
+            is_favorite,
             created_at,
             updated_at
           FROM photos
@@ -1013,6 +1076,7 @@ export class PhotoCatalogStore {
       coverPhotoId: coverPhoto?.id ?? collection.coverPhotoId ?? null,
       coverPhoto: coverPhoto ? clonePhoto(coverPhoto) : null,
       photoCount: photos.length,
+      favoritePhotoIds: photos.filter((photo) => photo.isFavorite).map((photo) => photo.id),
       totalSizeBytes: photos.reduce((total, photo) => total + photo.sizeBytes, 0),
       tags: normalizeCatalogTags(collection.tags)
     };
@@ -1277,6 +1341,7 @@ export class PhotoCatalogStore {
           sort_order,
           view_count,
           last_viewed_at,
+          is_favorite,
           created_at,
           updated_at
         )
@@ -1299,8 +1364,9 @@ export class PhotoCatalogStore {
           $16,
           $17,
           $18::timestamptz,
-          $19::timestamptz,
-          $20::timestamptz
+          $19,
+          $20::timestamptz,
+          $21::timestamptz
         )
       `,
       [
@@ -1322,6 +1388,7 @@ export class PhotoCatalogStore {
         photo.sortOrder,
         photo.viewCount,
         photo.lastViewedAt,
+        photo.isFavorite,
         photo.createdAt,
         photo.updatedAt
       ]
@@ -1358,6 +1425,7 @@ export class PhotoCatalogStore {
           sort_order,
           view_count,
           last_viewed_at,
+          is_favorite,
           created_at,
           updated_at
       `,
@@ -1370,6 +1438,42 @@ export class PhotoCatalogStore {
         photo.thumbnailHeight,
         photo.updatedAt
       ]
+    );
+
+    return result.rows[0] ? hydratePhotoFromRow(result.rows[0]) : undefined;
+  }
+
+  private async updatePhotoFavoriteRow(queryable: Queryable, photo: Photo): Promise<Photo | undefined> {
+    const result = await queryable.query<PhotoRow>(
+      `
+        UPDATE photos
+        SET is_favorite = $2,
+            updated_at = $3::timestamptz
+        WHERE id = $1
+        RETURNING
+          id,
+          collection_id,
+          original_name,
+          stored_name,
+          relative_path,
+          mime_type,
+          size_bytes,
+          checksum_sha256,
+          width,
+          height,
+          thumbnail_relative_path,
+          thumbnail_mime_type,
+          thumbnail_size_bytes,
+          thumbnail_width,
+          thumbnail_height,
+          sort_order,
+          view_count,
+          last_viewed_at,
+          is_favorite,
+          created_at,
+          updated_at
+      `,
+      [photo.id, photo.isFavorite, photo.updatedAt]
     );
 
     return result.rows[0] ? hydratePhotoFromRow(result.rows[0]) : undefined;
