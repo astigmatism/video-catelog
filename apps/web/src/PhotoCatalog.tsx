@@ -521,6 +521,10 @@ const PHOTO_VIEWER_SLIDESHOW_DELAY_OPTIONS_SECONDS = [1, 2, 3, 4, 5, 6, 7, 8, 9,
 const PHOTO_VIEWER_MIN_ZOOM = 1;
 const PHOTO_VIEWER_MAX_ZOOM = 4;
 const PHOTO_VIEWER_WHEEL_ZOOM_FACTOR = 1.12;
+const PHOTO_VIEWER_KEYBOARD_ZOOM_FACTOR = PHOTO_VIEWER_WHEEL_ZOOM_FACTOR;
+const PHOTO_VIEWER_KEYBOARD_PAN_STEP_FRACTION = 0.08;
+const PHOTO_VIEWER_KEYBOARD_PAN_STEP_MIN_PX = 24;
+const PHOTO_VIEWER_KEYBOARD_PAN_STEP_MAX_PX = 96;
 const PHOTO_VIEWER_MIN_WHEEL_ZOOM_STEPS = 0.5;
 const PHOTO_VIEWER_MAX_WHEEL_ZOOM_STEPS = 3;
 
@@ -705,6 +709,24 @@ function getPhotoViewerWheelZoom(currentZoom: number, deltaY: number, deltaMode:
   const direction = deltaY < 0 ? 1 : -1;
 
   return clampPhotoViewerZoom(currentZoom * Math.pow(PHOTO_VIEWER_WHEEL_ZOOM_FACTOR, direction * stepCount));
+}
+
+function getPhotoViewerKeyboardZoom(currentZoom: number, direction: 1 | -1): number {
+  return clampPhotoViewerZoom(currentZoom * Math.pow(PHOTO_VIEWER_KEYBOARD_ZOOM_FACTOR, direction));
+}
+
+function getPhotoViewerKeyboardPanStep(stageAxisSize: number): number {
+  if (!Number.isFinite(stageAxisSize) || stageAxisSize <= 0) {
+    return PHOTO_VIEWER_KEYBOARD_PAN_STEP_MIN_PX;
+  }
+
+  return Math.max(
+    PHOTO_VIEWER_KEYBOARD_PAN_STEP_MIN_PX,
+    Math.min(
+      PHOTO_VIEWER_KEYBOARD_PAN_STEP_MAX_PX,
+      Number((stageAxisSize * PHOTO_VIEWER_KEYBOARD_PAN_STEP_FRACTION).toFixed(2))
+    )
+  );
 }
 
 function calculatePhotoViewerRenderedSize(
@@ -2285,6 +2307,15 @@ export function PhotoCatalogView({
   const viewerOrderedPhotoIds = viewerOrderedPhotos.map((photo) => photo.id).join('|');
   const photoViewerSlideDurationLabel = `${formatPhotoViewerSlideDuration(photoViewerSlideshowDelayMs)} / slide`;
   const photoViewerSlideDurationDescription = describePhotoViewerSlideDuration(photoViewerSlideshowDelayMs);
+  const photoViewerCurrentIndex = viewerPhoto
+    ? viewerOrderedPhotos.findIndex((photo) => photo.id === viewerPhoto.id)
+    : -1;
+  const photoViewerPositionLabel = viewerPhoto
+    ? `${photoViewerCurrentIndex >= 0 ? photoViewerCurrentIndex + 1 : 1} of ${Math.max(
+        viewerOrderedPhotos.length,
+        1
+      )}`
+    : '';
   const canPhotoViewerSlideshowAdvance = viewerOrderedPhotos.length > 1;
 
   useEffect(() => {
@@ -2566,6 +2597,61 @@ export function PhotoCatalogView({
   function showNextViewerPhoto(): void {
     notePhotoViewerActivity();
     openViewerPhotoAtOffset(1);
+  }
+
+  function zoomPhotoViewerByKeyboard(direction: 1 | -1): void {
+    setPhotoViewerZoom((currentZoom) => {
+      const nextZoom = getPhotoViewerKeyboardZoom(currentZoom, direction);
+
+      if (nextZoom === currentZoom) {
+        return currentZoom;
+      }
+
+      setPhotoViewerPan((currentPan) => {
+        const zoomRatio = currentZoom > 0 ? nextZoom / currentZoom : 1;
+        const nextRenderedSize = calculatePhotoViewerRenderedSize(
+          photoViewerIntrinsicSize,
+          photoViewerStageSize,
+          photoViewerFitMode,
+          nextZoom
+        );
+        const nextPanLimit = calculatePhotoViewerPanLimit(nextRenderedSize, photoViewerStageSize);
+        const scaledPan = {
+          x: currentPan.x * zoomRatio,
+          y: currentPan.y * zoomRatio
+        };
+
+        return clampPhotoViewerPan(scaledPan, nextPanLimit);
+      });
+
+      return nextZoom;
+    });
+  }
+
+  function panPhotoViewerByKeyboard(deltaX: number, deltaY: number): void {
+    if (deltaX === 0 && deltaY === 0) {
+      return;
+    }
+
+    const horizontalStep = getPhotoViewerKeyboardPanStep(photoViewerStageSize.width);
+    const verticalStep = getPhotoViewerKeyboardPanStep(photoViewerStageSize.height);
+
+    setPhotoViewerPan((currentPan) => {
+      const currentClampedPan = clampPhotoViewerPan(currentPan, photoViewerPanLimit);
+      const nextPan = clampPhotoViewerPan(
+        {
+          x: currentClampedPan.x - deltaX * horizontalStep,
+          y: currentClampedPan.y - deltaY * verticalStep
+        },
+        photoViewerPanLimit
+      );
+
+      if (currentPan.x === nextPan.x && currentPan.y === nextPan.y) {
+        return currentPan;
+      }
+
+      return nextPan;
+    });
   }
 
   function handlePhotoViewerSlideshowDelayChange(event: ChangeEvent<HTMLSelectElement>): void {
@@ -3030,6 +3116,29 @@ export function PhotoCatalogView({
       return;
     }
 
+    if (event.shiftKey) {
+      switch (event.key) {
+        case 'ArrowLeft':
+          event.preventDefault();
+          panPhotoViewerByKeyboard(-1, 0);
+          return;
+        case 'ArrowRight':
+          event.preventDefault();
+          panPhotoViewerByKeyboard(1, 0);
+          return;
+        case 'ArrowUp':
+          event.preventDefault();
+          panPhotoViewerByKeyboard(0, -1);
+          return;
+        case 'ArrowDown':
+          event.preventDefault();
+          panPhotoViewerByKeyboard(0, 1);
+          return;
+        default:
+          break;
+      }
+    }
+
     if (event.key === 'ArrowLeft') {
       event.preventDefault();
       openViewerPhotoAtOffset(-1);
@@ -3039,6 +3148,18 @@ export function PhotoCatalogView({
     if (event.key === 'ArrowRight') {
       event.preventDefault();
       openViewerPhotoAtOffset(1);
+      return;
+    }
+
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      zoomPhotoViewerByKeyboard(1);
+      return;
+    }
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      zoomPhotoViewerByKeyboard(-1);
       return;
     }
 
@@ -3199,6 +3320,13 @@ export function PhotoCatalogView({
                 </button>
               </div>
               <div className="photo-viewer-center-controls" role="group" aria-label="Photo slideshow controls">
+                <div
+                  className="viewer-toolbar-indicator"
+                  aria-label={`Photo position ${photoViewerPositionLabel}`}
+                  title={`Photo position: ${photoViewerPositionLabel}`}
+                >
+                  {photoViewerPositionLabel}
+                </div>
                 <div
                   className="viewer-toolbar-group viewer-transport-group photo-viewer-slideshow-transport"
                   role="group"
