@@ -1941,6 +1941,7 @@ export function PhotoCatalogView({
       photoViewerCloseInProgressRef.current = false;
       preserveControlsVisibilityForNextPhotoChangeRef.current = false;
       photoViewerDragRef.current = null;
+      setPhotoViewerFitMode('fit');
       setIsPhotoViewerSlideshowActive(false);
       setIsPhotoViewerPanning(false);
       return;
@@ -2533,7 +2534,6 @@ export function PhotoCatalogView({
   function resetPhotoViewerViewport(): void {
     photoViewerDragRef.current = null;
     setIsPhotoViewerPanning(false);
-    setPhotoViewerFitMode('fit');
     setPhotoViewerZoom(1);
     setPhotoViewerPan({
       x: 0,
