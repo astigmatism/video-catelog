@@ -725,6 +725,7 @@ type PhotoViewerTransitionState = {
   id: number;
   incomingPhotoId: string;
   outgoingPhoto: Photo;
+  outgoingFrameStyle: CSSProperties;
   outgoingImageStyle: CSSProperties;
   direction: PhotoViewerTransitionDirection;
   mode: PhotoViewerSlideshowMode;
@@ -771,6 +772,23 @@ function getPhotoViewerKenBurnsVariant(photo: Photo): PhotoViewerKenBurnsVariant
   return PHOTO_VIEWER_KEN_BURNS_VARIANTS[
     getPhotoViewerStableHash(photo.id || photo.originalName) % PHOTO_VIEWER_KEN_BURNS_VARIANTS.length
   ];
+}
+
+function capturePhotoViewerFrameTransformStyle(frameElement: HTMLDivElement | null): CSSProperties {
+  if (frameElement === null || typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') {
+    return {};
+  }
+
+  const computedStyle = window.getComputedStyle(frameElement);
+  const transform = computedStyle.transform;
+  if (!transform || transform === 'none') {
+    return {};
+  }
+
+  return {
+    transform,
+    transformOrigin: computedStyle.transformOrigin
+  };
 }
 
 function PhotoViewerPreviousIcon(): JSX.Element {
@@ -2418,6 +2436,7 @@ export function PhotoCatalogView({
   const viewerOverlayRef = useRef<HTMLDivElement | null>(null);
   const photoViewerHeaderRef = useRef<HTMLDivElement | null>(null);
   const photoViewerStageRef = useRef<HTMLDivElement | null>(null);
+  const photoViewerCurrentFrameRef = useRef<HTMLDivElement | null>(null);
   const photoViewerControlsHideTimerRef = useRef<number | null>(null);
   const photoViewerSlideshowTimerRef = useRef<number | null>(null);
   const photoViewerTransitionTimerRef = useRef<number | null>(null);
@@ -2549,6 +2568,14 @@ export function PhotoCatalogView({
     }
   }, [collections, selectedCollectionId]);
 
+  useLayoutEffect(() => {
+    if (!viewerPhotoId) {
+      return;
+    }
+
+    resetPhotoViewerViewport();
+  }, [viewerPhotoId]);
+
   useEffect(() => {
     if (!viewerPhotoId) {
       clearPhotoViewerControlsHideTimer();
@@ -2567,8 +2594,6 @@ export function PhotoCatalogView({
     photoViewerCloseInProgressRef.current = false;
     const shouldPreserveControlsVisibility = preserveControlsVisibilityForNextPhotoChangeRef.current;
     preserveControlsVisibilityForNextPhotoChangeRef.current = false;
-
-    resetPhotoViewerViewport();
 
     if (!shouldPreserveControlsVisibility) {
       setArePhotoViewerControlsVisible(true);
@@ -3668,10 +3693,15 @@ export function PhotoCatalogView({
       if (isChangingPhoto && options.useSlideshowTransition === true && photoViewerSlideshowMode !== 'cut') {
         clearPhotoViewerTransitionTimer();
         photoViewerTransitionSequenceRef.current += 1;
+        const outgoingFrameStyle =
+          photoViewerSlideshowMode === 'ken-burns'
+            ? capturePhotoViewerFrameTransformStyle(photoViewerCurrentFrameRef.current)
+            : {};
         setPhotoViewerTransitionState({
           id: photoViewerTransitionSequenceRef.current,
           incomingPhotoId: nextPhoto.id,
           outgoingPhoto: viewerPhoto,
+          outgoingFrameStyle,
           outgoingImageStyle: photoViewerImageStyle,
           direction: offset < 0 ? 'previous' : 'next',
           mode: photoViewerSlideshowMode
@@ -3830,6 +3860,12 @@ export function PhotoCatalogView({
         `is-direction-${activePhotoViewerTransitionState.direction}`
       )
     : '';
+  const photoViewerOutgoingFrameStyle = activePhotoViewerTransitionState !== null
+    ? {
+        ...photoViewerFrameStyle,
+        ...activePhotoViewerTransitionState.outgoingFrameStyle
+      }
+    : photoViewerFrameStyle;
 
   const photoViewerOverlay = viewerPhoto ? (
           <div
@@ -4042,7 +4078,7 @@ export function PhotoCatalogView({
                 <div
                   key={`outgoing-${activePhotoViewerTransitionState.id}`}
                   className={photoViewerOutgoingFrameClassName}
-                  style={photoViewerFrameStyle}
+                  style={photoViewerOutgoingFrameStyle}
                   aria-hidden="true"
                 >
                   <PhotoImage
@@ -4056,7 +4092,12 @@ export function PhotoCatalogView({
                   />
                 </div>
               ) : null}
-              <div key={`current-${viewerPhoto.id}`} className={photoViewerCurrentFrameClassName} style={photoViewerFrameStyle}>
+              <div
+                ref={photoViewerCurrentFrameRef}
+                key={`current-${viewerPhoto.id}`}
+                className={photoViewerCurrentFrameClassName}
+                style={photoViewerFrameStyle}
+              >
                 <PhotoImage
                   className="photo-viewer-image"
                   photo={viewerPhoto}
