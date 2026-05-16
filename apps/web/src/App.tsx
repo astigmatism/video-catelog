@@ -14,6 +14,7 @@ import { GoogleLockScreen } from './GoogleLockScreen';
 import {
   PHOTO_COLLECTION_SORT_CATEGORY_LABELS,
   PhotoCatalogView,
+  createNextPhotoCollectionRandomSeed,
   filterAndSortPhotoCollections,
   getDefaultPhotoCollectionFilters,
   parsePhotoCatalogTagsPayload,
@@ -8807,6 +8808,7 @@ export default function App(): JSX.Element {
   const isCatalogSortActive = filters.sortCategory !== 'none';
   const isRandomSortActive = filters.sortCategory === 'random';
   const isPhotoCollectionSortActive = photoCollectionFilters.sortCategory !== 'none';
+  const isPhotoCollectionRandomSortActive = photoCollectionFilters.sortCategory === 'random';
   const isAnyPhotoCollectionFilterActive =
     photoCollectionFilters.search.trim() !== '' ||
     photoCollectionFilters.tagSearch.trim() !== '' ||
@@ -8974,6 +8976,14 @@ export default function App(): JSX.Element {
       ...currentValue,
       sortCategory: 'random',
       randomSeed: createNextCatalogRandomSeed(currentValue.randomSeed)
+    }));
+  }
+
+  function reshufflePhotoCollectionSort(): void {
+    setPhotoCollectionFilters((currentValue) => ({
+      ...currentValue,
+      sortCategory: 'random',
+      randomSeed: createNextPhotoCollectionRandomSeed(currentValue.randomSeed)
     }));
   }
 
@@ -12210,9 +12220,14 @@ export default function App(): JSX.Element {
                 value={photoCollectionFilters.sortCategory}
                 disabled={!isFilterDrawerOpen}
                 onChange={(event: ChangeEvent<HTMLSelectElement>) => {
+                  const nextSortCategory = event.target.value as PhotoCollectionSortCategory;
                   setPhotoCollectionFilters((currentValue) => ({
                     ...currentValue,
-                    sortCategory: event.target.value as PhotoCollectionSortCategory
+                    sortCategory: nextSortCategory,
+                    randomSeed:
+                      nextSortCategory === 'random' && currentValue.sortCategory !== 'random'
+                        ? createNextPhotoCollectionRandomSeed(currentValue.randomSeed)
+                        : currentValue.randomSeed
                   }));
                 }}
               >
@@ -12226,8 +12241,8 @@ export default function App(): JSX.Element {
 
             <button
               type="button"
-              className="sort-direction-button"
-              disabled={!isFilterDrawerOpen || !isPhotoCollectionSortActive}
+              className={`sort-direction-button${isPhotoCollectionRandomSortActive ? ' is-random-disabled' : ''}`}
+              disabled={!isFilterDrawerOpen || !isPhotoCollectionSortActive || isPhotoCollectionRandomSortActive}
               onClick={() => {
                 setPhotoCollectionFilters((currentValue) => ({
                   ...currentValue,
@@ -12237,14 +12252,18 @@ export default function App(): JSX.Element {
               aria-label={
                 !isPhotoCollectionSortActive
                   ? 'Sort direction is not used when no sort is selected.'
-                  : `Sort order: ${
-                      photoCollectionFilters.sortDirection === 'asc' ? 'ascending' : 'descending'
-                    }. Toggle sort direction.`
+                  : isPhotoCollectionRandomSortActive
+                    ? 'Sort direction is not used while randomized sorting is active.'
+                    : `Sort order: ${
+                        photoCollectionFilters.sortDirection === 'asc' ? 'ascending' : 'descending'
+                      }. Toggle sort direction.`
               }
               title={
                 !isPhotoCollectionSortActive
                   ? 'No sort selected'
-                  : `Sort ${photoCollectionFilters.sortDirection === 'asc' ? 'ascending' : 'descending'}`
+                  : isPhotoCollectionRandomSortActive
+                    ? 'Randomized sorting ignores ascending and descending order'
+                    : `Sort ${photoCollectionFilters.sortDirection === 'asc' ? 'ascending' : 'descending'}`
               }
             >
               <span className="sort-direction-icon" aria-hidden="true">
@@ -12252,6 +12271,23 @@ export default function App(): JSX.Element {
               </span>
             </button>
           </div>
+
+          {isPhotoCollectionRandomSortActive ? (
+            <div className="random-sort-controls">
+              <button
+                type="button"
+                className="randomize-sort-button"
+                disabled={!isFilterDrawerOpen}
+                onClick={reshufflePhotoCollectionSort}
+              >
+                Shuffle again
+              </button>
+              <p className="sort-help-text">
+                Randomized sorting uses the current search and tag filters. Ascending and descending order
+                are ignored.
+              </p>
+            </div>
+          ) : null}
         </div>
 
         <div className="photo-sidebar-favorites-entry">

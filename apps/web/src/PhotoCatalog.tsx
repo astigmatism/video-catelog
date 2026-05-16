@@ -75,7 +75,8 @@ export type PhotoCollectionSortCategory =
   | 'name'
   | 'photoCount'
   | 'lastViewedAt'
-  | 'viewCount';
+  | 'viewCount'
+  | 'random';
 
 export type PhotoCollectionSortDirection = 'asc' | 'desc';
 
@@ -86,6 +87,7 @@ export type PhotoCollectionFilters = {
   tagSearch: string;
   selectedTagIds: string[];
   excludedTagIds: string[];
+  randomSeed: number;
 };
 
 export const PHOTO_COLLECTION_SORT_CATEGORY_LABELS: Record<PhotoCollectionSortCategory, string> = {
@@ -94,8 +96,27 @@ export const PHOTO_COLLECTION_SORT_CATEGORY_LABELS: Record<PhotoCollectionSortCa
   name: 'Name',
   photoCount: 'Photo count',
   lastViewedAt: 'Last viewed',
-  viewCount: 'View count'
+  viewCount: 'View count',
+  random: 'Randomized'
 };
+
+function createPhotoCollectionRandomSeed(): number {
+  if (typeof window !== 'undefined') {
+    const cryptoApi = window.crypto;
+    if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
+      const randomValues = new Uint32Array(1);
+      cryptoApi.getRandomValues(randomValues);
+      return randomValues[0];
+    }
+  }
+
+  return Math.floor(Math.random() * 0x100000000) >>> 0;
+}
+
+export function createNextPhotoCollectionRandomSeed(currentSeed: number): number {
+  const nextSeed = createPhotoCollectionRandomSeed();
+  return nextSeed === currentSeed ? (nextSeed + 1) >>> 0 : nextSeed;
+}
 
 export function getDefaultPhotoCollectionFilters(): PhotoCollectionFilters {
   return {
@@ -104,7 +125,8 @@ export function getDefaultPhotoCollectionFilters(): PhotoCollectionFilters {
     sortDirection: 'desc',
     tagSearch: '',
     selectedTagIds: [],
-    excludedTagIds: []
+    excludedTagIds: [],
+    randomSeed: createPhotoCollectionRandomSeed()
   };
 }
 
@@ -934,6 +956,8 @@ function comparePhotoCollectionsForSort(
       return (left.lastViewedAt ?? '').localeCompare(right.lastViewedAt ?? '');
     case 'viewCount':
       return left.viewCount - right.viewCount;
+    case 'random':
+      return 0;
     case 'none':
     default:
       return 0;
@@ -943,6 +967,20 @@ function comparePhotoCollectionsForSort(
 function tieBreakPhotoCollections(left: PhotoCollection, right: PhotoCollection): number {
   return right.createdAt.localeCompare(left.createdAt) ||
     left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
+}
+
+function getSeededPhotoCollectionRandomSortValue(collection: PhotoCollection, seed: number): number {
+  const key = `${collection.id}:${collection.createdAt}`;
+  let hash = (seed ^ 0x811c9dc5) >>> 0;
+
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+
+  hash = Math.imul(hash ^ (hash >>> 16), 2246822507) >>> 0;
+  hash = Math.imul(hash ^ (hash >>> 13), 3266489909) >>> 0;
+  return (hash ^ (hash >>> 16)) >>> 0;
 }
 
 export function filterAndSortPhotoCollections(
@@ -978,6 +1016,22 @@ export function filterAndSortPhotoCollections(
 
   if (filters.sortCategory === 'none') {
     return filteredCollections;
+  }
+
+  if (filters.sortCategory === 'random') {
+    return filteredCollections
+      .map((collection) => ({
+        collection,
+        sortValue: getSeededPhotoCollectionRandomSortValue(collection, filters.randomSeed)
+      }))
+      .sort((left, right) => {
+        if (left.sortValue !== right.sortValue) {
+          return left.sortValue < right.sortValue ? -1 : 1;
+        }
+
+        return tieBreakPhotoCollections(left.collection, right.collection);
+      })
+      .map(({ collection }) => collection);
   }
 
   return [...filteredCollections].sort((left, right) => {
