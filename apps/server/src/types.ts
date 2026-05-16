@@ -170,6 +170,37 @@ export type PhotoCollectionDetailPayload = {
   photos: Photo[];
 };
 
+export type PhotoHomeStripRowCount = 1 | 2 | 3;
+
+export type PhotoHomeStripSortCategory =
+  | 'none'
+  | 'createdAt'
+  | 'name'
+  | 'photoCount'
+  | 'lastViewedAt'
+  | 'viewCount'
+  | 'random';
+
+export type PhotoHomeStripSortDirection = 'asc' | 'desc';
+
+export type PhotoHomeStrip = {
+  id: string;
+  name: string;
+  displayOrder: number;
+  rowCount: PhotoHomeStripRowCount;
+  sortCategory: PhotoHomeStripSortCategory;
+  sortDirection: PhotoHomeStripSortDirection;
+  search: string | null;
+  tagIds: string[];
+  excludedTagIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PhotoHomeStripListPayload = {
+  strips: PhotoHomeStrip[];
+};
+
 export type CatalogHomeStripRowCount = 1 | 2 | 3;
 
 export type CatalogHomeStripSortCategory =

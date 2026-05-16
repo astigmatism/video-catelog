@@ -4390,7 +4390,8 @@ label {
   padding: 0.15rem 0.1rem 0.25rem;
 }
 
-.home-strip-grid .card {
+.home-strip-grid .card,
+.home-strip-grid .photo-collection-card {
   width: 100%;
   min-width: 284px;
 }
@@ -4582,7 +4583,8 @@ label {
 }
 
 .app-shell-mobile .card,
-.app-shell-mobile .home-strip-grid .card {
+.app-shell-mobile .home-strip-grid .card,
+.app-shell-mobile .home-strip-grid .photo-collection-card {
   min-width: 0;
 }
 

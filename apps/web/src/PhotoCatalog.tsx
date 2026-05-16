@@ -12,7 +12,7 @@ import type {
   SyntheticEvent,
   WheelEvent as ReactWheelEvent
 } from 'react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 export type PhotoCatalogTag = {
   id: string;
@@ -79,6 +79,22 @@ export type PhotoCollectionSortCategory =
   | 'random';
 
 export type PhotoCollectionSortDirection = 'asc' | 'desc';
+
+export type PhotoHomeStripRowCount = 1 | 2 | 3;
+
+export type PhotoHomeStrip = {
+  id: string;
+  name: string;
+  displayOrder: number;
+  rowCount: PhotoHomeStripRowCount;
+  sortCategory: PhotoCollectionSortCategory;
+  sortDirection: PhotoCollectionSortDirection;
+  search: string | null;
+  tagIds: string[];
+  excludedTagIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
 
 export type PhotoCollectionFilters = {
   search: string;
@@ -148,6 +164,8 @@ type PhotoNotice = {
   text: string;
 };
 
+type PhotoHomeStripMoveDirection = 'up' | 'down';
+
 export type PhotoCatalogViewProps = {
   collections: PhotoCollection[];
   selectedCollectionId: string | null;
@@ -155,6 +173,12 @@ export type PhotoCatalogViewProps = {
   isActive: boolean;
   attemptFullscreenOnOpen: boolean;
   photoFavoritesBrowseRequestId?: number;
+  homeStrips?: PhotoHomeStrip[];
+  isHomeViewActive?: boolean;
+  onReturnHome?: () => void;
+  onMoveHomeStrip?: (stripId: string, direction: PhotoHomeStripMoveDirection) => void;
+  onEditHomeStrip?: (strip: PhotoHomeStrip) => void;
+  onDeleteHomeStrip?: (strip: PhotoHomeStrip) => void;
   onSelectCollection: (collectionId: string) => void;
   onBackToCollections: () => void;
   onOpenPhoto: (photoId: string) => void;
@@ -328,6 +352,98 @@ export function parsePhotoCollectionsPayload(payload: unknown): PhotoCollection[
   return payload.collections
     .map(hydratePhotoCollection)
     .filter((collection): collection is PhotoCollection => collection !== null);
+}
+
+function isPhotoCollectionSortCategory(value: string): value is PhotoCollectionSortCategory {
+  return Object.prototype.hasOwnProperty.call(PHOTO_COLLECTION_SORT_CATEGORY_LABELS, value);
+}
+
+function isPhotoCollectionSortDirection(value: string): value is PhotoCollectionSortDirection {
+  return value === 'asc' || value === 'desc';
+}
+
+function normalizePhotoHomeStripRowCount(value: unknown): PhotoHomeStripRowCount {
+  const parsed = Math.floor(readNumber(value, 1));
+  return parsed === 2 || parsed === 3 ? parsed : 1;
+}
+
+export function hydratePhotoHomeStrip(value: unknown): PhotoHomeStrip | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = readString(value.id).trim();
+  const name = readString(value.name).trim();
+  const displayOrder = readNumber(value.displayOrder, Number.NaN);
+  const sortCategory = readString(value.sortCategory);
+  const sortDirection = readString(value.sortDirection);
+  const rawTagIds = Array.isArray(value.tagIds) ? value.tagIds : null;
+  const rawExcludedTagIds =
+    value.excludedTagIds === undefined || value.excludedTagIds === null
+      ? []
+      : Array.isArray(value.excludedTagIds)
+        ? value.excludedTagIds
+        : null;
+  const search = value.search === null || value.search === undefined ? null : readString(value.search).trim();
+  const createdAt = readIsoString(value.createdAt, '');
+  const updatedAt = readIsoString(value.updatedAt, createdAt);
+
+  if (
+    !id ||
+    !name ||
+    !Number.isFinite(displayOrder) ||
+    !isPhotoCollectionSortCategory(sortCategory) ||
+    !isPhotoCollectionSortDirection(sortDirection) ||
+    (value.search !== null && value.search !== undefined && typeof value.search !== 'string') ||
+    rawTagIds === null ||
+    rawExcludedTagIds === null ||
+    !createdAt ||
+    !updatedAt
+  ) {
+    return null;
+  }
+
+  const tagIds = uniqueStrings(
+    rawTagIds.filter((tagId): tagId is string => typeof tagId === 'string').map((tagId) => tagId.trim())
+  );
+  const excludedTagIds = uniqueStrings(
+    rawExcludedTagIds
+      .filter((tagId): tagId is string => typeof tagId === 'string')
+      .map((tagId) => tagId.trim())
+  );
+  if (
+    tagIds.length !== rawTagIds.filter((candidate) => typeof candidate === 'string' && candidate.trim() !== '').length ||
+    excludedTagIds.length !==
+      rawExcludedTagIds.filter((candidate) => typeof candidate === 'string' && candidate.trim() !== '').length
+  ) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    displayOrder: Math.max(0, Math.floor(displayOrder)),
+    rowCount: normalizePhotoHomeStripRowCount(value.rowCount),
+    sortCategory,
+    sortDirection,
+    search: search && search !== '' ? search : null,
+    tagIds,
+    excludedTagIds,
+    createdAt,
+    updatedAt
+  };
+}
+
+export function parsePhotoHomeStripsPayload(payload: unknown): PhotoHomeStrip[] | null {
+  if (!isRecord(payload) || !Array.isArray(payload.strips)) {
+    return null;
+  }
+
+  const strips = payload.strips
+    .map(hydratePhotoHomeStrip)
+    .filter((strip): strip is PhotoHomeStrip => strip !== null);
+
+  return strips.length === payload.strips.length ? strips : null;
 }
 
 export function parsePhotoCollectionDetailPayload(payload: unknown): PhotoCollectionDetailPayload | null {
@@ -1041,6 +1157,76 @@ export function filterAndSortPhotoCollections(
   });
 }
 
+function getPhotoHomeStripRandomSeed(strip: PhotoHomeStrip, randomSeed: number): number {
+  let hash = (randomSeed ^ 0x811c9dc5) >>> 0;
+
+  for (let index = 0; index < strip.id.length; index += 1) {
+    hash ^= strip.id.charCodeAt(index);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+
+  return hash >>> 0;
+}
+
+function getPhotoHomeStripCollections(
+  strip: PhotoHomeStrip,
+  collections: PhotoCollection[],
+  randomSeed: number
+): PhotoCollection[] {
+  return filterAndSortPhotoCollections(collections, {
+    search: strip.search ?? '',
+    sortCategory: strip.sortCategory,
+    sortDirection: strip.sortDirection,
+    tagSearch: '',
+    selectedTagIds: strip.tagIds,
+    excludedTagIds: strip.excludedTagIds,
+    randomSeed: getPhotoHomeStripRandomSeed(strip, randomSeed)
+  });
+}
+
+const PHOTO_HOME_STRIP_MIN_ITEMS_PER_ROW = 1;
+const PHOTO_HOME_STRIP_EAGER_THUMBNAIL_SECTION_LIMIT = 2;
+const PHOTO_HOME_STRIP_CARD_MIN_WIDTH_FALLBACK_PX = 260;
+const PHOTO_HOME_STRIP_COLUMN_GAP_FALLBACK_PX = 16;
+
+function readCssPixelValue(value: string, fallbackValue: number): number {
+  const parsedValue = Number.parseFloat(value);
+  return Number.isFinite(parsedValue) ? parsedValue : fallbackValue;
+}
+
+function getPhotoHomeStripItemsPerRow(gridElement: HTMLElement): number {
+  const computedStyle = window.getComputedStyle(gridElement);
+  const horizontalPadding =
+    readCssPixelValue(computedStyle.paddingLeft, 0) + readCssPixelValue(computedStyle.paddingRight, 0);
+  const availableWidth = Math.max(0, gridElement.getBoundingClientRect().width - horizontalPadding);
+
+  if (availableWidth <= 0) {
+    return PHOTO_HOME_STRIP_MIN_ITEMS_PER_ROW;
+  }
+
+  const cardMinWidth = Math.max(
+    1,
+    readCssPixelValue(
+      computedStyle.getPropertyValue('--home-strip-card-min-width'),
+      PHOTO_HOME_STRIP_CARD_MIN_WIDTH_FALLBACK_PX
+    )
+  );
+  const columnGap = Math.max(
+    0,
+    readCssPixelValue(computedStyle.columnGap, PHOTO_HOME_STRIP_COLUMN_GAP_FALLBACK_PX)
+  );
+
+  return Math.max(
+    PHOTO_HOME_STRIP_MIN_ITEMS_PER_ROW,
+    Math.floor((availableWidth + columnGap) / (cardMinWidth + columnGap))
+  );
+}
+
+type PhotoHomeStripView = {
+  strip: PhotoHomeStrip;
+  collections: PhotoCollection[];
+};
+
 function comparePhotosByName(left: Photo, right: Photo): number {
   return left.originalName.localeCompare(right.originalName, undefined, { sensitivity: 'base' });
 }
@@ -1703,6 +1889,8 @@ function PhotoCollectionTagPopover({
 
 type PhotoCollectionCardProps = {
   collection: PhotoCollection;
+  contextKey?: string;
+  thumbnailLoading?: 'eager' | 'lazy';
   onSelect: (collectionId: string) => void;
   onOpenInfo: (collectionId: string) => void;
   onAddTag: (collectionId: string, label: string) => Promise<PhotoCollection | null>;
@@ -1712,6 +1900,8 @@ type PhotoCollectionCardProps = {
 
 function PhotoCollectionCard({
   collection,
+  contextKey,
+  thumbnailLoading,
   onSelect,
   onOpenInfo,
   onAddTag,
@@ -1726,7 +1916,7 @@ function PhotoCollectionCard({
     collection.viewCount,
     'view'
   )}`;
-  const tagPopoverId = `photo-tag-management-popover-${collection.id}`;
+  const tagPopoverId = `photo-tag-management-popover-${contextKey ? `${contextKey}-` : ''}${collection.id}`;
 
   useEffect(() => {
     if (!isTagPopoverOpen) {
@@ -1770,7 +1960,11 @@ function PhotoCollectionCard({
         title={`Open ${collection.name}`}
       >
         <div className="photo-collection-cover">
-          {coverPhoto ? <PhotoImage photo={coverPhoto} source="thumbnail" alt="" loading="lazy" /> : <EmptyPhotoCover />}
+          {coverPhoto ? (
+            <PhotoImage photo={coverPhoto} source="thumbnail" alt="" loading={thumbnailLoading ?? 'lazy'} />
+          ) : (
+            <EmptyPhotoCover />
+          )}
         </div>
       </button>
 
@@ -1821,6 +2015,278 @@ function PhotoCollectionCard({
         />
       ) : null}
     </article>
+  );
+}
+
+
+type PhotoHomeStripActionMenuProps = {
+  strip: PhotoHomeStrip;
+  index: number;
+  totalCount: number;
+  className?: string;
+  onMove: (stripId: string, direction: PhotoHomeStripMoveDirection) => void;
+  onEdit: (strip: PhotoHomeStrip) => void;
+  onDelete: (strip: PhotoHomeStrip) => void;
+};
+
+type PhotoHomeStripSectionProps = {
+  view: PhotoHomeStripView;
+  index: number;
+  totalCount: number;
+  prioritizeInitialThumbnails: boolean;
+  onMove: (stripId: string, direction: PhotoHomeStripMoveDirection) => void;
+  onEdit: (strip: PhotoHomeStrip) => void;
+  onDelete: (strip: PhotoHomeStrip) => void;
+  onSelectCollection: (collectionId: string) => void;
+  onOpenInfo: (collectionId: string) => void;
+  onAddTag: (collectionId: string, label: string) => Promise<PhotoCollection | null>;
+  onRemoveTag: (collectionId: string, tagId: string) => Promise<PhotoCollection | null>;
+  onSearchTags: (query: string) => Promise<PhotoCatalogTag[]>;
+};
+
+function PhotoHomeStripMenuIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <circle cx="5" cy="12" r="1.8" />
+      <circle cx="12" cy="12" r="1.8" />
+      <circle cx="19" cy="12" r="1.8" />
+    </svg>
+  );
+}
+
+function PhotoHomeStripActionMenu({
+  strip,
+  index,
+  totalCount,
+  className = '',
+  onMove,
+  onEdit,
+  onDelete
+}: PhotoHomeStripActionMenuProps): JSX.Element {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    function handleDocumentMouseDown(event: globalThis.MouseEvent): void {
+      const target = event.target;
+      if (menuRef.current && target instanceof Node && !menuRef.current.contains(target)) {
+        setIsOpen(false);
+      }
+    }
+
+    function handleDocumentKeyDown(event: globalThis.KeyboardEvent): void {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handleDocumentMouseDown);
+    document.addEventListener('keydown', handleDocumentKeyDown);
+
+    return () => {
+      document.removeEventListener('mousedown', handleDocumentMouseDown);
+      document.removeEventListener('keydown', handleDocumentKeyDown);
+    };
+  }, [isOpen]);
+
+  function runMenuAction(action: () => void): void {
+    setIsOpen(false);
+    action();
+  }
+
+  const menuClasses = ['home-strip-menu', className, isOpen ? 'is-open' : '']
+    .filter(Boolean)
+    .join(' ');
+
+  return (
+    <div className={menuClasses} ref={menuRef}>
+      <button
+        type="button"
+        className="home-strip-menu-trigger"
+        onClick={() => setIsOpen((currentValue) => !currentValue)}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        aria-label={`Open options for ${strip.name}`}
+        title="Strip Options"
+      >
+        <PhotoHomeStripMenuIcon />
+      </button>
+
+      {isOpen ? (
+        <div className="home-strip-menu-bubble" role="menu" aria-label={`Options for ${strip.name}`}>
+          <button
+            type="button"
+            className="home-strip-menu-item"
+            role="menuitem"
+            disabled={index === 0}
+            onClick={() => runMenuAction(() => onMove(strip.id, 'up'))}
+          >
+            Move up
+          </button>
+          <button
+            type="button"
+            className="home-strip-menu-item"
+            role="menuitem"
+            disabled={index >= totalCount - 1}
+            onClick={() => runMenuAction(() => onMove(strip.id, 'down'))}
+          >
+            Move down
+          </button>
+          <button
+            type="button"
+            className="home-strip-menu-item"
+            role="menuitem"
+            onClick={() => runMenuAction(() => onEdit(strip))}
+          >
+            Edit
+          </button>
+          <div className="home-strip-menu-divider" role="separator" />
+          <button
+            type="button"
+            className="home-strip-menu-item danger"
+            role="menuitem"
+            onClick={() => runMenuAction(() => onDelete(strip))}
+          >
+            Delete
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PhotoHomeStripSection({
+  view,
+  index,
+  totalCount,
+  prioritizeInitialThumbnails,
+  onMove,
+  onEdit,
+  onDelete,
+  onSelectCollection,
+  onOpenInfo,
+  onAddTag,
+  onRemoveTag,
+  onSearchTags
+}: PhotoHomeStripSectionProps): JSX.Element {
+  const { strip, collections } = view;
+  const stripTitleId = `photo-home-strip-title-${strip.id}`;
+  const stripGridId = `photo-home-strip-grid-${strip.id}`;
+  const gridRef = useRef<HTMLDivElement>(null);
+  const stripLayoutResetKey = [
+    strip.id,
+    strip.rowCount,
+    strip.sortCategory,
+    strip.sortDirection,
+    strip.search ?? '',
+    ...strip.tagIds,
+    ...strip.excludedTagIds.map((tagId) => `exclude:${tagId}`)
+  ].join('::');
+  const [visibleRows, setVisibleRows] = useState<number>(strip.rowCount);
+  const [itemsPerRow, setItemsPerRow] = useState<number>(PHOTO_HOME_STRIP_MIN_ITEMS_PER_ROW);
+
+  useLayoutEffect(() => {
+    setVisibleRows(strip.rowCount);
+  }, [strip.rowCount, stripLayoutResetKey]);
+
+  useLayoutEffect(() => {
+    const gridElement = gridRef.current;
+
+    if (!gridElement) {
+      return;
+    }
+
+    const updateItemsPerRow = (): void => {
+      const nextItemsPerRow = getPhotoHomeStripItemsPerRow(gridElement);
+      setItemsPerRow((currentValue) =>
+        currentValue === nextItemsPerRow ? currentValue : nextItemsPerRow
+      );
+    };
+
+    updateItemsPerRow();
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateItemsPerRow);
+      return () => {
+        window.removeEventListener('resize', updateItemsPerRow);
+      };
+    }
+
+    const resizeObserver = new ResizeObserver(updateItemsPerRow);
+    resizeObserver.observe(gridElement);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [collections.length]);
+
+  const visibleCollectionCount = Math.min(collections.length, visibleRows * itemsPerRow);
+  const visibleCollections = collections.slice(0, visibleCollectionCount);
+  const remainingCollectionCount = collections.length - visibleCollectionCount;
+  const hasMoreCollections = remainingCollectionCount > 0;
+
+  return (
+    <section className="home-strip" aria-labelledby={stripTitleId}>
+      <div className="home-strip-header">
+        <div className="home-strip-heading">
+          <h2 id={stripTitleId}>{strip.name}</h2>
+        </div>
+        <PhotoHomeStripActionMenu
+          strip={strip}
+          index={index}
+          totalCount={totalCount}
+          className="home-strip-header-menu"
+          onMove={onMove}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
+      </div>
+
+      {collections.length > 0 ? (
+        <>
+          <div id={stripGridId} className="home-strip-grid" ref={gridRef}>
+            {visibleCollections.map((collection, collectionIndex) => (
+              <PhotoCollectionCard
+                key={collection.id}
+                collection={collection}
+                thumbnailLoading={
+                  prioritizeInitialThumbnails && collectionIndex < itemsPerRow ? 'eager' : undefined
+                }
+                contextKey={strip.id}
+                onSelect={onSelectCollection}
+                onOpenInfo={onOpenInfo}
+                onAddTag={onAddTag}
+                onRemoveTag={onRemoveTag}
+                onSearchTags={onSearchTags}
+              />
+            ))}
+          </div>
+
+          {hasMoreCollections ? (
+            <div className="home-strip-footer">
+              <span className="home-strip-visible-count">
+                Showing {visibleCollectionCount} of {collections.length}
+              </span>
+              <button
+                type="button"
+                className="app-button secondary home-strip-load-more-button"
+                onClick={() => setVisibleRows((currentValue) => currentValue + 1)}
+                aria-controls={stripGridId}
+                aria-label={`Load another row for ${strip.name}`}
+              >
+                Load more
+              </button>
+            </div>
+          ) : null}
+        </>
+      ) : (
+        <div className="empty-state home-strip-empty">No photo collections match this section yet.</div>
+      )}
+    </section>
   );
 }
 
@@ -1914,6 +2380,12 @@ export function PhotoCatalogView({
   isActive,
   attemptFullscreenOnOpen,
   photoFavoritesBrowseRequestId = 0,
+  homeStrips = [],
+  isHomeViewActive = false,
+  onReturnHome,
+  onMoveHomeStrip = () => undefined,
+  onEditHomeStrip = () => undefined,
+  onDeleteHomeStrip = () => undefined,
   onSelectCollection,
   onBackToCollections,
   onOpenPhoto,
@@ -1979,6 +2451,7 @@ export function PhotoCatalogView({
   const [isPhotoViewerPanning, setIsPhotoViewerPanning] = useState(false);
   const [isCollectionThumbnailBusy, setIsCollectionThumbnailBusy] = useState(false);
   const [infoCollectionId, setInfoCollectionId] = useState<string | null>(null);
+  const [photoHomeStripRandomSeed, setPhotoHomeStripRandomSeed] = useState(() => createPhotoCollectionRandomSeed());
 
   useEffect(() => {
     setFavoritePhotoIdsByCollection(createPhotoFavoriteStateFromCollections(collections));
@@ -2123,6 +2596,19 @@ export function PhotoCatalogView({
     [collections, filters]
   );
 
+  useEffect(() => {
+    setPhotoHomeStripRandomSeed((currentSeed) => createNextPhotoCollectionRandomSeed(currentSeed));
+  }, [collections, homeStrips]);
+
+  const homeStripViews = useMemo<PhotoHomeStripView[]>(
+    () =>
+      homeStrips.map((strip) => ({
+        strip,
+        collections: getPhotoHomeStripCollections(strip, collections, photoHomeStripRandomSeed)
+      })),
+    [collections, homeStrips, photoHomeStripRandomSeed]
+  );
+
   const infoCollection = useMemo(() => {
     if (!infoCollectionId) {
       return null;
@@ -2135,6 +2621,7 @@ export function PhotoCatalogView({
   }, [collections, detail, infoCollectionId]);
 
   const isFavoriteBrowserActive = !selectedCollectionId && isFavoriteBrowserOpen;
+  const isCollectionHomeViewActive = !selectedCollectionId && !isFavoriteBrowserActive && isHomeViewActive;
 
   const photoFavoriteOverview = useMemo(
     () => createPhotoFavoriteOverview(collections, favoritePhotoIdsByCollection),
@@ -3852,38 +4339,85 @@ export function PhotoCatalogView({
   }
 
   return (
-    <section className="photo-catalog-view" aria-label="Photo collection catalog">
+    <section
+      className="photo-catalog-view"
+      aria-label={isCollectionHomeViewActive ? 'Photo collection home layout sections' : 'Photo collection catalog'}
+    >
 
       <PhotoCatalogNotice notice={notice} />
 
-      {filteredCollections.length === 0 ? (
-        <div className="photo-empty-state">
-          <h3>{collections.length === 0 ? 'No photo collections yet' : 'No matching collections'}</h3>
-          <p>
-            {collections.length === 0
-              ? 'Import a ZIP file or individual images to create your first photo collection.'
-              : 'Try clearing search or tag filters.'}
-          </p>
-          {collections.length === 0 ? (
-            <button type="button" className="app-button" onClick={onOpenImport}>
-              Import photos
-            </button>
-          ) : null}
+      {isCollectionHomeViewActive ? (
+        <div className="home-view photo-home-view">
+          {homeStripViews.length > 0 ? (
+            homeStripViews.map((view, index) => (
+              <PhotoHomeStripSection
+                key={view.strip.id}
+                view={view}
+                index={index}
+                totalCount={homeStripViews.length}
+                prioritizeInitialThumbnails={index < PHOTO_HOME_STRIP_EAGER_THUMBNAIL_SECTION_LIMIT}
+                onMove={onMoveHomeStrip}
+                onEdit={onEditHomeStrip}
+                onDelete={onDeleteHomeStrip}
+                onSelectCollection={onSelectCollection}
+                onOpenInfo={setInfoCollectionId}
+                onAddTag={requestAddCollectionTag}
+                onRemoveTag={requestRemoveCollectionTag}
+                onSearchTags={searchPhotoCollectionTags}
+              />
+            ))
+          ) : (
+            <div className="empty-state home-view-empty">
+              {collections.length === 0
+                ? 'No photo collections yet. Import photos to create your first collection, then save home sections from the side panel.'
+                : 'No photo home sections yet. Use the + button in the side panel to save the current search, sort, and tags.'}
+            </div>
+          )}
         </div>
       ) : (
-        <div className="photo-collection-grid">
-          {filteredCollections.map((collection) => (
-            <PhotoCollectionCard
-              key={collection.id}
-              collection={collection}
-              onSelect={onSelectCollection}
-              onOpenInfo={setInfoCollectionId}
-              onAddTag={requestAddCollectionTag}
-              onRemoveTag={requestRemoveCollectionTag}
-              onSearchTags={searchPhotoCollectionTags}
-            />
-          ))}
-        </div>
+        <>
+          {onReturnHome ? (
+            <div className="catalog-panel-header results-view-header photo-results-view-header">
+              <div>
+                <h2>Photo collection results</h2>
+                <p>{pluralize(filteredCollections.length, 'collection')} shown</p>
+              </div>
+              <button type="button" className="app-button secondary" onClick={onReturnHome}>
+                Return to home
+              </button>
+            </div>
+          ) : null}
+
+          {filteredCollections.length === 0 ? (
+            <div className="photo-empty-state">
+              <h3>{collections.length === 0 ? 'No photo collections yet' : 'No matching collections'}</h3>
+              <p>
+                {collections.length === 0
+                  ? 'Import a ZIP file or individual images to create your first photo collection.'
+                  : 'Try clearing search or tag filters.'}
+              </p>
+              {collections.length === 0 ? (
+                <button type="button" className="app-button" onClick={onOpenImport}>
+                  Import photos
+                </button>
+              ) : null}
+            </div>
+          ) : (
+            <div className="photo-collection-grid">
+              {filteredCollections.map((collection) => (
+                <PhotoCollectionCard
+                  key={collection.id}
+                  collection={collection}
+                  onSelect={onSelectCollection}
+                  onOpenInfo={setInfoCollectionId}
+                  onAddTag={requestAddCollectionTag}
+                  onRemoveTag={requestRemoveCollectionTag}
+                  onSearchTags={searchPhotoCollectionTags}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       {infoCollection ? (

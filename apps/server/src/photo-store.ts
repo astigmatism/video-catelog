@@ -6,7 +6,15 @@ import {
   normalizeCatalogTagLabel,
   normalizeVisibleName
 } from './catalog-store';
-import type { CatalogTag, Photo, PhotoCollection } from './types';
+import type {
+  CatalogTag,
+  Photo,
+  PhotoCollection,
+  PhotoHomeStrip,
+  PhotoHomeStripRowCount,
+  PhotoHomeStripSortCategory,
+  PhotoHomeStripSortDirection
+} from './types';
 
 type Queryable = Pool | PoolClient;
 
@@ -23,6 +31,18 @@ export type UpdatePhotoCollectionInput = Partial<{
   name: string;
   description: string | null;
 }>;
+
+export type CreatePhotoHomeStripInput = {
+  name: string;
+  rowCount: PhotoHomeStripRowCount;
+  sortCategory: PhotoHomeStripSortCategory;
+  sortDirection: PhotoHomeStripSortDirection;
+  search?: string | null;
+  tagIds?: string[];
+  excludedTagIds?: string[];
+};
+
+export type UpdatePhotoHomeStripInput = Partial<CreatePhotoHomeStripInput>;
 
 export type AddPhotoInput = {
   originalName: string;
@@ -98,6 +118,20 @@ type PhotoCollectionTagHydrationRow = CatalogTagRow & {
   collection_id: string;
 };
 
+type PhotoHomeStripRow = {
+  id: string;
+  name: string;
+  display_order: number | string;
+  row_count: number | string;
+  sort_category: string;
+  sort_direction: string;
+  search_term: string | null;
+  tag_ids: unknown;
+  excluded_tag_ids: unknown;
+  created_at: Date | string;
+  updated_at: Date | string;
+};
+
 type DeletePhotoCollectionResult = {
   collection: PhotoCollection;
   photos: Photo[];
@@ -110,11 +144,29 @@ export type PhotoFavoriteUpdateResult = {
 
 const PHOTO_COLLECTION_NAME_MAX_LENGTH = 160;
 const PHOTO_COLLECTION_DESCRIPTION_MAX_LENGTH = 2000;
+const PHOTO_HOME_STRIP_NAME_MAX_LENGTH = 120;
+const DEFAULT_PHOTO_HOME_STRIP_ROW_COUNT: PhotoHomeStripRowCount = 1;
+const DEFAULT_PHOTO_HOME_STRIP_SORT_CATEGORY: PhotoHomeStripSortCategory = 'createdAt';
+const DEFAULT_PHOTO_HOME_STRIP_SORT_DIRECTION: PhotoHomeStripSortDirection = 'desc';
 const DEFAULT_TAG_AUTOCOMPLETE_LIMIT = 10;
 const DEFAULT_TOP_TAG_LIMIT = 10;
 
+const PHOTO_HOME_STRIP_SORT_CATEGORIES: PhotoHomeStripSortCategory[] = [
+  'none',
+  'createdAt',
+  'name',
+  'photoCount',
+  'lastViewedAt',
+  'viewCount',
+  'random'
+];
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
 }
 
 function readNumber(value: unknown): number | null {
@@ -191,6 +243,101 @@ function normalizeCollectionDescription(value: string | null | undefined): strin
     .slice(0, PHOTO_COLLECTION_DESCRIPTION_MAX_LENGTH);
 
   return normalized === '' ? null : normalized;
+}
+
+function normalizePhotoHomeStripName(value: string | null | undefined): string {
+  const normalized = (value ?? '')
+    .normalize('NFKC')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, PHOTO_HOME_STRIP_NAME_MAX_LENGTH);
+
+  return normalized === '' ? 'Untitled strip' : normalized;
+}
+
+function isPhotoHomeStripSortCategory(value: string): value is PhotoHomeStripSortCategory {
+  return PHOTO_HOME_STRIP_SORT_CATEGORIES.includes(value as PhotoHomeStripSortCategory);
+}
+
+function normalizePhotoHomeStripSortCategory(value: unknown): PhotoHomeStripSortCategory {
+  const text = readString(value);
+  return text && isPhotoHomeStripSortCategory(text) ? text : DEFAULT_PHOTO_HOME_STRIP_SORT_CATEGORY;
+}
+
+function normalizePhotoHomeStripSortDirection(value: unknown): PhotoHomeStripSortDirection {
+  return value === 'asc' || value === 'desc' ? value : DEFAULT_PHOTO_HOME_STRIP_SORT_DIRECTION;
+}
+
+function normalizePhotoHomeStripRowCount(value: unknown): PhotoHomeStripRowCount {
+  const parsed = readNumber(value);
+  if (parsed === 2 || parsed === 3) {
+    return parsed;
+  }
+
+  return DEFAULT_PHOTO_HOME_STRIP_ROW_COUNT;
+}
+
+function normalizePhotoHomeStripSearch(value: unknown): string | null {
+  const text = readString(value);
+  if (text === null) {
+    return null;
+  }
+
+  const trimmed = text.normalize('NFKC').trim().replace(/\s+/g, ' ');
+  return trimmed === '' ? null : trimmed;
+}
+
+function normalizePhotoHomeStripTagIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const tagIds: string[] = [];
+  for (const candidate of value) {
+    const tagId = readString(candidate);
+    if (tagId === null) {
+      continue;
+    }
+
+    const trimmedTagId = tagId.trim();
+    if (trimmedTagId !== '' && !tagIds.includes(trimmedTagId)) {
+      tagIds.push(trimmedTagId);
+    }
+  }
+
+  return tagIds;
+}
+
+function normalizePhotoHomeStripDisplayOrder(value: unknown): number {
+  const parsed = readNumber(value);
+  if (parsed === null || parsed < 0) {
+    return 0;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizePhotoHomeStrip(input: PhotoHomeStrip): PhotoHomeStrip {
+  const createdAt = normalizeNullableTimestamp(input.createdAt) ?? new Date().toISOString();
+  const updatedAt = normalizeNullableTimestamp(input.updatedAt) ?? createdAt;
+
+  return {
+    id: input.id,
+    name: normalizePhotoHomeStripName(input.name),
+    displayOrder: normalizePhotoHomeStripDisplayOrder(input.displayOrder),
+    rowCount: normalizePhotoHomeStripRowCount(input.rowCount),
+    sortCategory: normalizePhotoHomeStripSortCategory(input.sortCategory),
+    sortDirection: normalizePhotoHomeStripSortDirection(input.sortDirection),
+    search: normalizePhotoHomeStripSearch(input.search),
+    tagIds: normalizePhotoHomeStripTagIds(input.tagIds),
+    excludedTagIds: normalizePhotoHomeStripTagIds(input.excludedTagIds),
+    createdAt,
+    updatedAt
+  };
+}
+
+function toJsonParameter(value: unknown): string | null {
+  return value === null ? null : JSON.stringify(value);
 }
 
 function hydrateCatalogTagFromRow(row: CatalogTagRow): CatalogTag {
@@ -272,6 +419,22 @@ function clonePhotoCollection(collection: PhotoCollection): PhotoCollection {
   };
 }
 
+function clonePhotoHomeStrip(strip: PhotoHomeStrip): PhotoHomeStrip {
+  return {
+    id: strip.id,
+    name: strip.name,
+    displayOrder: strip.displayOrder,
+    rowCount: strip.rowCount,
+    sortCategory: strip.sortCategory,
+    sortDirection: strip.sortDirection,
+    search: strip.search,
+    tagIds: [...strip.tagIds],
+    excludedTagIds: [...strip.excludedTagIds],
+    createdAt: strip.createdAt,
+    updatedAt: strip.updatedAt
+  };
+}
+
 function createPhotoFromInput(collectionId: string, input: AddPhotoInput, sortOrder: number): Photo {
   const now = new Date().toISOString();
 
@@ -325,6 +488,27 @@ function createCollectionFromInput(input: CreatePhotoCollectionInput): PhotoColl
   };
 }
 
+function buildPhotoHomeStripFromInput(
+  input: CreatePhotoHomeStripInput,
+  displayOrder: number
+): PhotoHomeStrip {
+  const now = new Date().toISOString();
+
+  return normalizePhotoHomeStrip({
+    id: randomUUID(),
+    name: input.name,
+    displayOrder,
+    rowCount: input.rowCount,
+    sortCategory: input.sortCategory,
+    sortDirection: input.sortDirection,
+    search: input.search ?? null,
+    tagIds: input.tagIds ?? [],
+    excludedTagIds: input.excludedTagIds ?? [],
+    createdAt: now,
+    updatedAt: now
+  });
+}
+
 function hydratePhotoCollectionFromRow(row: PhotoCollectionRow): PhotoCollection {
   const createdAt = readIsoString(row.created_at) ?? new Date().toISOString();
   const updatedAt = readIsoString(row.updated_at) ?? createdAt;
@@ -347,9 +531,29 @@ function hydratePhotoCollectionFromRow(row: PhotoCollectionRow): PhotoCollection
   };
 }
 
+function hydratePhotoHomeStripFromRow(row: PhotoHomeStripRow): PhotoHomeStrip {
+  const createdAt = readIsoString(row.created_at) ?? new Date().toISOString();
+  const updatedAt = readIsoString(row.updated_at) ?? createdAt;
+
+  return normalizePhotoHomeStrip({
+    id: row.id,
+    name: row.name,
+    displayOrder: normalizePhotoHomeStripDisplayOrder(row.display_order),
+    rowCount: normalizePhotoHomeStripRowCount(row.row_count),
+    sortCategory: normalizePhotoHomeStripSortCategory(row.sort_category),
+    sortDirection: normalizePhotoHomeStripSortDirection(row.sort_direction),
+    search: normalizePhotoHomeStripSearch(row.search_term),
+    tagIds: normalizePhotoHomeStripTagIds(row.tag_ids),
+    excludedTagIds: normalizePhotoHomeStripTagIds(row.excluded_tag_ids),
+    createdAt,
+    updatedAt
+  });
+}
+
 export class PhotoCatalogStore {
   private readonly collectionById = new Map<string, PhotoCollection>();
   private readonly photoById = new Map<string, Photo>();
+  private readonly homeStripById = new Map<string, PhotoHomeStrip>();
   private readonly photoIdsByCollectionId = new Map<string, string[]>();
   private readonly writeChains = new Map<string, Promise<void>>();
   private initializationPromise: Promise<void> | null = null;
@@ -378,6 +582,124 @@ export class PhotoCatalogStore {
 
     const collection = this.collectionById.get(collectionId);
     return collection ? clonePhotoCollection(collection) : undefined;
+  }
+
+  listHomeStrips(): PhotoHomeStrip[] {
+    this.assertInitialized();
+
+    return this.getSortedHomeStrips().map(clonePhotoHomeStrip);
+  }
+
+  async createHomeStrip(input: CreatePhotoHomeStripInput): Promise<PhotoHomeStrip> {
+    this.assertInitialized();
+
+    return this.enqueueWrite(this.getPhotoHomeStripsWriteKey(), async () => {
+      const strip = buildPhotoHomeStripFromInput(input, this.getNextHomeStripDisplayOrder());
+      await this.insertPhotoHomeStrip(this.options.pool, strip);
+      this.homeStripById.set(strip.id, strip);
+      return clonePhotoHomeStrip(strip);
+    });
+  }
+
+  async updateHomeStrip(
+    stripId: string,
+    patch: UpdatePhotoHomeStripInput
+  ): Promise<PhotoHomeStrip | undefined> {
+    this.assertInitialized();
+
+    return this.enqueueWrite(this.getPhotoHomeStripsWriteKey(), async () => {
+      const currentStrip = this.homeStripById.get(stripId);
+      if (!currentStrip) {
+        return undefined;
+      }
+
+      const updatedStrip = normalizePhotoHomeStrip({
+        ...currentStrip,
+        name: patch.name ?? currentStrip.name,
+        rowCount: patch.rowCount ?? currentStrip.rowCount,
+        sortCategory: patch.sortCategory ?? currentStrip.sortCategory,
+        sortDirection: patch.sortDirection ?? currentStrip.sortDirection,
+        search: patch.search !== undefined ? patch.search : currentStrip.search,
+        tagIds: patch.tagIds !== undefined ? patch.tagIds : currentStrip.tagIds,
+        excludedTagIds:
+          patch.excludedTagIds !== undefined ? patch.excludedTagIds : currentStrip.excludedTagIds,
+        updatedAt: new Date().toISOString()
+      });
+
+      const updated = await this.updatePhotoHomeStripRow(this.options.pool, updatedStrip);
+      if (!updated) {
+        this.homeStripById.delete(stripId);
+        return undefined;
+      }
+
+      this.homeStripById.set(stripId, updatedStrip);
+      return clonePhotoHomeStrip(updatedStrip);
+    });
+  }
+
+  async deleteHomeStrip(stripId: string): Promise<PhotoHomeStrip | undefined> {
+    this.assertInitialized();
+
+    return this.enqueueWrite(this.getPhotoHomeStripsWriteKey(), async () => {
+      const currentStrip = this.homeStripById.get(stripId);
+      if (!currentStrip) {
+        return undefined;
+      }
+
+      const result = await this.options.pool.query<{ id: string }>(
+        'DELETE FROM photo_home_strips WHERE id = $1 RETURNING id',
+        [stripId]
+      );
+
+      if (result.rowCount === 0) {
+        this.homeStripById.delete(stripId);
+        return undefined;
+      }
+
+      this.homeStripById.delete(stripId);
+      await this.compactHomeStripDisplayOrders(this.options.pool);
+      return clonePhotoHomeStrip(currentStrip);
+    });
+  }
+
+  async reorderHomeStrips(stripIds: string[]): Promise<PhotoHomeStrip[] | undefined> {
+    this.assertInitialized();
+
+    return this.enqueueWrite(this.getPhotoHomeStripsWriteKey(), async () => {
+      const requestedIds = normalizePhotoHomeStripTagIds(stripIds);
+      if (requestedIds.some((stripId) => !this.homeStripById.has(stripId))) {
+        return undefined;
+      }
+
+      const requestedIdSet = new Set(requestedIds);
+      const orderedStrips = [
+        ...requestedIds
+          .map((stripId) => this.homeStripById.get(stripId))
+          .filter((strip): strip is PhotoHomeStrip => strip !== undefined),
+        ...this.getSortedHomeStrips().filter((strip) => !requestedIdSet.has(strip.id))
+      ];
+
+      const now = new Date().toISOString();
+      const normalizedStrips = orderedStrips.map((strip, index) =>
+        normalizePhotoHomeStrip({
+          ...strip,
+          displayOrder: index,
+          updatedAt: strip.displayOrder === index ? strip.updatedAt : now
+        })
+      );
+
+      await withTransaction(this.options.pool, async (client) => {
+        for (const strip of normalizedStrips) {
+          await this.updatePhotoHomeStripRow(client, strip);
+        }
+      });
+
+      for (const strip of normalizedStrips) {
+        this.homeStripById.set(strip.id, strip);
+      }
+
+      return this.listHomeStrips();
+    });
   }
 
   listPhotos(collectionId: string): Photo[] {
@@ -947,7 +1269,7 @@ export class PhotoCatalogStore {
   private async initializeInternal(): Promise<void> {
     await bootstrapPhotoCatalogSchema(this.options.pool);
 
-    const [collectionsResult, photosResult, tagsResult] = await Promise.all([
+    const [collectionsResult, photosResult, tagsResult, homeStripsResult] = await Promise.all([
       this.options.pool.query<PhotoCollectionRow>(
         `
           SELECT
@@ -1008,11 +1330,30 @@ export class PhotoCatalogStore {
           GROUP BY pct.collection_id, t.id, t.label, t.normalized_label, t.created_at, t.updated_at
           ORDER BY lower(t.label) ASC
         `
+      ),
+      this.options.pool.query<PhotoHomeStripRow>(
+        `
+          SELECT
+            id,
+            name,
+            display_order,
+            row_count,
+            sort_category,
+            sort_direction,
+            search_term,
+            tag_ids,
+            excluded_tag_ids,
+            created_at,
+            updated_at
+          FROM photo_home_strips
+          ORDER BY display_order ASC, created_at ASC
+        `
       )
     ]);
 
     this.collectionById.clear();
     this.photoById.clear();
+    this.homeStripById.clear();
     this.photoIdsByCollectionId.clear();
 
     for (const row of collectionsResult.rows) {
@@ -1036,6 +1377,11 @@ export class PhotoCatalogStore {
       }
 
       collection.tags = this.upsertTagInList(collection.tags, hydrateCatalogTagFromRow(row));
+    }
+
+    for (const row of homeStripsResult.rows) {
+      const strip = hydratePhotoHomeStripFromRow(row);
+      this.homeStripById.set(strip.id, strip);
     }
 
     for (const collectionId of Array.from(this.collectionById.keys())) {
@@ -1198,6 +1544,122 @@ export class PhotoCatalogStore {
 
   private getPhotoTagsWriteKey(): string {
     return 'photo-tags';
+  }
+
+  private getPhotoHomeStripsWriteKey(): string {
+    return 'photo-home-strips';
+  }
+
+  private getSortedHomeStrips(): PhotoHomeStrip[] {
+    return Array.from(this.homeStripById.values()).sort((left, right) => {
+      if (left.displayOrder !== right.displayOrder) {
+        return left.displayOrder - right.displayOrder;
+      }
+
+      const createdAtComparison = left.createdAt.localeCompare(right.createdAt);
+      if (createdAtComparison !== 0) {
+        return createdAtComparison;
+      }
+
+      return left.name.localeCompare(right.name);
+    });
+  }
+
+  private getNextHomeStripDisplayOrder(): number {
+    const sortedStrips = this.getSortedHomeStrips();
+    const lastStrip = sortedStrips.at(-1);
+    return lastStrip ? lastStrip.displayOrder + 1 : 0;
+  }
+
+  private async compactHomeStripDisplayOrders(queryable: Queryable): Promise<void> {
+    const sortedStrips = this.getSortedHomeStrips();
+    const now = new Date().toISOString();
+
+    for (let index = 0; index < sortedStrips.length; index += 1) {
+      const strip = sortedStrips[index];
+      if (!strip || strip.displayOrder === index) {
+        continue;
+      }
+
+      const updatedStrip = normalizePhotoHomeStrip({
+        ...strip,
+        displayOrder: index,
+        updatedAt: now
+      });
+      await this.updatePhotoHomeStripRow(queryable, updatedStrip);
+      this.homeStripById.set(updatedStrip.id, updatedStrip);
+    }
+  }
+
+  private async insertPhotoHomeStrip(queryable: Queryable, strip: PhotoHomeStrip): Promise<void> {
+    await queryable.query(
+      `
+        INSERT INTO photo_home_strips (
+          id,
+          name,
+          display_order,
+          row_count,
+          sort_category,
+          sort_direction,
+          search_term,
+          tag_ids,
+          excluded_tag_ids,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::timestamptz, $11::timestamptz)
+      `,
+      [
+        strip.id,
+        strip.name,
+        strip.displayOrder,
+        strip.rowCount,
+        strip.sortCategory,
+        strip.sortDirection,
+        strip.search,
+        toJsonParameter(strip.tagIds),
+        toJsonParameter(strip.excludedTagIds),
+        strip.createdAt,
+        strip.updatedAt
+      ]
+    );
+  }
+
+  private async updatePhotoHomeStripRow(
+    queryable: Queryable,
+    strip: PhotoHomeStrip
+  ): Promise<PhotoHomeStrip | undefined> {
+    const result = await queryable.query<{ id: string }>(
+      `
+        UPDATE photo_home_strips
+        SET
+          name = $2,
+          display_order = $3,
+          row_count = $4,
+          sort_category = $5,
+          sort_direction = $6,
+          search_term = $7,
+          tag_ids = $8::jsonb,
+          excluded_tag_ids = $9::jsonb,
+          updated_at = $10::timestamptz
+        WHERE id = $1
+        RETURNING id
+      `,
+      [
+        strip.id,
+        strip.name,
+        strip.displayOrder,
+        strip.rowCount,
+        strip.sortCategory,
+        strip.sortDirection,
+        strip.search,
+        toJsonParameter(strip.tagIds),
+        toJsonParameter(strip.excludedTagIds),
+        strip.updatedAt
+      ]
+    );
+
+    return result.rowCount === 0 ? undefined : strip;
   }
 
   private async insertPhotoCollection(queryable: Queryable, collection: PhotoCollection): Promise<void> {

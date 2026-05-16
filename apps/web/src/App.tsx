@@ -20,11 +20,15 @@ import {
   parsePhotoCatalogTagsPayload,
   parsePhotoCollectionsPayload,
   parsePhotoCollectionDetailPayload,
+  parsePhotoHomeStripsPayload,
   type PhotoCatalogTag,
   type PhotoCollection,
   type PhotoCollectionDetailPayload,
   type PhotoCollectionFilters,
-  type PhotoCollectionSortCategory
+  type PhotoCollectionSortCategory,
+  type PhotoCollectionSortDirection,
+  type PhotoHomeStrip,
+  type PhotoHomeStripRowCount
 } from './PhotoCatalog';
 import {
   AUTHENTICATED_BROWSER_IDENTITY,
@@ -303,6 +307,25 @@ type HomeStripEditorState = {
   saving: boolean;
 };
 
+type PhotoHomeStripDraft = {
+  name: string;
+  rowCount: PhotoHomeStripRowCount;
+  search: string;
+  sortCategory: PhotoCollectionSortCategory;
+  sortDirection: PhotoCollectionSortDirection;
+  tagSearch: string;
+  selectedTagIds: string[];
+  excludedTagIds: string[];
+};
+
+type PhotoHomeStripEditorState = {
+  mode: 'add' | 'edit';
+  stripId: string | null;
+  draft: PhotoHomeStripDraft;
+  notice: ModalNotice | null;
+  saving: boolean;
+};
+
 type CatalogHomeStripView = {
   strip: CatalogHomeStrip;
   items: CatalogItem[];
@@ -537,6 +560,9 @@ type CatalogCardProps = {
 type HomeStripMoveDirection = 'up' | 'down';
 type HomeStripDropPosition = 'before' | 'after';
 type HomeStripDropTarget = { stripId: string; position: HomeStripDropPosition };
+type PhotoHomeStripMoveDirection = 'up' | 'down';
+type PhotoHomeStripDropPosition = 'before' | 'after';
+type PhotoHomeStripDropTarget = { stripId: string; position: PhotoHomeStripDropPosition };
 
 type HomeStripActionMenuProps = {
   strip: CatalogHomeStrip;
@@ -547,6 +573,17 @@ type HomeStripActionMenuProps = {
   onMove: (stripId: string, direction: HomeStripMoveDirection) => void;
   onEdit: (strip: CatalogHomeStrip) => void;
   onDelete: (strip: CatalogHomeStrip) => void;
+};
+
+type PhotoHomeStripActionMenuProps = {
+  strip: PhotoHomeStrip;
+  index: number;
+  totalCount: number;
+  disabled?: boolean;
+  className?: string;
+  onMove: (stripId: string, direction: PhotoHomeStripMoveDirection) => void;
+  onEdit: (strip: PhotoHomeStrip) => void;
+  onDelete: (strip: PhotoHomeStrip) => void;
 };
 
 type CatalogHomeStripSectionProps = {
@@ -840,6 +877,11 @@ function isCatalogHomeStripRowCount(value: number | null): value is CatalogHomeS
 function normalizeCatalogHomeStripRowCount(value: unknown): CatalogHomeStripRowCount {
   const parsed = readNumber(value);
   return isCatalogHomeStripRowCount(parsed) ? parsed : 1;
+}
+
+function normalizePhotoHomeStripRowCount(value: unknown): PhotoHomeStripRowCount {
+  const parsed = readNumber(value);
+  return parsed === 2 || parsed === 3 ? parsed : 1;
 }
 
 function normalizeHomeStripText(value: string | null | undefined): string {
@@ -5029,6 +5071,114 @@ function HomeStripActionMenu({
   );
 }
 
+
+function PhotoHomeStripActionMenu({
+  strip,
+  index,
+  totalCount,
+  disabled = false,
+  className = '',
+  onMove,
+  onEdit,
+  onDelete
+}: PhotoHomeStripActionMenuProps): JSX.Element {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    function handleDocumentMouseDown(event: globalThis.MouseEvent): void {
+      const target = event.target;
+      if (menuRef.current && target instanceof Node && !menuRef.current.contains(target)) {
+        setIsOpen(false);
+      }
+    }
+
+    function handleDocumentKeyDown(event: globalThis.KeyboardEvent): void {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handleDocumentMouseDown);
+    document.addEventListener('keydown', handleDocumentKeyDown);
+
+    return () => {
+      document.removeEventListener('mousedown', handleDocumentMouseDown);
+      document.removeEventListener('keydown', handleDocumentKeyDown);
+    };
+  }, [isOpen]);
+
+  function runMenuAction(action: () => void): void {
+    setIsOpen(false);
+    action();
+  }
+
+  const menuClasses = ['home-strip-menu', className, isOpen ? 'is-open' : '', disabled ? 'is-disabled' : '']
+    .filter(Boolean)
+    .join(' ');
+
+  return (
+    <div className={menuClasses} ref={menuRef}>
+      <button
+        type="button"
+        className="home-strip-menu-trigger"
+        disabled={disabled}
+        onClick={() => setIsOpen((currentValue) => !currentValue)}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        aria-label={`Open options for ${strip.name}`}
+        title="Strip Options"
+      >
+        <MenuIcon />
+      </button>
+
+      {isOpen ? (
+        <div className="home-strip-menu-bubble" role="menu" aria-label={`Options for ${strip.name}`}>
+          <button
+            type="button"
+            className="home-strip-menu-item"
+            role="menuitem"
+            disabled={index === 0}
+            onClick={() => runMenuAction(() => onMove(strip.id, 'up'))}
+          >
+            Move up
+          </button>
+          <button
+            type="button"
+            className="home-strip-menu-item"
+            role="menuitem"
+            disabled={index >= totalCount - 1}
+            onClick={() => runMenuAction(() => onMove(strip.id, 'down'))}
+          >
+            Move down
+          </button>
+          <button
+            type="button"
+            className="home-strip-menu-item"
+            role="menuitem"
+            onClick={() => runMenuAction(() => onEdit(strip))}
+          >
+            Edit
+          </button>
+          <div className="home-strip-menu-divider" role="separator" />
+          <button
+            type="button"
+            className="home-strip-menu-item danger"
+            role="menuitem"
+            onClick={() => runMenuAction(() => onDelete(strip))}
+          >
+            Delete
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function CatalogHomeStripSection({
   view,
   index,
@@ -8458,6 +8608,9 @@ export default function App(): JSX.Element {
   const [homeStripRandomSeed, setHomeStripRandomSeed] = useState(() => createCatalogRandomSeed());
   const [draggedHomeStripId, setDraggedHomeStripId] = useState<string | null>(null);
   const [homeStripDropTarget, setHomeStripDropTarget] = useState<HomeStripDropTarget | null>(null);
+  const [photoHomeStrips, setPhotoHomeStrips] = useState<PhotoHomeStrip[]>([]);
+  const [draggedPhotoHomeStripId, setDraggedPhotoHomeStripId] = useState<string | null>(null);
+  const [photoHomeStripDropTarget, setPhotoHomeStripDropTarget] = useState<PhotoHomeStripDropTarget | null>(null);
   const [pendingIngests, setPendingIngests] = useState<PendingIngest[]>([]);
   const [recentActivity, setRecentActivity] = useState<ActivityFeedEntry[]>([]);
   const [idleLockMinutes, setIdleLockMinutes] = useState(30);
@@ -8517,6 +8670,9 @@ export default function App(): JSX.Element {
   const [homeStripEditor, setHomeStripEditor] = useState<HomeStripEditorState | null>(null);
   const [homeStripTagSuggestions, setHomeStripTagSuggestions] = useState<CatalogTag[]>([]);
   const [isHomeStripTagSearchFocused, setIsHomeStripTagSearchFocused] = useState(false);
+  const [photoHomeStripEditor, setPhotoHomeStripEditor] = useState<PhotoHomeStripEditorState | null>(null);
+  const [photoHomeStripTagSuggestions, setPhotoHomeStripTagSuggestions] = useState<PhotoCatalogTag[]>([]);
+  const [isPhotoHomeStripTagSearchFocused, setIsPhotoHomeStripTagSearchFocused] = useState(false);
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -8547,6 +8703,7 @@ export default function App(): JSX.Element {
     photoViewerPhotoId !== null ||
     detailsItemId !== null ||
     homeStripEditor !== null ||
+    photoHomeStripEditor !== null ||
     isMobileFilterSheetOpen;
   const isToolUpdateRunning = toolUpdateState.status === 'running';
 
@@ -8710,8 +8867,12 @@ export default function App(): JSX.Element {
       tagsById.set(tag.id, tag);
     }
 
+    for (const tag of photoHomeStripTagSuggestions) {
+      tagsById.set(tag.id, tag);
+    }
+
     return tagsById;
-  }, [availablePhotoTagOptions, photoTagFilterSuggestions]);
+  }, [availablePhotoTagOptions, photoHomeStripTagSuggestions, photoTagFilterSuggestions]);
 
   const selectedPhotoFilterTags = photoCollectionFilters.selectedTagIds
     .map((tagId) => photoCatalogTagById.get(tagId))
@@ -8805,6 +8966,40 @@ export default function App(): JSX.Element {
         ...popularTagOptions.filter((tag) => !homeStripEditorActiveTagOptionIds.has(tag.id))
       ]
     : [];
+  const photoHomeStripDraftSelectedTags = photoHomeStripEditor
+    ? photoHomeStripEditor.draft.selectedTagIds
+        .map((tagId) => photoCatalogTagById.get(tagId))
+        .filter((tag): tag is PhotoCatalogTag => tag !== undefined)
+    : [];
+  const photoHomeStripDraftExcludedTags = photoHomeStripEditor
+    ? photoHomeStripEditor.draft.excludedTagIds
+        .map((tagId) => photoCatalogTagById.get(tagId))
+        .filter((tag): tag is PhotoCatalogTag => tag !== undefined)
+    : [];
+  const photoHomeStripDraftActiveTagCount = photoHomeStripEditor
+    ? photoHomeStripEditor.draft.selectedTagIds.length + photoHomeStripEditor.draft.excludedTagIds.length
+    : 0;
+  const visiblePhotoHomeStripTagSuggestions = photoHomeStripEditor
+    ? photoHomeStripTagSuggestions.filter(
+        (tag) =>
+          !photoHomeStripEditor.draft.selectedTagIds.includes(tag.id) &&
+          !photoHomeStripEditor.draft.excludedTagIds.includes(tag.id)
+      )
+    : [];
+  const photoHomeStripEditorActiveTagOptions: PhotoCatalogTag[] = [];
+  const photoHomeStripEditorActiveTagOptionIds = new Set<string>();
+  for (const tag of [...photoHomeStripDraftSelectedTags, ...photoHomeStripDraftExcludedTags]) {
+    if (!photoHomeStripEditorActiveTagOptionIds.has(tag.id)) {
+      photoHomeStripEditorActiveTagOptions.push(tag);
+      photoHomeStripEditorActiveTagOptionIds.add(tag.id);
+    }
+  }
+  const photoHomeStripEditorAvailableTagOptions = photoHomeStripEditor
+    ? [
+        ...photoHomeStripEditorActiveTagOptions,
+        ...popularPhotoTagOptions.filter((tag) => !photoHomeStripEditorActiveTagOptionIds.has(tag.id))
+      ]
+    : [];
   const isCatalogSortActive = filters.sortCategory !== 'none';
   const isRandomSortActive = filters.sortCategory === 'random';
   const isPhotoCollectionSortActive = photoCollectionFilters.sortCategory !== 'none';
@@ -8815,6 +9010,7 @@ export default function App(): JSX.Element {
     photoCollectionFilters.selectedTagIds.length > 0 ||
     photoCollectionFilters.excludedTagIds.length > 0 ||
     isPhotoCollectionSortActive;
+  const isPhotoHomeViewActive = !isAnyPhotoCollectionFilterActive;
   const photoCollectionCountLabel = `${filteredPhotoCollections.length} ${
     filteredPhotoCollections.length === 1 ? 'collection' : 'collections'
   } shown`;
@@ -9420,6 +9616,439 @@ export default function App(): JSX.Element {
     setHomeStripTagSuggestions([]);
   }
 
+  function createPhotoHomeStripDraftFromCurrentFilters(): PhotoHomeStripDraft {
+    const normalizedSearch = normalizeHomeStripText(photoCollectionFilters.search);
+    let name = 'Latest Collections';
+
+    if (normalizedSearch !== '') {
+      name = `Search: ${normalizedSearch.slice(0, 64)}`;
+    } else if (selectedPhotoFilterTags.length === 1 && excludedPhotoFilterTags.length === 0) {
+      name = `${selectedPhotoFilterTags[0].label} Collections`;
+    } else if (selectedPhotoFilterTags.length === 0 && excludedPhotoFilterTags.length === 1) {
+      name = `Without ${excludedPhotoFilterTags[0].label}`;
+    } else if (activePhotoTagFilterCount > 1) {
+      const firstTagLabel = selectedPhotoFilterTags[0]?.label ?? `Without ${excludedPhotoFilterTags[0]?.label ?? 'tag'}`;
+      name = `${firstTagLabel} + ${activePhotoTagFilterCount - 1} tags`;
+    } else if (isPhotoCollectionSortActive) {
+      name = `${PHOTO_COLLECTION_SORT_CATEGORY_LABELS[photoCollectionFilters.sortCategory]} ${
+        photoCollectionFilters.sortDirection === 'asc' ? 'Ascending' : 'Descending'
+      }`;
+    }
+
+    return {
+      name,
+      rowCount: 1,
+      search: normalizedSearch,
+      sortCategory: photoCollectionFilters.sortCategory,
+      sortDirection: photoCollectionFilters.sortDirection,
+      tagSearch: '',
+      selectedTagIds: [...photoCollectionFilters.selectedTagIds],
+      excludedTagIds: [...photoCollectionFilters.excludedTagIds]
+    };
+  }
+
+  function createPhotoHomeStripDraftFromStrip(strip: PhotoHomeStrip): PhotoHomeStripDraft {
+    return {
+      name: strip.name,
+      rowCount: strip.rowCount,
+      search: strip.search ?? '',
+      sortCategory: strip.sortCategory,
+      sortDirection: strip.sortDirection,
+      tagSearch: '',
+      selectedTagIds: [...strip.tagIds],
+      excludedTagIds: [...strip.excludedTagIds]
+    };
+  }
+
+  function openCreatePhotoHomeStripFromFilters(): void {
+    setPhotoHomeStripEditor({
+      mode: 'add',
+      stripId: null,
+      draft: createPhotoHomeStripDraftFromCurrentFilters(),
+      notice: null,
+      saving: false
+    });
+    setPhotoHomeStripTagSuggestions([]);
+    setIsPhotoHomeStripTagSearchFocused(false);
+  }
+
+  function openEditPhotoHomeStrip(strip: PhotoHomeStrip): void {
+    setPhotoHomeStripEditor({
+      mode: 'edit',
+      stripId: strip.id,
+      draft: createPhotoHomeStripDraftFromStrip(strip),
+      notice: null,
+      saving: false
+    });
+    setPhotoHomeStripTagSuggestions([]);
+    setIsPhotoHomeStripTagSearchFocused(false);
+  }
+
+  function updatePhotoHomeStripDraft(updater: (draft: PhotoHomeStripDraft) => PhotoHomeStripDraft): void {
+    setPhotoHomeStripEditor((currentValue) =>
+      currentValue
+        ? {
+            ...currentValue,
+            draft: updater(currentValue.draft),
+            notice: null
+          }
+        : currentValue
+    );
+  }
+
+  function createPhotoHomeStripRequestBody(draft: PhotoHomeStripDraft): {
+    name: string;
+    rowCount: PhotoHomeStripRowCount;
+    sortCategory: PhotoCollectionSortCategory;
+    sortDirection: PhotoCollectionSortDirection;
+    search: string | null;
+    tagIds: string[];
+    excludedTagIds: string[];
+  } {
+    const normalizedName = normalizeHomeStripText(draft.name);
+    const normalizedSearch = normalizeHomeStripText(draft.search);
+
+    return {
+      name: normalizedName,
+      rowCount: draft.rowCount,
+      sortCategory: draft.sortCategory,
+      sortDirection: draft.sortDirection,
+      search: normalizedSearch === '' ? null : normalizedSearch,
+      tagIds: Array.from(new Set(draft.selectedTagIds)),
+      excludedTagIds: Array.from(new Set(draft.excludedTagIds))
+    };
+  }
+
+  function setPhotoHomeStripEditorNotice(tone: NoticeTone, text: string): void {
+    setPhotoHomeStripEditor((currentValue) =>
+      currentValue
+        ? {
+            ...currentValue,
+            notice: { tone, text },
+            saving: false
+          }
+        : currentValue
+    );
+  }
+
+  function applyPhotoHomeStripsPayload(payload: unknown): boolean {
+    const strips = parsePhotoHomeStripsPayload(payload);
+    if (!strips) {
+      return false;
+    }
+
+    applyLoadedPhotoHomeStrips(strips);
+    return true;
+  }
+
+  async function savePhotoHomeStripEditor(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    const editor = photoHomeStripEditor;
+    if (!editor) {
+      return;
+    }
+
+    const requestBody = createPhotoHomeStripRequestBody(editor.draft);
+    if (requestBody.name === '') {
+      setPhotoHomeStripEditorNotice('error', 'Enter a section title.');
+      return;
+    }
+
+    setPhotoHomeStripEditor((currentValue) =>
+      currentValue
+        ? {
+            ...currentValue,
+            draft: {
+              ...currentValue.draft,
+              name: requestBody.name,
+              search: requestBody.search ?? ''
+            },
+            notice: null,
+            saving: true
+          }
+        : currentValue
+    );
+
+    const isEdit = editor.mode === 'edit' && editor.stripId !== null;
+    const endpoint = isEdit
+      ? `/api/photos/home-strips/${encodeURIComponent(editor.stripId as string)}`
+      : '/api/photos/home-strips';
+
+    try {
+      const response = await fetch(endpoint, {
+        method: isEdit ? 'PATCH' : 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify(requestBody)
+      });
+
+      if (response.status === 401) {
+        resetAuthenticatedState();
+        return;
+      }
+
+      const payload = await readJsonPayload(response);
+      if (!response.ok) {
+        const message = isRecord(payload) ? readString(payload.message) : null;
+        setPhotoHomeStripEditorNotice('error', message ?? 'Unable to save this photo home section.');
+        return;
+      }
+
+      if (!applyPhotoHomeStripsPayload(payload)) {
+        await loadPhotoHomeStrips();
+      }
+
+      setPhotoHomeStripEditor(null);
+      setPhotoHomeStripTagSuggestions([]);
+      setIsPhotoHomeStripTagSearchFocused(false);
+    } catch (error) {
+      setPhotoHomeStripEditorNotice(
+        'error',
+        error instanceof Error ? error.message : 'Unable to save this photo home section.'
+      );
+    }
+  }
+
+  async function deletePhotoHomeStrip(strip: PhotoHomeStrip): Promise<void> {
+    const confirmed = window.confirm(`Delete the "${strip.name}" photo home section?`);
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/photos/home-strips/${encodeURIComponent(strip.id)}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+
+      if (response.status === 401) {
+        resetAuthenticatedState();
+        return;
+      }
+
+      const payload = await readJsonPayload(response);
+      if (!response.ok) {
+        const message = isRecord(payload) ? readString(payload.message) : null;
+        console.warn('photo-home-strip.delete.failed', {
+          stripId: strip.id,
+          status: response.status,
+          message
+        });
+        return;
+      }
+
+      if (!applyPhotoHomeStripsPayload(payload)) {
+        setPhotoHomeStrips((currentValue) => currentValue.filter((candidate) => candidate.id !== strip.id));
+      }
+
+      setPhotoHomeStripEditor((currentValue) =>
+        currentValue?.stripId === strip.id ? null : currentValue
+      );
+    } catch (error) {
+      console.warn('photo-home-strip.delete.failed', {
+        stripId: strip.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  async function savePhotoHomeStripOrder(
+    nextStrips: PhotoHomeStrip[],
+    previousStrips: PhotoHomeStrip[],
+    failureContext: Record<string, unknown>
+  ): Promise<void> {
+    const optimisticStrips = nextStrips.map((strip, index) => ({
+      ...strip,
+      displayOrder: index
+    }));
+    setPhotoHomeStrips(optimisticStrips);
+
+    try {
+      const response = await fetch('/api/photos/home-strips/reorder', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify({ stripIds: optimisticStrips.map((strip) => strip.id) })
+      });
+
+      if (response.status === 401) {
+        setPhotoHomeStrips(previousStrips);
+        resetAuthenticatedState();
+        return;
+      }
+
+      const payload = await readJsonPayload(response);
+      if (!response.ok) {
+        throw new Error(isRecord(payload) ? readString(payload.message) ?? 'Unable to reorder photo home sections.' : 'Unable to reorder photo home sections.');
+      }
+
+      if (!applyPhotoHomeStripsPayload(payload)) {
+        await loadPhotoHomeStrips();
+      }
+    } catch (error) {
+      setPhotoHomeStrips(previousStrips);
+      console.warn('photo-home-strip.reorder.failed', {
+        ...failureContext,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  async function movePhotoHomeStrip(stripId: string, direction: PhotoHomeStripMoveDirection): Promise<void> {
+    const currentIndex = photoHomeStrips.findIndex((candidate) => candidate.id === stripId);
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= photoHomeStrips.length) {
+      return;
+    }
+
+    const nextStrips = [...photoHomeStrips];
+    const [movedStrip] = nextStrips.splice(currentIndex, 1);
+    nextStrips.splice(targetIndex, 0, movedStrip);
+
+    await savePhotoHomeStripOrder(nextStrips, photoHomeStrips, {
+      action: 'move',
+      stripId,
+      direction
+    });
+  }
+
+  async function reorderPhotoHomeStripRelative(
+    sourceStripId: string,
+    targetStripId: string,
+    position: PhotoHomeStripDropPosition
+  ): Promise<void> {
+    if (sourceStripId === targetStripId) {
+      return;
+    }
+
+    const sourceStrip = photoHomeStrips.find((strip) => strip.id === sourceStripId);
+    if (!sourceStrip) {
+      return;
+    }
+
+    const remainingStrips = photoHomeStrips.filter((strip) => strip.id !== sourceStripId);
+    const targetIndex = remainingStrips.findIndex((strip) => strip.id === targetStripId);
+    if (targetIndex < 0) {
+      return;
+    }
+
+    const insertionIndex = position === 'after' ? targetIndex + 1 : targetIndex;
+    const nextStrips = [...remainingStrips];
+    nextStrips.splice(insertionIndex, 0, sourceStrip);
+
+    await savePhotoHomeStripOrder(nextStrips, photoHomeStrips, {
+      action: 'drag-reorder',
+      sourceStripId,
+      targetStripId,
+      position
+    });
+  }
+
+  function getPhotoHomeStripDropPosition(event: ReactDragEvent<HTMLElement>): PhotoHomeStripDropPosition {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return event.clientY > bounds.top + bounds.height / 2 ? 'after' : 'before';
+  }
+
+  function clearPhotoHomeStripDragState(): void {
+    setDraggedPhotoHomeStripId(null);
+    setPhotoHomeStripDropTarget(null);
+  }
+
+  function handlePhotoHomeStripDragStart(stripId: string, event: ReactDragEvent<HTMLElement>): void {
+    if (!isFilterDrawerOpen || photoHomeStrips.length < 2) {
+      event.preventDefault();
+      return;
+    }
+
+    setDraggedPhotoHomeStripId(stripId);
+    setPhotoHomeStripDropTarget(null);
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', stripId);
+  }
+
+  function handlePhotoHomeStripDragOver(targetStripId: string, event: ReactDragEvent<HTMLElement>): void {
+    const sourceStripId = draggedPhotoHomeStripId || event.dataTransfer.getData('text/plain');
+    if (!isFilterDrawerOpen || sourceStripId === '' || sourceStripId === targetStripId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    const position = getPhotoHomeStripDropPosition(event);
+    setPhotoHomeStripDropTarget((currentValue) =>
+      currentValue?.stripId === targetStripId && currentValue.position === position
+        ? currentValue
+        : { stripId: targetStripId, position }
+    );
+  }
+
+  function handlePhotoHomeStripDragLeave(stripId: string, event: ReactDragEvent<HTMLElement>): void {
+    const relatedTarget = event.relatedTarget;
+    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) {
+      return;
+    }
+
+    setPhotoHomeStripDropTarget((currentValue) =>
+      currentValue?.stripId === stripId ? null : currentValue
+    );
+  }
+
+  function handlePhotoHomeStripDrop(targetStripId: string, event: ReactDragEvent<HTMLElement>): void {
+    event.preventDefault();
+
+    const sourceStripId = draggedPhotoHomeStripId || event.dataTransfer.getData('text/plain');
+    const position = getPhotoHomeStripDropPosition(event);
+    clearPhotoHomeStripDragState();
+
+    if (!isFilterDrawerOpen || sourceStripId === '' || sourceStripId === targetStripId) {
+      return;
+    }
+
+    void reorderPhotoHomeStripRelative(sourceStripId, targetStripId, position);
+  }
+
+  function cyclePhotoHomeStripDraftTag(tag: PhotoCatalogTag): void {
+    updatePhotoHomeStripDraft((draft) => {
+      const isIncluded = draft.selectedTagIds.includes(tag.id);
+      const isExcluded = draft.excludedTagIds.includes(tag.id);
+      const selectedTagIds = draft.selectedTagIds.filter((selectedTagId) => selectedTagId !== tag.id);
+      const excludedTagIds = draft.excludedTagIds.filter((excludedTagId) => excludedTagId !== tag.id);
+
+      if (!isIncluded && !isExcluded) {
+        selectedTagIds.push(tag.id);
+      } else if (isIncluded) {
+        excludedTagIds.push(tag.id);
+      }
+
+      return {
+        ...draft,
+        tagSearch: '',
+        selectedTagIds: Array.from(new Set(selectedTagIds)),
+        excludedTagIds: Array.from(new Set(excludedTagIds))
+      };
+    });
+    setPhotoHomeStripTagSuggestions([]);
+  }
+
+  function applyCurrentFiltersToPhotoHomeStripDraft(): void {
+    updatePhotoHomeStripDraft((draft) => ({
+      ...draft,
+      search: normalizeHomeStripText(photoCollectionFilters.search),
+      sortCategory: photoCollectionFilters.sortCategory,
+      sortDirection: photoCollectionFilters.sortDirection,
+      tagSearch: '',
+      selectedTagIds: [...photoCollectionFilters.selectedTagIds],
+      excludedTagIds: [...photoCollectionFilters.excludedTagIds]
+    }));
+    setPhotoHomeStripTagSuggestions([]);
+  }
+
   const activePipelineItems = useMemo<ActivityPanelItem[]>(() => {
     const pendingItems = pendingIngests
       .filter((candidate) => candidate.processing !== null)
@@ -9558,6 +10187,33 @@ export default function App(): JSX.Element {
     };
   }, [authenticated, homeStripEditor?.draft.tagSearch]);
 
+  useEffect(() => {
+    if (!authenticated || !photoHomeStripEditor) {
+      setPhotoHomeStripTagSuggestions([]);
+      return undefined;
+    }
+
+    const query = photoHomeStripEditor.draft.tagSearch.trim();
+    if (query === '') {
+      setPhotoHomeStripTagSuggestions([]);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void fetchPhotoTagSuggestions(query, 10).then((tags) => {
+        if (!cancelled) {
+          setPhotoHomeStripTagSuggestions(tags);
+        }
+      });
+    }, 160);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [authenticated, photoHomeStripEditor?.draft.tagSearch]);
+
   function resetUploadSelection(): void {
     setSelectedFile(null);
     setUploadInputKey((currentValue) => currentValue + 1);
@@ -9625,6 +10281,9 @@ export default function App(): JSX.Element {
     setPhotoViewerPhotoId(null);
     setHomeStrips([]);
     setHomeStripRandomSeed(createCatalogRandomSeed());
+    setPhotoHomeStrips([]);
+    setDraggedPhotoHomeStripId(null);
+    setPhotoHomeStripDropTarget(null);
     setPendingIngests([]);
     setRecentActivity([]);
     setFilters(getDefaultCatalogFilters());
@@ -9640,6 +10299,9 @@ export default function App(): JSX.Element {
     setHomeStripEditor(null);
     setHomeStripTagSuggestions([]);
     setIsHomeStripTagSearchFocused(false);
+    setPhotoHomeStripEditor(null);
+    setPhotoHomeStripTagSuggestions([]);
+    setIsPhotoHomeStripTagSearchFocused(false);
     setToolAvailability(DEFAULT_TOOL_AVAILABILITY);
     setStorageUsage(null);
     setSocketConnectionState('disconnected');
@@ -9763,6 +10425,10 @@ export default function App(): JSX.Element {
   function applyLoadedHomeStrips(strips: CatalogHomeStrip[]): void {
     setHomeStrips(strips);
     refreshHomeStripRandomSeed();
+  }
+
+  function applyLoadedPhotoHomeStrips(strips: PhotoHomeStrip[]): void {
+    setPhotoHomeStrips(strips);
   }
 
   function applyRuntime(data: RuntimeInfo): void {
@@ -10227,6 +10893,29 @@ export default function App(): JSX.Element {
     }
 
     applyLoadedHomeStrips(strips);
+  }
+
+  async function loadPhotoHomeStrips(): Promise<void> {
+    const response = await fetch('/api/photos/home-strips', {
+      credentials: 'include'
+    });
+
+    if (response.status === 401) {
+      resetAuthenticatedState();
+      return;
+    }
+
+    if (!response.ok) {
+      return;
+    }
+
+    const payload = await readJsonPayload(response);
+    const strips = parsePhotoHomeStripsPayload(payload);
+    if (!strips) {
+      return;
+    }
+
+    applyLoadedPhotoHomeStrips(strips);
   }
 
   async function fetchTagSuggestions(query: string, limit = 10): Promise<CatalogTag[]> {
@@ -11840,6 +12529,7 @@ export default function App(): JSX.Element {
       setPhotoViewerPhotoId(null);
       void loadPhotoCollections();
       void loadPhotoTagOptions();
+      void loadPhotoHomeStrips();
       return;
     }
 
@@ -11857,7 +12547,9 @@ export default function App(): JSX.Element {
     ? `${selectedPhotoCollection.name} · ${selectedPhotoCollection.photoCount} ${selectedPhotoCollection.photoCount === 1 ? 'photo' : 'photos'}`
     : isAnyPhotoCollectionFilterActive
       ? photoCollectionCountLabel
-      : `${photoCollections.length} photo ${photoCollections.length === 1 ? 'collection' : 'collections'}`;
+      : isPhotoHomeViewActive
+        ? `${photoHomeStrips.length} saved photo home ${photoHomeStrips.length === 1 ? 'section' : 'sections'}`
+        : `${photoCollections.length} photo ${photoCollections.length === 1 ? 'collection' : 'collections'}`;
   const mobileBrowseSummary =
     catalogMode === 'photos'
       ? photoBrowseSummary
@@ -11871,6 +12563,7 @@ export default function App(): JSX.Element {
     if (catalogMode === 'photos') {
       void loadPhotoCollections();
       void loadPhotoTagOptions();
+      void loadPhotoHomeStrips();
       return;
     }
 
@@ -12409,6 +13102,88 @@ export default function App(): JSX.Element {
           </div>
           {photoTagListLimitNote ? <p className="tag-list-limit-note">{photoTagListLimitNote}</p> : null}
         </section>
+
+        <section className="home-strip-sidebar-section" aria-labelledby="photo-home-strip-sidebar-heading">
+          <div className="filter-section-heading home-strip-sidebar-heading">
+            <div className="home-strip-sidebar-title">
+              <h3 id="photo-home-strip-sidebar-heading">Quick Strips</h3>
+            </div>
+            <button
+              type="button"
+              className="home-strip-create-icon-button"
+              disabled={!isFilterDrawerOpen}
+              onClick={openCreatePhotoHomeStripFromFilters}
+              aria-label="Save current photo collection filters as a quick strip"
+              title="Save current search, sort, and tags"
+            >
+              <PlusIcon />
+            </button>
+          </div>
+          <p className="filter-section-description home-strip-sidebar-hint">
+            Drag to reorder. Use + to save the current photo collection search, sort, and tags to a new strip.
+          </p>
+
+          {photoHomeStrips.length > 0 ? (
+            <div className="home-strip-sidebar-list" role="list" aria-label="Saved photo home layout sections">
+              {photoHomeStrips.map((strip, index) => {
+                const isDragging = draggedPhotoHomeStripId === strip.id;
+                const isDropBefore =
+                  photoHomeStripDropTarget?.stripId === strip.id && photoHomeStripDropTarget.position === 'before';
+                const isDropAfter =
+                  photoHomeStripDropTarget?.stripId === strip.id && photoHomeStripDropTarget.position === 'after';
+                const canDragPhotoHomeStrip = isFilterDrawerOpen && photoHomeStrips.length > 1;
+
+                return (
+                  <article
+                    key={strip.id}
+                    className={`home-strip-sidebar-item${isDragging ? ' is-dragging' : ''}${
+                      isDropBefore ? ' is-drop-before' : ''
+                    }${isDropAfter ? ' is-drop-after' : ''}`}
+                    role="listitem"
+                    onDragOver={(event: ReactDragEvent<HTMLElement>) =>
+                      handlePhotoHomeStripDragOver(strip.id, event)
+                    }
+                    onDragLeave={(event: ReactDragEvent<HTMLElement>) =>
+                      handlePhotoHomeStripDragLeave(strip.id, event)
+                    }
+                    onDrop={(event: ReactDragEvent<HTMLElement>) => handlePhotoHomeStripDrop(strip.id, event)}
+                  >
+                    <span
+                      className={`home-strip-sidebar-drag-handle${canDragPhotoHomeStrip ? '' : ' is-disabled'}`}
+                      draggable={canDragPhotoHomeStrip}
+                      onDragStart={(event: ReactDragEvent<HTMLElement>) =>
+                        handlePhotoHomeStripDragStart(strip.id, event)
+                      }
+                      onDragEnd={clearPhotoHomeStripDragState}
+                      aria-label={`Drag ${strip.name} to reorder`}
+                      title={photoHomeStrips.length > 1 ? 'Drag to reorder' : 'Add more strips to reorder'}
+                    >
+                      <GripIcon />
+                    </span>
+                    <div className="home-strip-sidebar-item-copy">
+                      <strong title={strip.name}>{strip.name}</strong>
+                      <span>
+                        {strip.rowCount} {strip.rowCount === 1 ? 'row' : 'rows'}
+                      </span>
+                    </div>
+                    <PhotoHomeStripActionMenu
+                      strip={strip}
+                      index={index}
+                      totalCount={photoHomeStrips.length}
+                      disabled={!isFilterDrawerOpen}
+                      className="home-strip-sidebar-menu"
+                      onMove={(stripId, direction) => void movePhotoHomeStrip(stripId, direction)}
+                      onEdit={openEditPhotoHomeStrip}
+                      onDelete={(nextStrip) => void deletePhotoHomeStrip(nextStrip)}
+                    />
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="empty-inline-state">No photo home sections saved yet.</div>
+          )}
+        </section>
       </div>
     </section>
   );
@@ -12492,6 +13267,12 @@ export default function App(): JSX.Element {
         isActive={catalogMode === 'photos'}
         attemptFullscreenOnOpen={attemptFullscreenOnOpen}
         photoFavoritesBrowseRequestId={photoFavoritesBrowseRequestId}
+        homeStrips={photoHomeStrips}
+        isHomeViewActive={isPhotoHomeViewActive}
+        onReturnHome={clearPhotoCollectionFilters}
+        onMoveHomeStrip={(stripId, direction) => void movePhotoHomeStrip(stripId, direction)}
+        onEditHomeStrip={openEditPhotoHomeStrip}
+        onDeleteHomeStrip={(strip) => void deletePhotoHomeStrip(strip)}
         onSelectCollection={(collectionId) => {
           setSelectedPhotoCollectionId(collectionId);
           setPhotoViewerPhotoId(null);
@@ -12783,6 +13564,254 @@ export default function App(): JSX.Element {
                 disabled={homeStripEditor.saving || normalizeHomeStripText(homeStripEditor.draft.name) === ''}
               >
                 {homeStripEditor.saving ? 'Saving…' : 'Save section'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {photoHomeStripEditor && (
+        <Modal
+          title={photoHomeStripEditor.mode === 'add' ? 'Add photo home section' : 'Edit photo home section'}
+          titleId="photo-home-strip-editor-title"
+          onClose={() => {
+            if (!photoHomeStripEditor.saving) {
+              setPhotoHomeStripEditor(null);
+              setPhotoHomeStripTagSuggestions([]);
+              setIsPhotoHomeStripTagSearchFocused(false);
+            }
+          }}
+          disableClose={photoHomeStripEditor.saving}
+        >
+          <form
+            className="home-strip-editor-form"
+            onSubmit={(event: FormEvent<HTMLFormElement>) => void savePhotoHomeStripEditor(event)}
+          >
+            <p className="filter-section-description">
+              Save the photo collection search, sort, and tag criteria used by this home section. It appears in the
+              default Photos home view until you start browsing with active filters.
+            </p>
+
+            {photoHomeStripEditor.notice ? (
+              <p className={`notice notice-${photoHomeStripEditor.notice.tone}`} aria-live="polite">
+                {photoHomeStripEditor.notice.text}
+              </p>
+            ) : null}
+
+            <div className="field-grid-two">
+              <div>
+                <label htmlFor="photo-home-strip-name">Section title</label>
+                <input
+                  id="photo-home-strip-name"
+                  type="text"
+                  value={photoHomeStripEditor.draft.name}
+                  disabled={photoHomeStripEditor.saving}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    updatePhotoHomeStripDraft((draft) => ({
+                      ...draft,
+                      name: event.target.value
+                    }))
+                  }
+                />
+              </div>
+              <div>
+                <label htmlFor="photo-home-strip-row-count">Rows</label>
+                <select
+                  id="photo-home-strip-row-count"
+                  value={String(photoHomeStripEditor.draft.rowCount)}
+                  disabled={photoHomeStripEditor.saving}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                    updatePhotoHomeStripDraft((draft) => ({
+                      ...draft,
+                      rowCount: normalizePhotoHomeStripRowCount(event.target.value)
+                    }))
+                  }
+                >
+                  <option value="1">1 row</option>
+                  <option value="2">2 rows</option>
+                  <option value="3">3 rows</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="field-grid-two">
+              <div>
+                <label htmlFor="photo-home-strip-sort">Sort by</label>
+                <select
+                  id="photo-home-strip-sort"
+                  value={photoHomeStripEditor.draft.sortCategory}
+                  disabled={photoHomeStripEditor.saving}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                    updatePhotoHomeStripDraft((draft) => ({
+                      ...draft,
+                      sortCategory: event.target.value as PhotoCollectionSortCategory
+                    }))
+                  }
+                >
+                  {Object.entries(PHOTO_COLLECTION_SORT_CATEGORY_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="photo-home-strip-sort-direction">Direction</label>
+                <select
+                  id="photo-home-strip-sort-direction"
+                  value={photoHomeStripEditor.draft.sortDirection}
+                  disabled={
+                    photoHomeStripEditor.saving ||
+                    photoHomeStripEditor.draft.sortCategory === 'none' ||
+                    photoHomeStripEditor.draft.sortCategory === 'random'
+                  }
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                    updatePhotoHomeStripDraft((draft) => ({
+                      ...draft,
+                      sortDirection: event.target.value as PhotoCollectionSortDirection
+                    }))
+                  }
+                >
+                  <option value="desc">Descending</option>
+                  <option value="asc">Ascending</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label htmlFor="photo-home-strip-search">Search term</label>
+              <input
+                id="photo-home-strip-search"
+                type="search"
+                value={photoHomeStripEditor.draft.search}
+                placeholder="Optional search text"
+                disabled={photoHomeStripEditor.saving}
+                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                  updatePhotoHomeStripDraft((draft) => ({
+                    ...draft,
+                    search: event.target.value
+                  }))
+                }
+              />
+            </div>
+
+            <section className="tag-filter-section home-strip-editor-tags" aria-labelledby="photo-home-strip-editor-tags-heading">
+              <div className="filter-section-heading">
+                <h3 id="photo-home-strip-editor-tags-heading">Tag filters</h3>
+                <span className="tag-selected-count">{photoHomeStripDraftActiveTagCount}</span>
+              </div>
+              <p className="filter-section-description">
+                Click once to require a tag, again to exclude it, and a third time to clear it.
+              </p>
+
+              {photoHomeStripDraftActiveTagCount === 0 ? (
+                <p className="filter-section-description">Leave tags empty to match every photo collection.</p>
+              ) : null}
+
+              <div className="tag-filter-input-wrap">
+                <input
+                  id="photo-home-strip-tag-search"
+                  type="search"
+                  value={photoHomeStripEditor.draft.tagSearch}
+                  placeholder="Search tags to add"
+                  disabled={photoHomeStripEditor.saving}
+                  autoComplete="off"
+                  onFocus={() => setIsPhotoHomeStripTagSearchFocused(true)}
+                  onBlur={() => {
+                    window.setTimeout(() => setIsPhotoHomeStripTagSearchFocused(false), 120);
+                  }}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    updatePhotoHomeStripDraft((draft) => ({
+                      ...draft,
+                      tagSearch: event.target.value
+                    }))
+                  }
+                />
+
+                {photoHomeStripEditor.draft.tagSearch.trim() !== '' && isPhotoHomeStripTagSearchFocused ? (
+                  <div className="tag-filter-suggestion-list" role="group" aria-label="Matching photo home section tags">
+                    {visiblePhotoHomeStripTagSuggestions.length > 0 ? (
+                      visiblePhotoHomeStripTagSuggestions.map((tag) => (
+                        <button
+                          type="button"
+                          className="tag-filter-option tag-filter-pill tag-filter-suggestion-pill"
+                          key={tag.id}
+                          aria-pressed={getTagFilterPillAriaPressed('inactive')}
+                          aria-label={getTagFilterPillAccessibilityLabel(tag, 'inactive')}
+                          title={getTagFilterPillAccessibilityLabel(tag, 'inactive')}
+                          onMouseDown={(event: MouseEvent<HTMLButtonElement>) => event.preventDefault()}
+                          onClick={() => cyclePhotoHomeStripDraftTag(tag)}
+                        >
+                          <span className="tag-filter-option-label">{tag.label}</span>
+                          <span className="tag-usage-count">{tag.usageCount}</span>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="empty-inline-state">No matching tags.</div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="tag-options-list tag-filter-action-list" role="group" aria-label="Available photo home section tags">
+                {photoHomeStripEditorAvailableTagOptions.length > 0 ? (
+                  photoHomeStripEditorAvailableTagOptions.map((tag) => {
+                    const isIncluded = photoHomeStripEditor.draft.selectedTagIds.includes(tag.id);
+                    const isExcluded = photoHomeStripEditor.draft.excludedTagIds.includes(tag.id);
+                    const tagFilterState = getTagFilterState(isIncluded, isExcluded);
+                    const tagFilterLabel = getTagFilterPillAccessibilityLabel(tag, tagFilterState);
+
+                    return (
+                      <button
+                        type="button"
+                        className={`tag-filter-option tag-filter-pill${getTagFilterPillStateClassName(
+                          tagFilterState
+                        )}`}
+                        key={tag.id}
+                        disabled={photoHomeStripEditor.saving}
+                        onClick={() => cyclePhotoHomeStripDraftTag(tag)}
+                        aria-pressed={getTagFilterPillAriaPressed(tagFilterState)}
+                        aria-label={tagFilterLabel}
+                        title={tagFilterLabel}
+                      >
+                        <span className="tag-filter-option-label">{tag.label}</span>
+                        <span className="tag-usage-count">{tag.usageCount}</span>
+                      </button>
+                    );
+                  })
+                ) : (
+                  <div className="empty-inline-state">No additional tags available.</div>
+                )}
+              </div>
+            </section>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="app-button secondary"
+                disabled={photoHomeStripEditor.saving}
+                onClick={applyCurrentFiltersToPhotoHomeStripDraft}
+              >
+                Use current filters
+              </button>
+              <button
+                type="button"
+                className="app-button secondary"
+                disabled={photoHomeStripEditor.saving}
+                onClick={() => {
+                  setPhotoHomeStripEditor(null);
+                  setPhotoHomeStripTagSuggestions([]);
+                  setIsPhotoHomeStripTagSearchFocused(false);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="app-button"
+                disabled={photoHomeStripEditor.saving || normalizeHomeStripText(photoHomeStripEditor.draft.name) === ''}
+              >
+                {photoHomeStripEditor.saving ? 'Saving…' : 'Save section'}
               </button>
             </div>
           </form>

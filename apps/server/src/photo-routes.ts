@@ -22,7 +22,11 @@ import type {
   PhotoCollectionDetailPayload,
   PhotoCollectionListPayload,
   PhotoCollectionQueryInput,
-  PhotoCollectionSort
+  PhotoCollectionSort,
+  PhotoHomeStripListPayload,
+  PhotoHomeStripRowCount,
+  PhotoHomeStripSortCategory,
+  PhotoHomeStripSortDirection
 } from './types';
 import type { SessionStore } from './session-store';
 
@@ -41,6 +45,7 @@ const PHOTO_FILE_SEARCH_MAX_DEPTH = 8;
 const PHOTO_FILE_SEARCH_MAX_ENTRIES = 25000;
 const DEFAULT_PHOTO_COLLECTION_SORT: PhotoCollectionSort = 'newest';
 const PHOTO_COLLECTION_NAME_MAX_LENGTH = 160;
+const PHOTO_HOME_STRIP_NAME_MAX_LENGTH = 120;
 const PHOTO_IMPORT_SKIPPED_FILE_RESPONSE_LIMIT = 25;
 const PHOTO_IMPORT_SKIPPED_FILE_MESSAGE_LIMIT = 6;
 const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
@@ -53,6 +58,16 @@ const ZIP64_PLACEHOLDER = 0xffffffff;
 const ZIP_END_OF_CENTRAL_DIRECTORY_MIN_LENGTH = 22;
 const ZIP_END_OF_CENTRAL_DIRECTORY_MAX_COMMENT_LENGTH = 0xffff;
 const ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_LENGTH = 20;
+
+const PHOTO_HOME_STRIP_SORT_CATEGORIES: PhotoHomeStripSortCategory[] = [
+  'none',
+  'createdAt',
+  'name',
+  'photoCount',
+  'lastViewedAt',
+  'viewCount',
+  'random'
+];
 
 export type PhotoRoutesOptions = {
   config: AppConfig;
@@ -152,6 +167,16 @@ type PhotoImportReport = {
 
 type PhotoImportResultPayload = PhotoCollectionDetailPayload & {
   importReport: PhotoImportReport;
+};
+
+type ParsedPhotoHomeStripBody = {
+  name: string;
+  rowCount: PhotoHomeStripRowCount;
+  sortCategory: PhotoHomeStripSortCategory;
+  sortDirection: PhotoHomeStripSortDirection;
+  search: string | null;
+  tagIds: string[];
+  excludedTagIds: string[];
 };
 
 type StoredPhotoFile = {
@@ -324,6 +349,116 @@ function createPhotoCollectionQueryInput(request: FastifyRequest): PhotoCollecti
     excludedTagIds: readQueryStringList(query.excludedTagIds ?? query.excludedTags),
     sort: isPhotoCollectionSort(sortValue) ? sortValue : DEFAULT_PHOTO_COLLECTION_SORT
   };
+}
+
+function normalizePhotoHomeStripText(value: string | null | undefined, maxLength = Number.POSITIVE_INFINITY): string {
+  return (value ?? '')
+    .normalize('NFKC')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, maxLength);
+}
+
+function isPhotoHomeStripRowCount(value: number): value is PhotoHomeStripRowCount {
+  return value === 1 || value === 2 || value === 3;
+}
+
+function isPhotoHomeStripSortCategory(value: string): value is PhotoHomeStripSortCategory {
+  return PHOTO_HOME_STRIP_SORT_CATEGORIES.includes(value as PhotoHomeStripSortCategory);
+}
+
+function readPhotoHomeStripTagIds(value: unknown): string[] | null {
+  if (value === undefined || value === null) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const tagIds: string[] = [];
+  for (const candidate of value) {
+    if (typeof candidate !== 'string') {
+      return null;
+    }
+
+    const trimmedTagId = candidate.trim();
+    if (trimmedTagId !== '' && !tagIds.includes(trimmedTagId)) {
+      tagIds.push(trimmedTagId);
+    }
+  }
+
+  return tagIds;
+}
+
+function parsePhotoHomeStripBody(body: unknown): ParsedPhotoHomeStripBody | null {
+  if (!isRecord(body)) {
+    return null;
+  }
+
+  const nameValue = typeof body.name === 'string' ? body.name : null;
+  const rowCountValue = typeof body.rowCount === 'number' ? body.rowCount : Number(body.rowCount);
+  const sortCategoryValue = typeof body.sortCategory === 'string' ? body.sortCategory : null;
+  const sortDirectionValue = typeof body.sortDirection === 'string' ? body.sortDirection : null;
+  const searchValue = body.search === undefined || body.search === null
+    ? null
+    : typeof body.search === 'string'
+      ? body.search
+      : undefined;
+  const tagIds = readPhotoHomeStripTagIds(body.tagIds);
+  const excludedTagIds = readPhotoHomeStripTagIds(body.excludedTagIds);
+
+  if (
+    nameValue === null ||
+    !Number.isFinite(rowCountValue) ||
+    !isPhotoHomeStripRowCount(rowCountValue) ||
+    !sortCategoryValue ||
+    !isPhotoHomeStripSortCategory(sortCategoryValue) ||
+    (sortDirectionValue !== 'asc' && sortDirectionValue !== 'desc') ||
+    searchValue === undefined ||
+    tagIds === null ||
+    excludedTagIds === null
+  ) {
+    return null;
+  }
+
+  const name = normalizePhotoHomeStripText(nameValue, PHOTO_HOME_STRIP_NAME_MAX_LENGTH);
+  if (name === '') {
+    return null;
+  }
+
+  const search = normalizePhotoHomeStripText(searchValue);
+
+  return {
+    name,
+    rowCount: rowCountValue,
+    sortCategory: sortCategoryValue,
+    sortDirection: sortDirectionValue,
+    search: search === '' ? null : search,
+    tagIds,
+    excludedTagIds
+  };
+}
+
+function parsePhotoHomeStripIdParam(request: FastifyRequest): string | null {
+  return getRequestParam(request, 'id');
+}
+
+function parsePhotoHomeStripReorderBody(body: unknown): { stripIds: string[] } | null {
+  if (!isRecord(body)) {
+    return null;
+  }
+
+  const stripIds = readPhotoHomeStripTagIds(body.stripIds);
+  if (stripIds === null) {
+    return null;
+  }
+
+  return { stripIds };
+}
+
+function createPhotoHomeStripListPayload(photoStore: PhotoCatalogStore): PhotoHomeStripListPayload {
+  return { strips: photoStore.listHomeStrips() };
 }
 
 function queryPhotoCollections(
@@ -2023,6 +2158,122 @@ function serializePhotoImportResult(
 
 export function registerPhotoRoutes(app: FastifyInstance, options: PhotoRoutesOptions): void {
   const { config, photoStore } = options;
+
+  app.get('/api/photos/home-strips', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!getAuthenticatedSessionId(request, reply, options)) {
+      return;
+    }
+
+    reply.send(createPhotoHomeStripListPayload(photoStore));
+  });
+
+  app.post('/api/photos/home-strips', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!getAuthenticatedSessionId(request, reply, options)) {
+      return;
+    }
+
+    const body = parsePhotoHomeStripBody(request.body);
+    if (!body) {
+      reply.code(400).send({
+        ok: false,
+        message: 'Provide a strip name, row count, sort, direction, optional search, and optional include/exclude tag ids.'
+      });
+      return;
+    }
+
+    const strip = await photoStore.createHomeStrip(body);
+    reply.code(201).send({
+      ok: true,
+      strip,
+      ...createPhotoHomeStripListPayload(photoStore)
+    });
+  });
+
+  app.put('/api/photos/home-strips/reorder', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!getAuthenticatedSessionId(request, reply, options)) {
+      return;
+    }
+
+    const body = parsePhotoHomeStripReorderBody(request.body);
+    if (!body) {
+      reply.code(400).send({
+        ok: false,
+        message: 'Provide an ordered stripIds array.'
+      });
+      return;
+    }
+
+    const strips = await photoStore.reorderHomeStrips(body.stripIds);
+    if (!strips) {
+      reply.code(400).send({
+        ok: false,
+        message: 'One or more strip ids do not exist.'
+      });
+      return;
+    }
+
+    reply.send({
+      ok: true,
+      strips
+    });
+  });
+
+  app.patch('/api/photos/home-strips/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!getAuthenticatedSessionId(request, reply, options)) {
+      return;
+    }
+
+    const stripId = parsePhotoHomeStripIdParam(request);
+    if (!stripId) {
+      reply.code(400).send({ ok: false, message: 'A strip id is required.' });
+      return;
+    }
+
+    const body = parsePhotoHomeStripBody(request.body);
+    if (!body) {
+      reply.code(400).send({
+        ok: false,
+        message: 'Provide a strip name, row count, sort, direction, optional search, and optional include/exclude tag ids.'
+      });
+      return;
+    }
+
+    const strip = await photoStore.updateHomeStrip(stripId, body);
+    if (!strip) {
+      reply.code(404).send({ ok: false, message: 'Photo home strip not found.' });
+      return;
+    }
+
+    reply.send({
+      ok: true,
+      strip,
+      ...createPhotoHomeStripListPayload(photoStore)
+    });
+  });
+
+  app.delete('/api/photos/home-strips/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!getAuthenticatedSessionId(request, reply, options)) {
+      return;
+    }
+
+    const stripId = parsePhotoHomeStripIdParam(request);
+    if (!stripId) {
+      reply.code(400).send({ ok: false, message: 'A strip id is required.' });
+      return;
+    }
+
+    const strip = await photoStore.deleteHomeStrip(stripId);
+    if (!strip) {
+      reply.code(404).send({ ok: false, message: 'Photo home strip not found.' });
+      return;
+    }
+
+    reply.send({
+      ok: true,
+      strip,
+      ...createPhotoHomeStripListPayload(photoStore)
+    });
+  });
 
   app.get('/api/photos/collections', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!getAuthenticatedSessionId(request, reply, options)) {
