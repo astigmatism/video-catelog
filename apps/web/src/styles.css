@@ -5773,17 +5773,20 @@ label {
 }
 
 .photo-viewer-slideshow-transport,
-.photo-viewer-slide-duration {
+.photo-viewer-slide-duration,
+.photo-viewer-slideshow-style {
   flex: 0 0 auto;
 }
 
-.photo-viewer-slide-duration {
+.photo-viewer-slide-duration,
+.photo-viewer-slideshow-style {
   position: relative;
   gap: 0.42rem;
   padding-right: 0.56rem;
 }
 
-.photo-viewer-slide-duration::after {
+.photo-viewer-slide-duration::after,
+.photo-viewer-slideshow-style::after {
   content: '';
   position: absolute;
   top: 50%;
@@ -5797,7 +5800,8 @@ label {
   transform: translateY(-50%);
 }
 
-.photo-viewer-slide-duration-label {
+.photo-viewer-slide-duration-label,
+.photo-viewer-slideshow-style-label {
   color: rgba(191, 219, 254, 0.78);
   font-size: 0.68rem;
   font-weight: 800;
@@ -5806,7 +5810,8 @@ label {
   text-transform: uppercase;
 }
 
-.photo-viewer-slide-duration-select {
+.photo-viewer-slide-duration-select,
+.photo-viewer-slideshow-style-select {
   width: auto;
   min-width: 6.15rem;
   padding: 0.32rem 1.42rem 0.32rem 0.62rem;
@@ -5823,18 +5828,26 @@ label {
   text-align: left;
 }
 
+.photo-viewer-slideshow-style-select {
+  min-width: 7.45rem;
+}
+
 .photo-viewer-slide-duration-select:hover,
-.photo-viewer-slide-duration-select:focus {
+.photo-viewer-slide-duration-select:focus,
+.photo-viewer-slideshow-style-select:hover,
+.photo-viewer-slideshow-style-select:focus {
   border-color: rgba(147, 197, 253, 0.44);
   background: rgba(30, 41, 59, 0.78);
 }
 
-.photo-viewer-slide-duration-select:focus-visible {
+.photo-viewer-slide-duration-select:focus-visible,
+.photo-viewer-slideshow-style-select:focus-visible {
   outline: 2px solid rgba(96, 165, 250, 0.72);
   outline-offset: 2px;
 }
 
-.photo-viewer-slide-duration-select option {
+.photo-viewer-slide-duration-select option,
+.photo-viewer-slideshow-style-select option {
   background: #0f172a;
   color: #f8fafc;
 }
@@ -5885,8 +5898,28 @@ label {
   background: #02060c;
 }
 
+.photo-viewer-frame {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  will-change: opacity, transform, filter;
+}
+
+.photo-viewer-frame.is-outgoing {
+  z-index: 1;
+  pointer-events: none;
+}
+
+.photo-viewer-frame.is-current {
+  z-index: 2;
+}
+
 .photo-viewer-image {
   display: block;
+  flex: 0 0 auto;
   width: 100%;
   height: 100%;
   max-width: none;
@@ -5895,6 +5928,222 @@ label {
   border-radius: 0;
   box-shadow: none;
   user-select: none;
+}
+
+.photo-viewer-frame.is-transition-in {
+  animation: photo-viewer-crossfade-in var(--photo-viewer-transition-duration, 720ms) ease both;
+}
+
+.photo-viewer-frame.is-transition-out {
+  animation: photo-viewer-crossfade-out var(--photo-viewer-transition-duration, 720ms) ease both;
+}
+
+.photo-viewer-frame.is-transition-mode-dissolve.is-transition-in {
+  animation: photo-viewer-dissolve-in var(--photo-viewer-transition-duration, 720ms) ease both;
+}
+
+.photo-viewer-frame.is-transition-mode-dissolve.is-transition-out {
+  animation: photo-viewer-dissolve-out var(--photo-viewer-transition-duration, 720ms) ease both;
+}
+
+.photo-viewer-frame.is-transition-mode-slide.is-direction-next.is-transition-in {
+  animation: photo-viewer-slide-next-in var(--photo-viewer-transition-duration, 720ms) cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.photo-viewer-frame.is-transition-mode-slide.is-direction-next.is-transition-out {
+  animation: photo-viewer-slide-next-out var(--photo-viewer-transition-duration, 720ms) cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.photo-viewer-frame.is-transition-mode-slide.is-direction-previous.is-transition-in {
+  animation: photo-viewer-slide-previous-in var(--photo-viewer-transition-duration, 720ms) cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.photo-viewer-frame.is-transition-mode-slide.is-direction-previous.is-transition-out {
+  animation: photo-viewer-slide-previous-out var(--photo-viewer-transition-duration, 720ms) cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.photo-viewer-frame.is-ken-burns-active.is-ken-burns-zoom-in {
+  animation: photo-viewer-ken-burns-zoom-in var(--photo-viewer-ken-burns-duration, 5000ms) ease-in-out both;
+}
+
+.photo-viewer-frame.is-ken-burns-active.is-ken-burns-pan-right {
+  animation: photo-viewer-ken-burns-pan-right var(--photo-viewer-ken-burns-duration, 5000ms) ease-in-out both;
+}
+
+.photo-viewer-frame.is-ken-burns-active.is-ken-burns-pan-left {
+  animation: photo-viewer-ken-burns-pan-left var(--photo-viewer-ken-burns-duration, 5000ms) ease-in-out both;
+}
+
+.photo-viewer-frame.is-ken-burns-active.is-ken-burns-pan-down {
+  animation: photo-viewer-ken-burns-pan-down var(--photo-viewer-ken-burns-duration, 5000ms) ease-in-out both;
+}
+
+.photo-viewer-frame.is-transition-mode-ken-burns.is-transition-in.is-ken-burns-active.is-ken-burns-zoom-in {
+  animation:
+    photo-viewer-crossfade-in var(--photo-viewer-transition-duration, 720ms) ease both,
+    photo-viewer-ken-burns-zoom-in var(--photo-viewer-ken-burns-duration, 5000ms) ease-in-out both;
+}
+
+.photo-viewer-frame.is-transition-mode-ken-burns.is-transition-in.is-ken-burns-active.is-ken-burns-pan-right {
+  animation:
+    photo-viewer-crossfade-in var(--photo-viewer-transition-duration, 720ms) ease both,
+    photo-viewer-ken-burns-pan-right var(--photo-viewer-ken-burns-duration, 5000ms) ease-in-out both;
+}
+
+.photo-viewer-frame.is-transition-mode-ken-burns.is-transition-in.is-ken-burns-active.is-ken-burns-pan-left {
+  animation:
+    photo-viewer-crossfade-in var(--photo-viewer-transition-duration, 720ms) ease both,
+    photo-viewer-ken-burns-pan-left var(--photo-viewer-ken-burns-duration, 5000ms) ease-in-out both;
+}
+
+.photo-viewer-frame.is-transition-mode-ken-burns.is-transition-in.is-ken-burns-active.is-ken-burns-pan-down {
+  animation:
+    photo-viewer-crossfade-in var(--photo-viewer-transition-duration, 720ms) ease both,
+    photo-viewer-ken-burns-pan-down var(--photo-viewer-ken-burns-duration, 5000ms) ease-in-out both;
+}
+
+@keyframes photo-viewer-crossfade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes photo-viewer-crossfade-out {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes photo-viewer-dissolve-in {
+  from {
+    opacity: 0;
+    filter: blur(10px);
+    transform: scale(1.018);
+  }
+
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: scale(1);
+  }
+}
+
+@keyframes photo-viewer-dissolve-out {
+  from {
+    opacity: 1;
+    filter: blur(0);
+    transform: scale(1);
+  }
+
+  to {
+    opacity: 0;
+    filter: blur(8px);
+    transform: scale(0.992);
+  }
+}
+
+@keyframes photo-viewer-slide-next-in {
+  from {
+    opacity: 0;
+    transform: translate3d(2.4rem, 0, 0);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes photo-viewer-slide-next-out {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+
+  to {
+    opacity: 0;
+    transform: translate3d(-2.4rem, 0, 0);
+  }
+}
+
+@keyframes photo-viewer-slide-previous-in {
+  from {
+    opacity: 0;
+    transform: translate3d(-2.4rem, 0, 0);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes photo-viewer-slide-previous-out {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+
+  to {
+    opacity: 0;
+    transform: translate3d(2.4rem, 0, 0);
+  }
+}
+
+@keyframes photo-viewer-ken-burns-zoom-in {
+  from {
+    transform: scale(1.012) translate3d(0, 0, 0);
+  }
+
+  to {
+    transform: scale(1.07) translate3d(-0.45rem, -0.35rem, 0);
+  }
+}
+
+@keyframes photo-viewer-ken-burns-pan-right {
+  from {
+    transform: scale(1.06) translate3d(-0.65rem, -0.25rem, 0);
+  }
+
+  to {
+    transform: scale(1.035) translate3d(0.65rem, 0.25rem, 0);
+  }
+}
+
+@keyframes photo-viewer-ken-burns-pan-left {
+  from {
+    transform: scale(1.035) translate3d(0.65rem, 0.28rem, 0);
+  }
+
+  to {
+    transform: scale(1.065) translate3d(-0.65rem, -0.28rem, 0);
+  }
+}
+
+@keyframes photo-viewer-ken-burns-pan-down {
+  from {
+    transform: scale(1.05) translate3d(0.25rem, -0.55rem, 0);
+  }
+
+  to {
+    transform: scale(1.075) translate3d(-0.25rem, 0.55rem, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .photo-viewer-frame.is-transition-in,
+  .photo-viewer-frame.is-transition-out,
+  .photo-viewer-frame.is-ken-burns-active {
+    animation-duration: 1ms !important;
+  }
 }
 
 .photo-viewer-nav {
