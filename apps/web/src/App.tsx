@@ -13162,9 +13162,6 @@ export default function App(): JSX.Element {
                     </span>
                     <div className="home-strip-sidebar-item-copy">
                       <strong title={strip.name}>{strip.name}</strong>
-                      <span>
-                        {strip.rowCount} {strip.rowCount === 1 ? 'row' : 'rows'}
-                      </span>
                     </div>
                     <PhotoHomeStripActionMenu
                       strip={strip}
