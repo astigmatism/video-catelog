@@ -92,6 +92,33 @@ export type ViewerVisualAdjustments = {
   enabled: boolean;
 };
 
+export type CatalogItemWatchHeatmapBucket = {
+  bucketIndex: number;
+  startSeconds: number;
+  endSeconds: number;
+  watchSeconds: number;
+  sampleCount: number;
+};
+
+export type CatalogItemWatchAnalytics = {
+  catalogItemId: string;
+  durationSeconds: number | null;
+  bucketCount: number;
+  totalWatchSeconds: number;
+  maxBucketWatchSeconds: number;
+  buckets: CatalogItemWatchHeatmapBucket[];
+};
+
+export type CatalogItemWatchInterval = {
+  startSeconds: number;
+  endSeconds: number;
+};
+
+export type CatalogItemWatchTelemetryInput = {
+  durationSeconds?: number | null;
+  intervals: CatalogItemWatchInterval[];
+};
+
 export type CatalogTag = {
   id: string;
   label: string;
@@ -260,6 +287,7 @@ export type CatalogItem = {
   probe: MediaProbeInfo | null;
   viewerVisualAdjustments: ViewerVisualAdjustments;
   viewCount: number;
+  totalWatchSeconds: number;
   usedCount: number;
   downloadCount: number;
   lastViewedAt: string | null;

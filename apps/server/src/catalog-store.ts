@@ -5,6 +5,9 @@ import type {
   CatalogBookmark,
   CatalogHomeStrip,
   CatalogHomeStripRowCount,
+  CatalogItemWatchAnalytics,
+  CatalogItemWatchHeatmapBucket,
+  CatalogItemWatchTelemetryInput,
   CatalogHomeStripSortCategory,
   CatalogHomeStripSortDirection,
   CatalogItem,
@@ -30,6 +33,7 @@ type AddCatalogItemInput = {
   sizeBytes: number;
   relativePath: string;
   viewCount?: number;
+  totalWatchSeconds?: number;
   usedCount?: number;
   downloadCount?: number;
   lastViewedAt?: string | null;
@@ -133,6 +137,7 @@ type CatalogItemRow = {
   viewer_adjustment_saturation: number | string;
   viewer_adjustments_enabled: boolean;
   view_count: number | string;
+  total_watch_seconds: number | string;
   used_count: number | string;
   download_count: number | string;
   last_viewed_at: Date | string | null;
@@ -150,6 +155,16 @@ type CatalogTagRow = {
   normalized_label: string;
   usage_count: number | string;
   created_at: Date | string;
+  updated_at: Date | string;
+};
+
+type CatalogItemWatchHeatmapRow = {
+  catalog_item_id: string;
+  bucket_index: number | string;
+  bucket_start_seconds: number | string;
+  bucket_end_seconds: number | string;
+  watch_seconds: number | string;
+  sample_count: number | string;
   updated_at: Date | string;
 };
 
@@ -242,6 +257,10 @@ const DEFAULT_HOME_STRIP_SORT_CATEGORY: CatalogHomeStripSortCategory = 'uploaded
 const DEFAULT_HOME_STRIP_SORT_DIRECTION: CatalogHomeStripSortDirection = 'desc';
 const DEFAULT_TAG_AUTOCOMPLETE_LIMIT = 10;
 const DEFAULT_TOP_TAG_LIMIT = 10;
+const WATCH_ANALYTICS_BUCKET_COUNT = 100;
+const WATCH_ANALYTICS_MAX_INTERVALS_PER_REQUEST = 5000;
+const WATCH_ANALYTICS_MIN_INTERVAL_SECONDS = 0.02;
+const WATCH_ANALYTICS_MAX_SECONDS_PER_REQUEST = 12 * 60 * 60;
 
 const CATALOG_HOME_STRIP_SORT_CATEGORIES: CatalogHomeStripSortCategory[] = [
   'none',
@@ -398,6 +417,40 @@ function normalizeCatalogItemCounter(value: unknown): number {
   }
 
   return Math.floor(parsed);
+}
+
+function normalizeWatchSeconds(value: unknown): number {
+  const parsed = readNumber(value);
+
+  if (parsed === null || parsed < 0) {
+    return 0;
+  }
+
+  return Number(parsed.toFixed(3));
+}
+
+function normalizePositiveDurationSeconds(value: unknown): number | null {
+  const parsed = readNumber(value);
+
+  if (parsed === null || parsed <= 0) {
+    return null;
+  }
+
+  return Number(parsed.toFixed(3));
+}
+
+function normalizeWatchAnalyticsBucketIndex(value: unknown): number {
+  const parsed = readNumber(value);
+
+  if (parsed === null || parsed < 0) {
+    return 0;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeWatchAnalyticsSampleCount(value: unknown): number {
+  return normalizeCatalogItemCounter(value);
 }
 
 function normalizeHoverPreviewRevision(value: unknown): number {
@@ -776,6 +829,7 @@ function cloneCatalogItem(item: CatalogItem): CatalogItem {
     probe: cloneMediaProbeInfo(item.probe),
     viewerVisualAdjustments: cloneViewerVisualAdjustments(item.viewerVisualAdjustments),
     viewCount: item.viewCount,
+    totalWatchSeconds: item.totalWatchSeconds,
     usedCount: item.usedCount,
     downloadCount: item.downloadCount,
     lastViewedAt: item.lastViewedAt,
@@ -919,6 +973,7 @@ function normalizeCatalogItem(input: CatalogItem): CatalogItem {
     probe: cloneMediaProbeInfo(input.probe),
     viewerVisualAdjustments: cloneViewerVisualAdjustments(input.viewerVisualAdjustments),
     viewCount: normalizeViewCount(input.viewCount),
+    totalWatchSeconds: normalizeWatchSeconds(input.totalWatchSeconds),
     usedCount: normalizeCatalogItemCounter(input.usedCount),
     downloadCount: normalizeCatalogItemCounter(input.downloadCount),
     lastViewedAt: normalizeNullableTimestamp(input.lastViewedAt),
@@ -1039,6 +1094,7 @@ function buildCatalogItemFromInput(input: AddCatalogItemInput): CatalogItem {
     probe: input.probe ?? null,
     viewerVisualAdjustments: input.viewerVisualAdjustments ?? DEFAULT_VIEWER_VISUAL_ADJUSTMENTS,
     viewCount: input.viewCount ?? 0,
+    totalWatchSeconds: input.totalWatchSeconds ?? 0,
     usedCount: input.usedCount ?? 0,
     downloadCount: input.downloadCount ?? 0,
     lastViewedAt: input.lastViewedAt ?? null,
@@ -1146,6 +1202,7 @@ function hydrateCatalogItemFromRow(row: CatalogItemRow): CatalogItem {
       enabled: row.viewer_adjustments_enabled
     }),
     viewCount: normalizeViewCount(row.view_count),
+    totalWatchSeconds: normalizeWatchSeconds(row.total_watch_seconds),
     usedCount: normalizeCatalogItemCounter(row.used_count),
     downloadCount: normalizeCatalogItemCounter(row.download_count),
     lastViewedAt: normalizeNullableTimestamp(row.last_viewed_at),
@@ -1189,6 +1246,185 @@ function hydrateCatalogBookmarkFromRow(row: CatalogBookmarkRow): CatalogBookmark
     createdAt,
     updatedAt
   });
+}
+
+function hydrateCatalogItemWatchHeatmapBucketFromRow(
+  row: CatalogItemWatchHeatmapRow
+): CatalogItemWatchHeatmapBucket {
+  return {
+    bucketIndex: normalizeWatchAnalyticsBucketIndex(row.bucket_index),
+    startSeconds: normalizeWatchSeconds(row.bucket_start_seconds),
+    endSeconds: normalizeWatchSeconds(row.bucket_end_seconds),
+    watchSeconds: normalizeWatchSeconds(row.watch_seconds),
+    sampleCount: normalizeWatchAnalyticsSampleCount(row.sample_count)
+  };
+}
+
+function createEmptyWatchAnalyticsBuckets(
+  durationSeconds: number,
+  bucketCount: number
+): CatalogItemWatchHeatmapBucket[] {
+  const safeBucketCount = Math.max(1, Math.floor(bucketCount));
+  const bucketDurationSeconds = durationSeconds / safeBucketCount;
+
+  return Array.from({ length: safeBucketCount }, (_, index) => {
+    const startSeconds = Number((index * bucketDurationSeconds).toFixed(3));
+    const endSeconds = Number(
+      (index === safeBucketCount - 1 ? durationSeconds : (index + 1) * bucketDurationSeconds).toFixed(3)
+    );
+
+    return {
+      bucketIndex: index,
+      startSeconds,
+      endSeconds,
+      watchSeconds: 0,
+      sampleCount: 0
+    };
+  });
+}
+
+function inferWatchAnalyticsDurationSecondsFromRows(
+  rows: CatalogItemWatchHeatmapRow[]
+): number | null {
+  let maxEndSeconds = 0;
+
+  for (const row of rows) {
+    maxEndSeconds = Math.max(maxEndSeconds, normalizeWatchSeconds(row.bucket_end_seconds));
+  }
+
+  return maxEndSeconds > 0 ? Number(maxEndSeconds.toFixed(3)) : null;
+}
+
+function inferWatchAnalyticsDurationSecondsFromTelemetry(
+  input: CatalogItemWatchTelemetryInput
+): number | null {
+  let maxEndSeconds = 0;
+
+  for (const interval of input.intervals) {
+    maxEndSeconds = Math.max(maxEndSeconds, normalizeWatchSeconds(interval.endSeconds));
+  }
+
+  return maxEndSeconds > 0 ? Number(maxEndSeconds.toFixed(3)) : null;
+}
+
+function normalizeCatalogItemWatchTelemetryIntervals(
+  input: CatalogItemWatchTelemetryInput,
+  durationSeconds: number
+): Array<{ startSeconds: number; endSeconds: number }> {
+  if (!Array.isArray(input.intervals) || durationSeconds <= 0) {
+    return [];
+  }
+
+  const intervals: Array<{ startSeconds: number; endSeconds: number }> = [];
+  let accumulatedSeconds = 0;
+
+  for (const interval of input.intervals.slice(0, WATCH_ANALYTICS_MAX_INTERVALS_PER_REQUEST)) {
+    const rawStartSeconds = readNumber(interval.startSeconds);
+    const rawEndSeconds = readNumber(interval.endSeconds);
+
+    if (rawStartSeconds === null || rawEndSeconds === null) {
+      continue;
+    }
+
+    const startSeconds = Math.max(0, Math.min(durationSeconds, rawStartSeconds));
+    let endSeconds = Math.max(0, Math.min(durationSeconds, rawEndSeconds));
+
+    if (endSeconds <= startSeconds) {
+      continue;
+    }
+
+    if (accumulatedSeconds >= WATCH_ANALYTICS_MAX_SECONDS_PER_REQUEST) {
+      break;
+    }
+
+    const remainingAllowedSeconds = WATCH_ANALYTICS_MAX_SECONDS_PER_REQUEST - accumulatedSeconds;
+    const intervalSeconds = endSeconds - startSeconds;
+    if (intervalSeconds > remainingAllowedSeconds) {
+      endSeconds = startSeconds + remainingAllowedSeconds;
+    }
+
+    const normalizedStartSeconds = Number(startSeconds.toFixed(3));
+    const normalizedEndSeconds = Number(endSeconds.toFixed(3));
+    const normalizedIntervalSeconds = normalizedEndSeconds - normalizedStartSeconds;
+
+    if (normalizedIntervalSeconds < WATCH_ANALYTICS_MIN_INTERVAL_SECONDS) {
+      continue;
+    }
+
+    intervals.push({
+      startSeconds: normalizedStartSeconds,
+      endSeconds: normalizedEndSeconds
+    });
+    accumulatedSeconds += normalizedIntervalSeconds;
+  }
+
+  return intervals;
+}
+
+function sumWatchTelemetryIntervalSeconds(
+  intervals: Array<{ startSeconds: number; endSeconds: number }>
+): number {
+  return Number(
+    intervals
+      .reduce((sum, interval) => sum + Math.max(0, interval.endSeconds - interval.startSeconds), 0)
+      .toFixed(3)
+  );
+}
+
+function createCatalogItemWatchAnalyticsPayload(
+  item: CatalogItem,
+  rows: CatalogItemWatchHeatmapRow[],
+  requestedDurationSeconds?: number | null
+): CatalogItemWatchAnalytics {
+  const durationSeconds =
+    normalizePositiveDurationSeconds(requestedDurationSeconds) ??
+    normalizePositiveDurationSeconds(item.probe?.durationSeconds) ??
+    inferWatchAnalyticsDurationSecondsFromRows(rows);
+  const rowBuckets = rows.map(hydrateCatalogItemWatchHeatmapBucketFromRow);
+
+  if (durationSeconds === null) {
+    const maxBucketWatchSeconds = rowBuckets.reduce(
+      (maxValue, bucket) => Math.max(maxValue, bucket.watchSeconds),
+      0
+    );
+
+    return {
+      catalogItemId: item.id,
+      durationSeconds: null,
+      bucketCount: rowBuckets.length,
+      totalWatchSeconds: item.totalWatchSeconds,
+      maxBucketWatchSeconds,
+      buckets: rowBuckets
+    };
+  }
+
+  const buckets = createEmptyWatchAnalyticsBuckets(durationSeconds, WATCH_ANALYTICS_BUCKET_COUNT);
+
+  for (const rowBucket of rowBuckets) {
+    if (rowBucket.bucketIndex < 0 || rowBucket.bucketIndex >= buckets.length) {
+      continue;
+    }
+
+    buckets[rowBucket.bucketIndex] = {
+      ...buckets[rowBucket.bucketIndex],
+      watchSeconds: rowBucket.watchSeconds,
+      sampleCount: rowBucket.sampleCount
+    };
+  }
+
+  const maxBucketWatchSeconds = buckets.reduce(
+    (maxValue, bucket) => Math.max(maxValue, bucket.watchSeconds),
+    0
+  );
+
+  return {
+    catalogItemId: item.id,
+    durationSeconds,
+    bucketCount: buckets.length,
+    totalWatchSeconds: item.totalWatchSeconds,
+    maxBucketWatchSeconds,
+    buckets
+  };
 }
 
 function hydratePendingIngestFromRow(row: PendingIngestRow): PendingIngest {
@@ -1967,6 +2203,89 @@ export class CatalogStore {
     });
   }
 
+  async getCatalogItemWatchAnalytics(
+    itemId: string,
+    requestedDurationSeconds?: number | null
+  ): Promise<CatalogItemWatchAnalytics | undefined> {
+    this.assertInitialized();
+
+    const item = this.itemById.get(itemId);
+    if (!item) {
+      return undefined;
+    }
+
+    const rows = await this.listCatalogItemWatchHeatmapRows(itemId);
+    return createCatalogItemWatchAnalyticsPayload(item, rows, requestedDurationSeconds);
+  }
+
+  async recordCatalogItemWatchTelemetry(
+    itemId: string,
+    input: CatalogItemWatchTelemetryInput
+  ): Promise<{ item: CatalogItem; analytics: CatalogItemWatchAnalytics } | undefined> {
+    this.assertInitialized();
+
+    const key = this.getCatalogItemWriteKey(itemId);
+
+    return this.enqueueWrite(key, async () => {
+      const currentItem = this.itemById.get(itemId);
+      if (!currentItem) {
+        return undefined;
+      }
+
+      const durationSeconds =
+        normalizePositiveDurationSeconds(input.durationSeconds) ??
+        normalizePositiveDurationSeconds(currentItem.probe?.durationSeconds) ??
+        inferWatchAnalyticsDurationSecondsFromTelemetry(input);
+
+      if (durationSeconds === null) {
+        const analytics = await this.getCatalogItemWatchAnalytics(itemId);
+        return {
+          item: cloneCatalogItem(currentItem),
+          analytics:
+            analytics ??
+            createCatalogItemWatchAnalyticsPayload(currentItem, [], null)
+        };
+      }
+
+      const intervals = normalizeCatalogItemWatchTelemetryIntervals(input, durationSeconds);
+      const watchSeconds = sumWatchTelemetryIntervalSeconds(intervals);
+
+      if (watchSeconds <= 0) {
+        const analytics = await this.getCatalogItemWatchAnalytics(itemId, durationSeconds);
+        return {
+          item: cloneCatalogItem(currentItem),
+          analytics:
+            analytics ??
+            createCatalogItemWatchAnalyticsPayload(currentItem, [], durationSeconds)
+        };
+      }
+
+      const updatedItem = normalizeCatalogItem({
+        ...currentItem,
+        totalWatchSeconds: currentItem.totalWatchSeconds + watchSeconds
+      });
+
+      await withTransaction(this.options.pool, async (client) => {
+        const updated = await this.updateCatalogItemRow(client, updatedItem);
+        if (!updated) {
+          throw new Error('Catalog item not found.');
+        }
+
+        await this.upsertCatalogItemWatchHeatmapIntervals(client, itemId, durationSeconds, intervals);
+      });
+
+      this.itemById.set(itemId, updatedItem);
+      const analytics =
+        (await this.getCatalogItemWatchAnalytics(itemId, durationSeconds)) ??
+        createCatalogItemWatchAnalyticsPayload(updatedItem, [], durationSeconds);
+
+      return {
+        item: cloneCatalogItem(updatedItem),
+        analytics
+      };
+    });
+  }
+
   async deleteCatalogItem(itemId: string): Promise<DeleteCatalogItemResult | undefined> {
     this.assertInitialized();
 
@@ -2152,6 +2471,7 @@ export class CatalogStore {
           viewer_adjustment_saturation,
           viewer_adjustments_enabled,
           view_count,
+          total_watch_seconds,
           used_count,
           download_count,
           last_viewed_at,
@@ -2270,6 +2590,7 @@ export class CatalogStore {
           viewer_adjustment_saturation,
           viewer_adjustments_enabled,
           view_count,
+          total_watch_seconds,
           used_count,
           download_count,
           last_viewed_at,
@@ -2720,6 +3041,7 @@ export class CatalogStore {
           viewer_adjustment_saturation,
           viewer_adjustments_enabled,
           view_count,
+          total_watch_seconds,
           used_count,
           download_count,
           last_viewed_at,
@@ -2733,7 +3055,7 @@ export class CatalogStore {
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-          $19::jsonb, $20, $21::jsonb, $22, $23, $24, $25, $26, $27, $28, $29::timestamptz, $30::timestamptz, $31::timestamptz, $32, $33, $34, $35::timestamptz, now()
+          $19::jsonb, $20, $21::jsonb, $22, $23, $24, $25, $26, $27, $28, $29, $30::timestamptz, $31::timestamptz, $32::timestamptz, $33, $34, $35, $36::timestamptz, now()
         )
       `,
       [
@@ -2763,6 +3085,7 @@ export class CatalogStore {
         item.viewerVisualAdjustments.saturation,
         item.viewerVisualAdjustments.enabled,
         item.viewCount,
+        item.totalWatchSeconds,
         item.usedCount,
         item.downloadCount,
         item.lastViewedAt,
@@ -2774,6 +3097,140 @@ export class CatalogStore {
         processing.updatedAt
       ]
     );
+  }
+
+  private async listCatalogItemWatchHeatmapRows(itemId: string): Promise<CatalogItemWatchHeatmapRow[]> {
+    const result = await this.options.pool.query<CatalogItemWatchHeatmapRow>(
+      `
+        SELECT
+          catalog_item_id,
+          bucket_index,
+          bucket_start_seconds,
+          bucket_end_seconds,
+          watch_seconds,
+          sample_count,
+          updated_at
+        FROM catalog_item_watch_heatmap
+        WHERE catalog_item_id = $1
+        ORDER BY bucket_index ASC
+      `,
+      [itemId]
+    );
+
+    return result.rows;
+  }
+
+  private async upsertCatalogItemWatchHeatmapIntervals(
+    queryable: Queryable,
+    itemId: string,
+    durationSeconds: number,
+    intervals: Array<{ startSeconds: number; endSeconds: number }>
+  ): Promise<void> {
+    const safeDurationSeconds = normalizePositiveDurationSeconds(durationSeconds);
+    if (safeDurationSeconds === null || intervals.length === 0) {
+      return;
+    }
+
+    const bucketCount = WATCH_ANALYTICS_BUCKET_COUNT;
+    const bucketDurationSeconds = safeDurationSeconds / bucketCount;
+    if (!Number.isFinite(bucketDurationSeconds) || bucketDurationSeconds <= 0) {
+      return;
+    }
+
+    type WatchBucketIncrement = {
+      bucketIndex: number;
+      bucketStartSeconds: number;
+      bucketEndSeconds: number;
+      watchSeconds: number;
+      sampleCount: number;
+    };
+
+    const increments = new Map<number, WatchBucketIncrement>();
+
+    for (const interval of intervals) {
+      const startSeconds = Math.max(0, Math.min(safeDurationSeconds, normalizeWatchSeconds(interval.startSeconds)));
+      const endSeconds = Math.max(0, Math.min(safeDurationSeconds, normalizeWatchSeconds(interval.endSeconds)));
+
+      if (endSeconds <= startSeconds) {
+        continue;
+      }
+
+      const firstBucketIndex = Math.max(
+        0,
+        Math.min(bucketCount - 1, Math.floor(startSeconds / bucketDurationSeconds))
+      );
+      const lastBucketIndex = Math.max(
+        0,
+        Math.min(bucketCount - 1, Math.floor((endSeconds - Number.EPSILON) / bucketDurationSeconds))
+      );
+
+      for (let bucketIndex = firstBucketIndex; bucketIndex <= lastBucketIndex; bucketIndex += 1) {
+        const rawBucketStartSeconds = bucketIndex * bucketDurationSeconds;
+        const rawBucketEndSeconds =
+          bucketIndex === bucketCount - 1
+            ? safeDurationSeconds
+            : (bucketIndex + 1) * bucketDurationSeconds;
+        const overlapStartSeconds = Math.max(startSeconds, rawBucketStartSeconds);
+        const overlapEndSeconds = Math.min(endSeconds, rawBucketEndSeconds);
+        const overlapSeconds = Number((overlapEndSeconds - overlapStartSeconds).toFixed(6));
+
+        if (overlapSeconds <= 0) {
+          continue;
+        }
+
+        const bucketStartSeconds = Number(rawBucketStartSeconds.toFixed(6));
+        const bucketEndSeconds = Number(rawBucketEndSeconds.toFixed(6));
+        const currentIncrement = increments.get(bucketIndex) ?? {
+          bucketIndex,
+          bucketStartSeconds,
+          bucketEndSeconds,
+          watchSeconds: 0,
+          sampleCount: 0
+        };
+
+        currentIncrement.bucketStartSeconds = bucketStartSeconds;
+        currentIncrement.bucketEndSeconds = bucketEndSeconds;
+        currentIncrement.watchSeconds = Number((currentIncrement.watchSeconds + overlapSeconds).toFixed(6));
+        currentIncrement.sampleCount += 1;
+        increments.set(bucketIndex, currentIncrement);
+      }
+    }
+
+    for (const increment of increments.values()) {
+      if (increment.bucketEndSeconds <= increment.bucketStartSeconds || increment.watchSeconds <= 0) {
+        continue;
+      }
+
+      await queryable.query(
+        `
+          INSERT INTO catalog_item_watch_heatmap (
+            catalog_item_id,
+            bucket_index,
+            bucket_start_seconds,
+            bucket_end_seconds,
+            watch_seconds,
+            sample_count,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, now())
+          ON CONFLICT (catalog_item_id, bucket_index)
+          DO UPDATE SET
+            bucket_start_seconds = EXCLUDED.bucket_start_seconds,
+            bucket_end_seconds = EXCLUDED.bucket_end_seconds,
+            watch_seconds = catalog_item_watch_heatmap.watch_seconds + EXCLUDED.watch_seconds,
+            sample_count = catalog_item_watch_heatmap.sample_count + EXCLUDED.sample_count,
+            updated_at = now()
+        `,
+        [
+          itemId,
+          increment.bucketIndex,
+          increment.bucketStartSeconds,
+          increment.bucketEndSeconds,
+          increment.watchSeconds,
+          increment.sampleCount
+        ]
+      );
+    }
   }
 
   private async updateCatalogItemRow(
@@ -2811,15 +3268,16 @@ export class CatalogStore {
           viewer_adjustment_saturation = $23,
           viewer_adjustments_enabled = $24,
           view_count = $25,
-          used_count = $26,
-          download_count = $27,
-          last_viewed_at = $28::timestamptz,
-          last_used_at = $29::timestamptz,
-          last_downloaded_at = $30::timestamptz,
-          processing_stage = $31,
-          processing_percent = $32,
-          processing_message = $33,
-          processing_updated_at = $34::timestamptz,
+          total_watch_seconds = $26,
+          used_count = $27,
+          download_count = $28,
+          last_viewed_at = $29::timestamptz,
+          last_used_at = $30::timestamptz,
+          last_downloaded_at = $31::timestamptz,
+          processing_stage = $32,
+          processing_percent = $33,
+          processing_message = $34,
+          processing_updated_at = $35::timestamptz,
           updated_at = now()
         WHERE id = $1
         RETURNING id
@@ -2850,6 +3308,7 @@ export class CatalogStore {
         item.viewerVisualAdjustments.saturation,
         item.viewerVisualAdjustments.enabled,
         item.viewCount,
+        item.totalWatchSeconds,
         item.usedCount,
         item.downloadCount,
         item.lastViewedAt,

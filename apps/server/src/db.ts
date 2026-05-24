@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS catalog_items (
   viewer_adjustment_saturation double precision NOT NULL DEFAULT 1 CHECK (viewer_adjustment_saturation >= 0 AND viewer_adjustment_saturation <= 2),
   viewer_adjustments_enabled boolean NOT NULL DEFAULT false,
   view_count bigint NOT NULL DEFAULT 0 CHECK (view_count >= 0),
+  total_watch_seconds double precision NOT NULL DEFAULT 0 CHECK (total_watch_seconds >= 0),
   used_count bigint NOT NULL DEFAULT 0 CHECK (used_count >= 0),
   download_count bigint NOT NULL DEFAULT 0 CHECK (download_count >= 0),
   last_viewed_at timestamptz,
@@ -52,6 +53,17 @@ CREATE TABLE IF NOT EXISTS catalog_items (
 
 ALTER TABLE catalog_items
   ADD COLUMN IF NOT EXISTS view_count bigint NOT NULL DEFAULT 0 CHECK (view_count >= 0);
+
+ALTER TABLE catalog_items
+  ADD COLUMN IF NOT EXISTS total_watch_seconds double precision NOT NULL DEFAULT 0 CHECK (total_watch_seconds >= 0);
+
+UPDATE catalog_items
+SET total_watch_seconds = 0
+WHERE total_watch_seconds IS NULL;
+
+ALTER TABLE catalog_items
+  ALTER COLUMN total_watch_seconds SET DEFAULT 0,
+  ALTER COLUMN total_watch_seconds SET NOT NULL;
 
 ALTER TABLE catalog_items
   ADD COLUMN IF NOT EXISTS used_count bigint NOT NULL DEFAULT 0 CHECK (used_count >= 0);
@@ -153,6 +165,20 @@ ALTER TABLE catalog_item_bookmarks
 
 CREATE INDEX IF NOT EXISTS idx_catalog_item_bookmarks_catalog_item_id
   ON catalog_item_bookmarks (catalog_item_id, time_seconds ASC, created_at ASC);
+
+CREATE TABLE IF NOT EXISTS catalog_item_watch_heatmap (
+  catalog_item_id uuid NOT NULL REFERENCES catalog_items (id) ON DELETE CASCADE,
+  bucket_index integer NOT NULL CHECK (bucket_index >= 0),
+  bucket_start_seconds double precision NOT NULL CHECK (bucket_start_seconds >= 0),
+  bucket_end_seconds double precision NOT NULL CHECK (bucket_end_seconds > bucket_start_seconds),
+  watch_seconds double precision NOT NULL DEFAULT 0 CHECK (watch_seconds >= 0),
+  sample_count bigint NOT NULL DEFAULT 0 CHECK (sample_count >= 0),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (catalog_item_id, bucket_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_catalog_item_watch_heatmap_catalog_item_id
+  ON catalog_item_watch_heatmap (catalog_item_id, bucket_index ASC);
 
 CREATE TABLE IF NOT EXISTS catalog_home_strips (
   id uuid PRIMARY KEY,

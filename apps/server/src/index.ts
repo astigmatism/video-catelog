@@ -32,6 +32,7 @@ import type {
   CatalogHomeStripSortCategory,
   CatalogHomeStripSortDirection,
   CatalogItem,
+  CatalogItemWatchTelemetryInput,
   CatalogItemStatus,
   CatalogItemSourceType,
   CatalogQueryInput,
@@ -5509,6 +5510,57 @@ function parseViewerVisualAdjustmentsBody(body: unknown): ViewerVisualAdjustment
   };
 }
 
+function parseCatalogItemWatchTelemetryBody(body: unknown): CatalogItemWatchTelemetryInput | null {
+  if (!isRecord(body)) {
+    return null;
+  }
+
+  const durationSeconds =
+    body.durationSeconds === undefined || body.durationSeconds === null
+      ? null
+      : readUnknownNumber(body.durationSeconds);
+
+  if (
+    body.durationSeconds !== undefined &&
+    body.durationSeconds !== null &&
+    (durationSeconds === null || durationSeconds <= 0)
+  ) {
+    return null;
+  }
+
+  if (!Array.isArray(body.intervals)) {
+    return null;
+  }
+
+  const intervals: CatalogItemWatchTelemetryInput['intervals'] = [];
+  for (const interval of body.intervals) {
+    if (!isRecord(interval)) {
+      return null;
+    }
+
+    const startSeconds = readUnknownNumber(interval.startSeconds);
+    const endSeconds = readUnknownNumber(interval.endSeconds);
+    if (
+      startSeconds === null ||
+      endSeconds === null ||
+      startSeconds < 0 ||
+      endSeconds <= startSeconds
+    ) {
+      return null;
+    }
+
+    intervals.push({
+      startSeconds,
+      endSeconds
+    });
+  }
+
+  return {
+    durationSeconds,
+    intervals
+  };
+}
+
 function normalizeBookmarkNameInput(value: string | null): string | null {
   if (value === null) {
     return null;
@@ -7431,6 +7483,83 @@ app.post('/api/catalog/:id/views', async (request: FastifyRequest, reply: Fastif
   reply.send({
     ok: true,
     item: updatedItem
+  });
+});
+
+app.get('/api/catalog/:id/watch-analytics', async (request: FastifyRequest, reply: FastifyReply) => {
+  const sessionId = getAuthenticatedSessionId(request, reply);
+  if (!sessionId) {
+    return;
+  }
+
+  const item = getRequestedCatalogItem(request, reply);
+  if (!item) {
+    return;
+  }
+
+  if (item.status !== 'ready') {
+    reply.code(409).send({
+      message: 'Only ready catalog items can load watch analytics.'
+    });
+    return;
+  }
+
+  const analytics = await catalogStore.getCatalogItemWatchAnalytics(item.id);
+  if (!analytics) {
+    reply.code(404).send({
+      message: 'Catalog item not found.'
+    });
+    return;
+  }
+
+  reply.send({
+    ok: true,
+    analytics
+  });
+});
+
+app.post('/api/catalog/:id/watch-telemetry', async (request: FastifyRequest, reply: FastifyReply) => {
+  const sessionId = getAuthenticatedSessionId(request, reply);
+  if (!sessionId) {
+    return;
+  }
+
+  const item = getRequestedCatalogItem(request, reply);
+  if (!item) {
+    return;
+  }
+
+  if (item.status !== 'ready') {
+    reply.code(409).send({
+      message: 'Only ready catalog items can record watch telemetry.'
+    });
+    return;
+  }
+
+  const body = parseCatalogItemWatchTelemetryBody(request.body);
+  if (!body) {
+    reply.code(400).send({
+      message: 'Invalid watch telemetry payload.'
+    });
+    return;
+  }
+
+  const result = await catalogStore.recordCatalogItemWatchTelemetry(item.id, body);
+  if (!result) {
+    reply.code(404).send({
+      message: 'Catalog item not found.'
+    });
+    return;
+  }
+
+  broadcastCatalogItemUpdated(result.item, sessionId, {
+    includeProcessingEvents: false
+  });
+
+  reply.send({
+    ok: true,
+    item: result.item,
+    analytics: result.analytics
   });
 });
 

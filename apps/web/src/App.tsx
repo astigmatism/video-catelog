@@ -177,6 +177,7 @@ type CatalogItem = {
   probe: MediaProbeInfo | null;
   viewerVisualAdjustments: ViewerVisualAdjustments;
   viewCount: number;
+  totalWatchSeconds: number;
   usedCount: number;
   downloadCount: number;
   lastViewedAt: string | null;
@@ -195,6 +196,38 @@ type CatalogBookmark = {
   useCount: number;
   createdAt: string;
   updatedAt: string;
+};
+
+type CatalogItemWatchHeatmapBucket = {
+  bucketIndex: number;
+  startSeconds: number;
+  endSeconds: number;
+  watchSeconds: number;
+  sampleCount: number;
+};
+
+type CatalogItemWatchAnalytics = {
+  catalogItemId: string;
+  durationSeconds: number | null;
+  bucketCount: number;
+  totalWatchSeconds: number;
+  maxBucketWatchSeconds: number;
+  buckets: CatalogItemWatchHeatmapBucket[];
+};
+
+type CatalogItemWatchTelemetryInterval = {
+  startSeconds: number;
+  endSeconds: number;
+};
+
+type CatalogItemWatchTelemetryPayload = {
+  durationSeconds: number | null;
+  intervals: CatalogItemWatchTelemetryInterval[];
+};
+
+type WatchTelemetryFlushOptions = {
+  keepalive?: boolean;
+  beacon?: boolean;
 };
 
 type PendingIngest = {
@@ -646,6 +679,12 @@ type ViewerOverlayProps = {
     itemId: string,
     adjustments: ViewerVisualAdjustments
   ) => Promise<CatalogItem | null>;
+  onLoadWatchAnalytics: (itemId: string) => Promise<CatalogItemWatchAnalytics | null>;
+  onRecordWatchTelemetry: (
+    itemId: string,
+    payload: CatalogItemWatchTelemetryPayload,
+    options?: WatchTelemetryFlushOptions
+  ) => Promise<CatalogItemWatchAnalytics | null>;
   shortSeekSeconds: number;
   longSeekSeconds: number;
   attemptFullscreenOnOpen: boolean;
@@ -667,6 +706,11 @@ const LEGACY_WEBSOCKET_PATH = '/ws';
 const APPLICATION_SOCKET_OPEN_TIMEOUT_MS = 4000;
 const APPLICATION_SOCKET_FIRST_MESSAGE_TIMEOUT_MS = 2500;
 const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
+const WATCH_TELEMETRY_FLUSH_INTERVAL_MS = 30_000;
+const WATCH_TELEMETRY_MIN_INTERVAL_SECONDS = 0.05;
+const WATCH_TELEMETRY_MERGE_GAP_SECONDS = 0.2;
+const WATCH_TELEMETRY_MAX_CONTINUOUS_DELTA_SECONDS = 2;
+const WATCH_TELEMETRY_MAX_PENDING_INTERVALS = 1_500;
 
 const DEFAULT_UPLOAD_MESSAGE =
   'Choose a local video file. After staging, you can confirm or edit the catalog title before finalizing.';
@@ -1240,6 +1284,16 @@ function normalizeViewCount(value: unknown): number {
   return normalizeCatalogItemCount(value);
 }
 
+function normalizeWatchSeconds(value: unknown): number {
+  const parsed = readNumber(value);
+
+  if (parsed === null || parsed < 0) {
+    return 0;
+  }
+
+  return Number(parsed.toFixed(3));
+}
+
 function normalizeCatalogTagLabel(value: string): string {
   return value
     .normalize('NFKC')
@@ -1379,6 +1433,19 @@ function formatDuration(value: number | null): string {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
+function formatWatchDuration(value: number): string {
+  const rounded = Math.max(0, Math.round(normalizeWatchSeconds(value)));
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const seconds = rounded % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
+  }
+
+  return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+}
+
 function formatViewCount(value: number): string {
   const safeValue = normalizeViewCount(value);
   return `${safeValue.toLocaleString()} ${safeValue === 1 ? 'view' : 'views'}`;
@@ -1392,6 +1459,41 @@ function formatUsedCount(value: number): string {
 function formatDownloadCount(value: number): string {
   const safeValue = normalizeCatalogItemCount(value);
   return `${safeValue.toLocaleString()} ${safeValue === 1 ? 'download' : 'downloads'}`;
+}
+
+type ViewerWatchHeatmapPaths = {
+  areaPath: string;
+  linePath: string;
+};
+
+function createViewerWatchHeatmapPaths(
+  analytics: CatalogItemWatchAnalytics | null
+): ViewerWatchHeatmapPaths | null {
+  if (!analytics || analytics.buckets.length === 0 || analytics.maxBucketWatchSeconds <= 0) {
+    return null;
+  }
+
+  const maxBucketWatchSeconds = analytics.maxBucketWatchSeconds;
+  const orderedBuckets = [...analytics.buckets].sort((left, right) => left.bucketIndex - right.bucketIndex);
+  const lastIndex = Math.max(1, orderedBuckets.length - 1);
+  const points = orderedBuckets.map((bucket, index) => {
+    const normalizedPopularity = Math.max(0, Math.min(1, bucket.watchSeconds / maxBucketWatchSeconds));
+    const x = Number(((index / lastIndex) * 100).toFixed(3));
+    const y = Number((24 - normalizedPopularity * 22).toFixed(3));
+    return { x, y };
+  });
+
+  if (points.length === 0) {
+    return null;
+  }
+
+  const linePath = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
+  const areaPath = `M 0 24 L ${points.map((point) => `${point.x} ${point.y}`).join(' L ')} L 100 24 Z`;
+
+  return {
+    areaPath,
+    linePath
+  };
 }
 
 function formatBookmarkUseCount(value: number): string {
@@ -2497,6 +2599,7 @@ function hydrateCatalogItem(value: unknown): CatalogItem | null {
     probe: value.probe === null ? null : hydrateMediaProbeInfo(value.probe),
     viewerVisualAdjustments: hydrateViewerVisualAdjustments(value.viewerVisualAdjustments),
     viewCount: normalizeViewCount(value.viewCount),
+    totalWatchSeconds: normalizeWatchSeconds(value.totalWatchSeconds),
     usedCount: normalizeCatalogItemCount(value.usedCount),
     downloadCount: normalizeCatalogItemCount(value.downloadCount),
     lastViewedAt: readString(value.lastViewedAt),
@@ -2541,6 +2644,75 @@ function hydrateCatalogBookmark(value: unknown): CatalogBookmark | null {
     useCount: normalizeCatalogItemCount(value.useCount),
     createdAt,
     updatedAt
+  };
+}
+
+function hydrateCatalogItemWatchHeatmapBucket(value: unknown): CatalogItemWatchHeatmapBucket | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const bucketIndex = readNumber(value.bucketIndex);
+  const startSeconds = readNumber(value.startSeconds);
+  const endSeconds = readNumber(value.endSeconds);
+
+  if (
+    bucketIndex === null ||
+    !Number.isInteger(bucketIndex) ||
+    bucketIndex < 0 ||
+    startSeconds === null ||
+    startSeconds < 0 ||
+    endSeconds === null ||
+    endSeconds <= startSeconds
+  ) {
+    return null;
+  }
+
+  return {
+    bucketIndex,
+    startSeconds,
+    endSeconds,
+    watchSeconds: normalizeWatchSeconds(value.watchSeconds),
+    sampleCount: normalizeCatalogItemCount(value.sampleCount)
+  };
+}
+
+function hydrateCatalogItemWatchAnalytics(value: unknown): CatalogItemWatchAnalytics | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const catalogItemId = readString(value.catalogItemId);
+  const durationSeconds = value.durationSeconds === null ? null : readNumber(value.durationSeconds);
+  const bucketCount = readNumber(value.bucketCount);
+  const bucketsValue = value.buckets;
+
+  if (
+    !catalogItemId ||
+    (durationSeconds !== null && durationSeconds <= 0) ||
+    bucketCount === null ||
+    !Number.isInteger(bucketCount) ||
+    bucketCount < 0 ||
+    !Array.isArray(bucketsValue)
+  ) {
+    return null;
+  }
+
+  const buckets = bucketsValue
+    .map((candidate) => hydrateCatalogItemWatchHeatmapBucket(candidate))
+    .filter((candidate): candidate is CatalogItemWatchHeatmapBucket => candidate !== null);
+
+  if (buckets.length !== bucketsValue.length) {
+    return null;
+  }
+
+  return {
+    catalogItemId,
+    durationSeconds,
+    bucketCount,
+    totalWatchSeconds: normalizeWatchSeconds(value.totalWatchSeconds),
+    maxBucketWatchSeconds: normalizeWatchSeconds(value.maxBucketWatchSeconds),
+    buckets
   };
 }
 
@@ -4860,7 +5032,9 @@ function CatalogCard({
   const canOpenViewer = item.status === 'ready';
   const stageLabel = item.processing ? PROCESSING_STAGE_LABELS[item.processing.stage] : null;
   const cardSubtitle = canOpenViewer
-    ? `${formatUsedCount(item.usedCount)} · ${formatViewCount(item.viewCount)}`
+    ? `${formatUsedCount(item.usedCount)} · ${formatViewCount(item.viewCount)} · ${formatWatchDuration(
+        item.totalWatchSeconds
+      )} watched`
     : `${SOURCE_TYPE_LABELS[item.sourceType]} · ${stageLabel ?? STATUS_LABELS[item.status]}`;
   const tagPopoverId = `tag-management-popover-${contextKey ? `${contextKey}-` : ''}${item.id}`;
 
@@ -5629,6 +5803,8 @@ function ViewerOverlay({
   onUseBookmark,
   onDeleteBookmark,
   onSaveViewerVisualAdjustments,
+  onLoadWatchAnalytics,
+  onRecordWatchTelemetry,
   shortSeekSeconds,
   longSeekSeconds,
   attemptFullscreenOnOpen
@@ -5643,6 +5819,11 @@ function ViewerOverlay({
   const viewerStageRef = useRef<HTMLDivElement | null>(null);
   const controlsHideTimerRef = useRef<number | null>(null);
   const playbackProgressTimerRef = useRef<number | null>(null);
+  const watchTelemetryFlushTimerRef = useRef<number | null>(null);
+  const watchTelemetryIntervalsRef = useRef<CatalogItemWatchTelemetryInterval[]>([]);
+  const watchTelemetryLastMediaTimeRef = useRef<number | null>(null);
+  const watchTelemetryLastSampledAtRef = useRef<number | null>(null);
+  const watchTelemetryFlushInProgressRef = useRef(false);
   const loopEnforcementFrameRef = useRef<number | null>(null);
   const focusRestoreFrameRef = useRef<number | null>(null);
   const isTimelineScrubbingRef = useRef(false);
@@ -5698,6 +5879,7 @@ function ViewerOverlay({
   const [viewerLoopState, setViewerLoopState] = useState<ViewerLoopState>(() => createEmptyViewerLoopState());
   const [isTimelineScrubbing, setIsTimelineScrubbing] = useState(false);
   const [scrubTime, setScrubTime] = useState<number | null>(null);
+  const [watchAnalytics, setWatchAnalytics] = useState<CatalogItemWatchAnalytics | null>(null);
 
   const videoCandidates = useMemo(() => buildVideoUrlCandidates(item), [
     item.id,
@@ -5731,6 +5913,10 @@ function ViewerOverlay({
   const timelineStyle = useMemo(
     () => ({ '--viewer-timeline-progress': `${timelinePercent}%` } as CSSProperties),
     [timelinePercent]
+  );
+  const watchHeatmapPaths = useMemo(
+    () => createViewerWatchHeatmapPaths(watchAnalytics),
+    [watchAnalytics]
   );
   const viewerShortSeekSeconds = normalizeViewerSeekSeconds(shortSeekSeconds, DEFAULT_VIEWER_SHORT_SEEK_SECONDS);
   const viewerLongSeekSeconds = normalizeViewerSeekSeconds(longSeekSeconds, DEFAULT_VIEWER_LONG_SEEK_SECONDS);
@@ -5964,6 +6150,186 @@ function ViewerOverlay({
     }
   }
 
+
+  function clearWatchTelemetryFlushTimer(): void {
+    if (watchTelemetryFlushTimerRef.current !== null) {
+      window.clearInterval(watchTelemetryFlushTimerRef.current);
+      watchTelemetryFlushTimerRef.current = null;
+    }
+  }
+
+  function resetViewerWatchTelemetrySampling(): void {
+    watchTelemetryLastMediaTimeRef.current = null;
+    watchTelemetryLastSampledAtRef.current = null;
+  }
+
+  function getViewerWatchTelemetryDuration(
+    videoElement: HTMLVideoElement | null = videoRef.current
+  ): number | null {
+    if (videoElement && Number.isFinite(videoElement.duration) && videoElement.duration > 0) {
+      return videoElement.duration;
+    }
+
+    return resolvedDuration !== null && Number.isFinite(resolvedDuration) && resolvedDuration > 0
+      ? resolvedDuration
+      : null;
+  }
+
+  function restoreViewerWatchTelemetryIntervals(
+    intervals: CatalogItemWatchTelemetryInterval[]
+  ): void {
+    if (intervals.length === 0) {
+      return;
+    }
+
+    watchTelemetryIntervalsRef.current = [
+      ...intervals,
+      ...watchTelemetryIntervalsRef.current
+    ].slice(0, WATCH_TELEMETRY_MAX_PENDING_INTERVALS * 2);
+  }
+
+  function appendViewerWatchTelemetryInterval(startSeconds: number, endSeconds: number): void {
+    const durationSeconds = getViewerWatchTelemetryDuration();
+    const boundedStartSeconds = Math.max(0, durationSeconds === null ? startSeconds : Math.min(startSeconds, durationSeconds));
+    const boundedEndSeconds = Math.max(0, durationSeconds === null ? endSeconds : Math.min(endSeconds, durationSeconds));
+
+    if (boundedEndSeconds - boundedStartSeconds < WATCH_TELEMETRY_MIN_INTERVAL_SECONDS) {
+      return;
+    }
+
+    const nextInterval = {
+      startSeconds: Number(boundedStartSeconds.toFixed(3)),
+      endSeconds: Number(boundedEndSeconds.toFixed(3))
+    };
+    const previousInterval = watchTelemetryIntervalsRef.current.at(-1);
+
+    if (
+      previousInterval &&
+      nextInterval.startSeconds >= previousInterval.endSeconds &&
+      nextInterval.startSeconds - previousInterval.endSeconds <= WATCH_TELEMETRY_MERGE_GAP_SECONDS
+    ) {
+      previousInterval.endSeconds = Math.max(previousInterval.endSeconds, nextInterval.endSeconds);
+    } else {
+      watchTelemetryIntervalsRef.current.push(nextInterval);
+    }
+  }
+
+  function recordViewerWatchTelemetrySample(
+    videoElement: HTMLVideoElement | null = videoRef.current
+  ): void {
+    if (
+      !videoElement ||
+      videoElement.paused ||
+      videoElement.ended ||
+      videoElement.seeking ||
+      isTimelineScrubbingRef.current
+    ) {
+      resetViewerWatchTelemetrySampling();
+      return;
+    }
+
+    const mediaTime = Number.isFinite(videoElement.currentTime) ? videoElement.currentTime : null;
+    if (mediaTime === null || mediaTime < 0) {
+      resetViewerWatchTelemetrySampling();
+      return;
+    }
+
+    const sampledAt = window.performance.now();
+    const lastMediaTime = watchTelemetryLastMediaTimeRef.current;
+    const lastSampledAt = watchTelemetryLastSampledAtRef.current;
+
+    if (lastMediaTime !== null && lastSampledAt !== null) {
+      const mediaDeltaSeconds = mediaTime - lastMediaTime;
+      const wallDeltaSeconds = Math.max(0, (sampledAt - lastSampledAt) / 1000);
+      const playbackRate =
+        Number.isFinite(videoElement.playbackRate) && videoElement.playbackRate > 0
+          ? videoElement.playbackRate
+          : 1;
+      const maxExpectedDeltaSeconds = Math.max(
+        WATCH_TELEMETRY_MAX_CONTINUOUS_DELTA_SECONDS,
+        wallDeltaSeconds * playbackRate * 3 + 0.5
+      );
+
+      if (
+        mediaDeltaSeconds >= WATCH_TELEMETRY_MIN_INTERVAL_SECONDS &&
+        mediaDeltaSeconds <= maxExpectedDeltaSeconds
+      ) {
+        appendViewerWatchTelemetryInterval(lastMediaTime, mediaTime);
+      }
+    }
+
+    watchTelemetryLastMediaTimeRef.current = mediaTime;
+    watchTelemetryLastSampledAtRef.current = sampledAt;
+  }
+
+  async function flushViewerWatchTelemetry(
+    options: { useBeacon?: boolean; restoreOnFailure?: boolean } = {}
+  ): Promise<void> {
+    recordViewerWatchTelemetrySample();
+
+    const pendingIntervals = watchTelemetryIntervalsRef.current;
+    if (pendingIntervals.length === 0) {
+      return;
+    }
+
+    watchTelemetryIntervalsRef.current = [];
+
+    const payload: CatalogItemWatchTelemetryPayload = {
+      durationSeconds: getViewerWatchTelemetryDuration(),
+      intervals: pendingIntervals
+    };
+
+    if (payload.intervals.length === 0) {
+      return;
+    }
+
+    if (options.useBeacon === true && typeof navigator.sendBeacon === 'function') {
+      const beaconPayload = new Blob([JSON.stringify(payload)], {
+        type: 'application/json'
+      });
+      const queued = navigator.sendBeacon(
+        `/api/catalog/${encodeURIComponent(item.id)}/watch-telemetry`,
+        beaconPayload
+      );
+
+      if (!queued && options.restoreOnFailure !== false) {
+        restoreViewerWatchTelemetryIntervals(pendingIntervals);
+      }
+
+      return;
+    }
+
+    if (watchTelemetryFlushInProgressRef.current) {
+      restoreViewerWatchTelemetryIntervals(pendingIntervals);
+      return;
+    }
+
+    watchTelemetryFlushInProgressRef.current = true;
+    try {
+      const analytics = await onRecordWatchTelemetry(item.id, payload);
+      if (analytics === null) {
+        if (options.restoreOnFailure !== false) {
+          restoreViewerWatchTelemetryIntervals(pendingIntervals);
+        }
+        return;
+      }
+
+      if (!hasClosedRef.current) {
+        setWatchAnalytics(analytics);
+      }
+    } catch (error) {
+      if (options.restoreOnFailure !== false) {
+        restoreViewerWatchTelemetryIntervals(pendingIntervals);
+      }
+      console.warn('viewer.watch-telemetry.flush.failed', {
+        itemId: item.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      watchTelemetryFlushInProgressRef.current = false;
+    }
+  }
+
   function clearLoopEnforcementFrame(): void {
     if (loopEnforcementFrameRef.current !== null) {
       window.cancelAnimationFrame(loopEnforcementFrameRef.current);
@@ -6151,6 +6517,7 @@ function ViewerOverlay({
       return false;
     }
 
+    resetViewerWatchTelemetrySampling();
     videoElement.currentTime = constrainedTime;
     setCurrentTime(constrainedTime);
 
@@ -6261,6 +6628,7 @@ function ViewerOverlay({
 
   function stopVideoPlaybackForViewerClose(): void {
     const videoElement = videoRef.current;
+    recordViewerWatchTelemetrySample(videoElement);
 
     if (videoElement) {
       videoElement.pause();
@@ -6281,10 +6649,12 @@ function ViewerOverlay({
     }
 
     hasClosedRef.current = true;
+    void flushViewerWatchTelemetry({ useBeacon: true, restoreOnFailure: false });
     clearControlsHideTimer();
     clearFocusRestoreFrame();
     clearLoopEnforcementFrame();
     stopPlaybackProgressTimer();
+    clearWatchTelemetryFlushTimer();
     updateViewerLoopState(createEmptyViewerLoopState());
     onClose();
   }
@@ -6295,11 +6665,14 @@ function ViewerOverlay({
     }
 
     closeInProgressRef.current = true;
+    recordViewerWatchTelemetrySample();
+    void flushViewerWatchTelemetry({ useBeacon: true, restoreOnFailure: false });
     stopVideoPlaybackForViewerClose();
     clearControlsHideTimer();
     clearFocusRestoreFrame();
     clearLoopEnforcementFrame();
     stopPlaybackProgressTimer();
+    clearWatchTelemetryFlushTimer();
     hasClosedRef.current = true;
   }
 
@@ -6340,6 +6713,7 @@ function ViewerOverlay({
   function startPlaybackProgressTimer(): void {
     stopPlaybackProgressTimer();
     playbackProgressTimerRef.current = window.setInterval(() => {
+      recordViewerWatchTelemetrySample(videoRef.current);
       syncPlaybackTimeFromVideo(videoRef.current, {
         enforceLoop: true,
         loopAtEnd: true,
@@ -6498,6 +6872,8 @@ function ViewerOverlay({
     });
     const videoElement = videoRef.current;
 
+    resetViewerWatchTelemetrySampling();
+
     if (videoElement) {
       videoElement.currentTime = safeNextTime;
     }
@@ -6559,6 +6935,8 @@ function ViewerOverlay({
   }
 
   function beginTimelineScrubbing(): void {
+    recordViewerWatchTelemetrySample();
+    resetViewerWatchTelemetrySampling();
     isTimelineScrubbingRef.current = true;
     setIsTimelineScrubbing(true);
     noteViewerActivity();
@@ -6570,6 +6948,7 @@ function ViewerOverlay({
     }
 
     isTimelineScrubbingRef.current = false;
+    resetViewerWatchTelemetrySampling();
     setIsTimelineScrubbing(false);
     setScrubTime(null);
     syncPlaybackTimeFromVideo(videoRef.current, {
@@ -6770,10 +7149,12 @@ function ViewerOverlay({
         }
       );
       if (Math.abs(safeLoopTime - currentVideoTime) >= 0.001 || videoElement.ended) {
+        resetViewerWatchTelemetrySampling();
         videoElement.currentTime = safeLoopTime;
         setCurrentTime(safeLoopTime);
       }
     } else if (videoElement.ended && Number.isFinite(videoElement.duration)) {
+      resetViewerWatchTelemetrySampling();
       videoElement.currentTime = 0;
     }
 
@@ -6828,6 +7209,8 @@ function ViewerOverlay({
     clearFocusRestoreFrame();
 
     stopVideoPlaybackForViewerClose();
+
+    await flushViewerWatchTelemetry({ restoreOnFailure: false });
 
     finalizeViewerClose();
 
@@ -7466,6 +7849,9 @@ function ViewerOverlay({
     setDuration(item.probe?.durationSeconds ?? null);
     setIsTimelineScrubbing(false);
     setScrubTime(null);
+    setWatchAnalytics(null);
+    watchTelemetryIntervalsRef.current = [];
+    resetViewerWatchTelemetrySampling();
     resetViewerLoop({
       restoreFocus: false,
       noteActivity: false
@@ -7476,6 +7862,7 @@ function ViewerOverlay({
     hasClosedRef.current = false;
     clearFocusRestoreFrame();
     stopPlaybackProgressTimer();
+    clearWatchTelemetryFlushTimer();
     noteViewerActivity();
     scheduleVideoFocusRestore();
     void refreshBookmarks(false);
@@ -7485,8 +7872,61 @@ function ViewerOverlay({
       clearFocusRestoreFrame();
       clearLoopEnforcementFrame();
       stopPlaybackProgressTimer();
+      clearWatchTelemetryFlushTimer();
+      void flushViewerWatchTelemetry({ useBeacon: true, restoreOnFailure: false });
     };
   }, [item.id, item.probe?.durationSeconds, videoCandidates.join('|')]);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    setWatchAnalytics(null);
+    void onLoadWatchAnalytics(item.id).then((analytics) => {
+      if (!isCancelled) {
+        setWatchAnalytics(analytics);
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [item.id]);
+
+  useEffect(() => {
+    clearWatchTelemetryFlushTimer();
+    watchTelemetryFlushTimerRef.current = window.setInterval(() => {
+      void flushViewerWatchTelemetry();
+    }, WATCH_TELEMETRY_FLUSH_INTERVAL_MS);
+
+    return () => {
+      clearWatchTelemetryFlushTimer();
+      void flushViewerWatchTelemetry({ useBeacon: true, restoreOnFailure: false });
+    };
+  }, [item.id]);
+
+  useEffect(() => {
+    const flushForPageExit = (): void => {
+      void flushViewerWatchTelemetry({ useBeacon: true, restoreOnFailure: false });
+    };
+    const handleVisibilityChange = (): void => {
+      if (document.visibilityState === 'hidden') {
+        flushForPageExit();
+        return;
+      }
+
+      resetViewerWatchTelemetrySampling();
+    };
+
+    window.addEventListener('pagehide', flushForPageExit);
+    window.addEventListener('beforeunload', flushForPageExit);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('pagehide', flushForPageExit);
+      window.removeEventListener('beforeunload', flushForPageExit);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [item.id]);
 
   useEffect(() => {
     const stageElement = viewerStageRef.current;
@@ -7959,11 +8399,17 @@ function ViewerOverlay({
               <span className="viewer-metadata-separator" aria-hidden="true">
                 ·
               </span>
-                ·
               <span className="viewer-metadata-detail">{formatUsedCount(item.usedCount)}</span>
-              <span className="viewer-metadata-separator" aria-hidden="true"></span>
+              <span className="viewer-metadata-separator" aria-hidden="true">
                 ·
+              </span>
               <span className="viewer-metadata-detail">{formatViewCount(item.viewCount)}</span>
+              <span className="viewer-metadata-separator" aria-hidden="true">
+                ·
+              </span>
+              <span className="viewer-metadata-detail">
+                {formatWatchDuration(item.totalWatchSeconds)} watched
+              </span>
             </div>
             {viewerError && (
               <p className="viewer-error" role="status" aria-live="polite">
@@ -8236,6 +8682,7 @@ function ViewerOverlay({
                 onError={handleVideoError}
                 onLoadedMetadata={() => {
                   const videoElement = videoRef.current;
+                  resetViewerWatchTelemetrySampling();
                   const naturalWidth = normalizePositiveDimension(videoElement?.videoWidth);
                   const naturalHeight = normalizePositiveDimension(videoElement?.videoHeight);
 
@@ -8280,6 +8727,7 @@ function ViewerOverlay({
                   });
                 }}
                 onTimeUpdate={() => {
+                  recordViewerWatchTelemetrySample(videoRef.current);
                   syncPlaybackTimeFromVideo(videoRef.current, {
                     enforceLoop: true,
                     loopAtEnd: true,
@@ -8287,18 +8735,22 @@ function ViewerOverlay({
                   });
                 }}
                 onSeeking={() => {
+                  recordViewerWatchTelemetrySample(videoRef.current);
+                  resetViewerWatchTelemetrySampling();
                   syncPlaybackTimeFromVideo(videoRef.current, {
                     enforceLoop: true,
                     loopAtEnd: true
                   });
                 }}
                 onSeeked={() => {
+                  resetViewerWatchTelemetrySampling();
                   syncPlaybackTimeFromVideo(videoRef.current, {
                     enforceLoop: true,
                     loopAtEnd: true
                   });
                 }}
                 onPlay={() => {
+                  resetViewerWatchTelemetrySampling();
                   setIsVideoPlaying(true);
                   setViewerError('');
                   syncPlaybackTimeFromVideo(videoRef.current, {
@@ -8312,6 +8764,8 @@ function ViewerOverlay({
                   }
                 }}
                 onPause={() => {
+                  recordViewerWatchTelemetrySample(videoRef.current);
+                  resetViewerWatchTelemetrySampling();
                   setIsVideoPlaying(false);
                   syncPlaybackTimeFromVideo(videoRef.current, {
                     enforceLoop: true,
@@ -8321,6 +8775,8 @@ function ViewerOverlay({
                   clearLoopEnforcementFrame();
                 }}
                 onEnded={() => {
+                  recordViewerWatchTelemetrySample(videoRef.current);
+                  resetViewerWatchTelemetrySampling();
                   if (getViewerLoopRange(viewerLoopStateRef.current, resolvedDuration) !== null) {
                     setIsVideoPlaying(false);
                     stopPlaybackProgressTimer();
@@ -8440,6 +8896,23 @@ function ViewerOverlay({
               {`${formatViewerClockTime(displayedTimelineTime)} / ${formatViewerClockTime(resolvedDuration)}`}
             </div>
             <div className="viewer-timeline-range-wrap">
+              {videoUrl !== null && watchHeatmapPaths !== null && (
+                <div
+                  className="viewer-watch-heatmap-wrap"
+                  aria-hidden="true"
+                  title="Playback popularity based on watched and replayed sections"
+                >
+                  <svg
+                    className="viewer-watch-heatmap"
+                    viewBox="0 0 100 24"
+                    preserveAspectRatio="none"
+                    focusable="false"
+                  >
+                    <path className="viewer-watch-heatmap-area" d={watchHeatmapPaths.areaPath} />
+                    <path className="viewer-watch-heatmap-line" d={watchHeatmapPaths.linePath} />
+                  </svg>
+                </div>
+              )}
               {videoUrl !== null && timelineLoopMarkers !== null && (
                 <div
                   className={`viewer-timeline-loop-overlay${timelineLoopMarkers.isActive ? ' is-active' : ''}`}
@@ -11137,6 +11610,112 @@ export default function App(): JSX.Element {
         itemId,
         message: error instanceof Error ? error.message : String(error)
       });
+    }
+  }
+
+
+  async function loadCatalogItemWatchAnalytics(
+    itemId: string
+  ): Promise<CatalogItemWatchAnalytics | null> {
+    try {
+      const response = await fetch(`/api/catalog/${encodeURIComponent(itemId)}/watch-analytics`, {
+        credentials: 'include'
+      });
+
+      if (response.status === 401) {
+        resetAuthenticatedState();
+        return null;
+      }
+
+      const payload = await readJsonPayload(response);
+      if (!response.ok) {
+        const message = isRecord(payload) ? readString(payload.message) : null;
+        console.warn('catalog.watch-analytics.load.failed', {
+          itemId,
+          status: response.status,
+          message
+        });
+        return null;
+      }
+
+      if (!isRecord(payload)) {
+        return null;
+      }
+
+      return hydrateCatalogItemWatchAnalytics(payload.analytics);
+    } catch (error) {
+      console.warn('catalog.watch-analytics.load.failed', {
+        itemId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return null;
+    }
+  }
+
+  async function recordCatalogItemWatchTelemetry(
+    itemId: string,
+    telemetryPayload: CatalogItemWatchTelemetryPayload,
+    options: WatchTelemetryFlushOptions = {}
+  ): Promise<CatalogItemWatchAnalytics | null> {
+    if (telemetryPayload.intervals.length === 0) {
+      return null;
+    }
+
+    try {
+      const telemetryUrl = `/api/catalog/${encodeURIComponent(itemId)}/watch-telemetry`;
+
+      if (options.beacon === true && typeof navigator.sendBeacon === 'function') {
+        const beaconPayload = new Blob([JSON.stringify(telemetryPayload)], {
+          type: 'application/json'
+        });
+
+        if (navigator.sendBeacon(telemetryUrl, beaconPayload)) {
+          return null;
+        }
+      }
+
+      const response = await fetch(telemetryUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        keepalive: options.keepalive === true || options.beacon === true,
+        body: JSON.stringify(telemetryPayload)
+      });
+
+      if (response.status === 401) {
+        resetAuthenticatedState();
+        return null;
+      }
+
+      const payload = await readJsonPayload(response);
+      if (!response.ok) {
+        const message = isRecord(payload) ? readString(payload.message) : null;
+        console.warn('catalog.watch-telemetry.record.failed', {
+          itemId,
+          status: response.status,
+          message
+        });
+        return null;
+      }
+
+      if (!isRecord(payload)) {
+        return null;
+      }
+
+      const updatedItem = hydrateCatalogItem(payload.item);
+      if (updatedItem) {
+        applyCatalogItemUpdate(updatedItem);
+      }
+
+      return hydrateCatalogItemWatchAnalytics(payload.analytics);
+    } catch (error) {
+      console.warn('catalog.watch-telemetry.record.failed', {
+        itemId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return null;
     }
   }
 
@@ -14675,6 +15254,8 @@ export default function App(): JSX.Element {
           onUseBookmark={useCatalogItemBookmark}
           onDeleteBookmark={deleteCatalogItemBookmark}
           onSaveViewerVisualAdjustments={saveCatalogItemViewerVisualAdjustments}
+          onLoadWatchAnalytics={loadCatalogItemWatchAnalytics}
+          onRecordWatchTelemetry={recordCatalogItemWatchTelemetry}
           shortSeekSeconds={viewerShortSeekSeconds}
           longSeekSeconds={viewerLongSeekSeconds}
           attemptFullscreenOnOpen={attemptFullscreenOnOpen}
