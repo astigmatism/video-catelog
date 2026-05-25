@@ -25,6 +25,8 @@ export type AppConfig = {
   dbUser: string;
   dbPassword: string | null;
   trustProxy: boolean;
+  httpsRedirect: boolean;
+  httpsRedirectHosts: string[];
   wsHeartbeatMs: number;
   wsAllowedOrigins: string[];
   maxUploadBytes: number;
@@ -278,6 +280,9 @@ export function loadConfig(): AppConfig {
   const thumbsRoot = path.join(mediaRoot, 'thumbs');
   const previewsRoot = path.join(mediaRoot, 'previews');
   const webDistRoot = path.resolve(repoRoot, 'apps', 'web', 'dist');
+  const trustProxy = parseBoolean(readSetting(env, dotEnv, 'TRUST_PROXY'), false);
+  const httpsRedirectSetting =
+    readSetting(env, dotEnv, 'HTTPS_REDIRECT') ?? readSetting(env, dotEnv, 'FORCE_HTTPS');
 
   return {
     appPassword: appPassword ?? 'change-this-before-public-use',
@@ -302,7 +307,11 @@ export function loadConfig(): AppConfig {
     dbName: readSetting(env, dotEnv, 'DB_NAME') ?? 'video_catalog',
     dbUser: readSetting(env, dotEnv, 'DB_USER') ?? process.env.USER ?? 'unknown',
     dbPassword: readSetting(env, dotEnv, 'DB_PASSWORD') ?? null,
-    trustProxy: parseBoolean(readSetting(env, dotEnv, 'TRUST_PROXY'), false),
+    trustProxy,
+    httpsRedirect: parseBoolean(httpsRedirectSetting, nodeEnv === 'production' && trustProxy),
+    httpsRedirectHosts: parseCommaSeparatedList(
+      readSetting(env, dotEnv, 'HTTPS_REDIRECT_HOSTS') ?? readSetting(env, dotEnv, 'PUBLIC_HOSTS')
+    ),
     wsHeartbeatMs: parseInteger(readSetting(env, dotEnv, 'WS_HEARTBEAT_MS'), 30000),
     wsAllowedOrigins: parseCommaSeparatedList(readSetting(env, dotEnv, 'WS_ALLOWED_ORIGINS')),
     maxUploadBytes: parseInteger(readSetting(env, dotEnv, 'MAX_UPLOAD_BYTES'), DEFAULT_MAX_UPLOAD_BYTES),

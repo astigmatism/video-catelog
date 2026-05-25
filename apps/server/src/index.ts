@@ -74,6 +74,15 @@ const app = Fastify({
   logger: true,
   trustProxy: config.trustProxy
 });
+
+app.addHook('onRequest', enforceHttpsRedirect);
+
+if (config.httpsRedirect && !config.trustProxy) {
+  app.log.warn(
+    { event: 'https_redirect.trust_proxy_disabled' },
+    'HTTPS redirect is enabled while TRUST_PROXY is disabled. If TLS terminates at a reverse proxy, proxied HTTPS requests may be redirected repeatedly unless forwarded protocol headers are trusted.'
+  );
+}
 const idleHoverPreviewRebuilder = new IdleHoverPreviewRebuilder({
   catalogStore,
   config,
@@ -258,6 +267,7 @@ const WS_MAX_MESSAGE_BYTES = 64 * 1024;
 const WS_RATE_WINDOW_MS = 10_000;
 const WS_MAX_COMMANDS_PER_WINDOW = 120;
 const SESSION_SWEEP_MS = 15_000;
+const HTTPS_REDIRECT_STATUS_CODE = 308;
 const STORAGE_USAGE_CACHE_TTL_MS = 30_000;
 const TOOL_AVAILABILITY_CACHE_TTL_MS = 30_000;
 
@@ -4226,6 +4236,141 @@ function getHeaderFirstValue(value: string | string[] | undefined): string | nul
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
 }
 
+function getForwardedHeaderFirstEntry(value: string | string[] | undefined): string | null {
+  const firstValue = getHeaderFirstValue(value);
+  if (!firstValue) {
+    return null;
+  }
+
+  return firstValue.split(',')[0]?.trim() || null;
+}
+
+function getTrustedForwardedProtocol(request: FastifyRequest): string | null {
+  if (!config.trustProxy) {
+    return null;
+  }
+
+  return getForwardedHeaderFirstEntry(request.headers['x-forwarded-proto'])?.toLowerCase() ?? null;
+}
+
+function isRequestSecure(request: FastifyRequest): boolean {
+  if (request.protocol === 'https') {
+    return true;
+  }
+
+  const forwardedProtocol = getTrustedForwardedProtocol(request);
+  return forwardedProtocol === 'https' || forwardedProtocol === 'wss';
+}
+
+function getRequestPathAndQuery(request: FastifyRequest): string {
+  const rawUrl = request.raw.url ?? request.url;
+  if (typeof rawUrl !== 'string' || rawUrl === '') {
+    return '/';
+  }
+
+  if (rawUrl.startsWith('/')) {
+    return rawUrl;
+  }
+
+  try {
+    const parsedUrl = new URL(rawUrl);
+    return `${parsedUrl.pathname}${parsedUrl.search}` || '/';
+  } catch {
+    return `/${rawUrl.replace(/^\/+/, '')}`;
+  }
+}
+
+function normalizeHostForHttpsLocation(value: string | null): string | null {
+  const firstHost = value?.split(',')[0]?.trim();
+  if (!firstHost || /[\r\n/]/.test(firstHost)) {
+    return null;
+  }
+
+  try {
+    const url = new URL(`http://${firstHost}`);
+    if (!url.hostname) {
+      return null;
+    }
+
+    if (url.port === '' || url.port === '80' || url.port === '443') {
+      return url.hostname;
+    }
+
+    return `${url.hostname}:${url.port}`;
+  } catch {
+    return null;
+  }
+}
+
+function getRequestHostForHttpsRedirect(request: FastifyRequest): string | null {
+  const forwardedHost = config.trustProxy
+    ? getForwardedHeaderFirstEntry(request.headers['x-forwarded-host'])
+    : null;
+  const host = forwardedHost ?? getForwardedHeaderFirstEntry(request.headers.host);
+  return normalizeHostForHttpsLocation(host ?? (typeof request.hostname === 'string' ? request.hostname : null));
+}
+
+function getHostnameFromHostLikeValue(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'ws:' || url.protocol === 'wss:') {
+      return url.hostname.toLowerCase();
+    }
+  } catch {
+    // Fall through to host-header parsing below.
+  }
+
+  return getHostnameFromHostHeader(value);
+}
+
+function isHttpsRedirectHostAllowed(redirectHost: string): boolean {
+  if (config.httpsRedirectHosts.length === 0) {
+    return true;
+  }
+
+  const requestHostname = getHostnameFromHostHeader(redirectHost);
+  if (!requestHostname) {
+    return false;
+  }
+
+  return config.httpsRedirectHosts.some((allowedHost) => {
+    const allowedHostname = getHostnameFromHostLikeValue(allowedHost);
+    return allowedHostname === requestHostname;
+  });
+}
+
+function createHttpsRedirectLocation(request: FastifyRequest): string | null {
+  const redirectHost = getRequestHostForHttpsRedirect(request);
+  if (!redirectHost || !isHttpsRedirectHostAllowed(redirectHost)) {
+    return null;
+  }
+
+  return `https://${redirectHost}${getRequestPathAndQuery(request)}`;
+}
+
+async function enforceHttpsRedirect(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  if (!config.httpsRedirect || isRequestSecure(request)) {
+    return;
+  }
+
+  const redirectLocation = createHttpsRedirectLocation(request);
+  if (!redirectLocation) {
+    request.log.warn(
+      {
+        event: 'https_redirect.rejected_host',
+        host: getHeaderFirstValue(request.headers.host),
+        forwardedHost: getHeaderFirstValue(request.headers['x-forwarded-host']),
+        configuredHosts: config.httpsRedirectHosts
+      },
+      'Rejected HTTP request because a safe HTTPS redirect target could not be determined.'
+    );
+    reply.code(400).send({ message: 'Bad Request' });
+    return;
+  }
+
+  reply.code(HTTPS_REDIRECT_STATUS_CODE).header('Location', redirectLocation).send();
+}
+
 function normalizeWebSocketOriginForCheck(value: string): string | null {
   try {
     const url = new URL(value);
@@ -6766,6 +6911,7 @@ async function handleLoginRoute(request: FastifyRequest, reply: FastifyReply): P
   reply.setCookie(config.cookieName, session.id, {
     httpOnly: true,
     sameSite: 'lax',
+    secure: isRequestSecure(request),
     path: '/'
   });
 
@@ -6785,7 +6931,8 @@ async function handleLogoutRoute(request: FastifyRequest, reply: FastifyReply): 
   const sessionId = getSessionId(request);
   destroySessionAndClearSockets(sessionId, 'logout', 'Logged out');
   reply.clearCookie(config.cookieName, {
-    path: '/'
+    path: '/',
+    secure: isRequestSecure(request)
   });
   reply.send({ ok: true, authenticated: false });
 }
@@ -6794,7 +6941,8 @@ async function handleLockRoute(request: FastifyRequest, reply: FastifyReply): Pr
   const sessionId = getSessionId(request);
   destroySessionAndClearSockets(sessionId, 'panic', 'Locked');
   reply.clearCookie(config.cookieName, {
-    path: '/'
+    path: '/',
+    secure: isRequestSecure(request)
   });
   reply.send({ ok: true, authenticated: false, panic: true });
 }
