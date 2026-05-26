@@ -148,7 +148,7 @@ export function getDefaultPhotoCollectionFilters(): PhotoCollectionFilters {
   };
 }
 
-type PhotoGridSortCategory = 'name' | 'views' | 'resolution' | 'file_size';
+type PhotoGridSortCategory = 'name' | 'views' | 'resolution' | 'file_size' | 'random';
 
 type PhotoGridSortDirection = 'asc' | 'desc';
 
@@ -156,8 +156,17 @@ const PHOTO_GRID_SORT_CATEGORY_LABELS: Record<PhotoGridSortCategory, string> = {
   name: 'Name',
   views: 'Views',
   resolution: 'Resolution',
-  file_size: 'File size'
+  file_size: 'File size',
+  random: 'Randomized'
 };
+
+function createPhotoGridRandomSeed(): number {
+  return createPhotoCollectionRandomSeed();
+}
+
+function createNextPhotoGridRandomSeed(currentSeed: number): number {
+  return createNextPhotoCollectionRandomSeed(currentSeed);
+}
 
 type NoticeTone = 'info' | 'success' | 'warning' | 'error';
 
@@ -634,9 +643,28 @@ function compareFavoritePhotoEntriesForGridSort(
 function sortFavoritePhotoEntries(
   entries: FavoritePhotoEntry[],
   sortCategory: PhotoGridSortCategory,
-  sortDirection: PhotoGridSortDirection
+  sortDirection: PhotoGridSortDirection,
+  randomSeed: number
 ): FavoritePhotoEntry[] {
-  return [...entries].sort((left, right) => {
+  const nextEntries = [...entries];
+
+  if (sortCategory === 'random') {
+    return nextEntries
+      .map((entry) => ({
+        entry,
+        sortValue: getSeededPhotoGridRandomSortValue(entry.photo, randomSeed)
+      }))
+      .sort((left, right) => {
+        if (left.sortValue !== right.sortValue) {
+          return left.sortValue < right.sortValue ? -1 : 1;
+        }
+
+        return compareFavoritePhotoEntriesForGridSort(left.entry, right.entry, 'name');
+      })
+      .map(({ entry }) => entry);
+  }
+
+  return nextEntries.sort((left, right) => {
     const primaryComparison = compareFavoritePhotoEntriesForGridSort(left, right, sortCategory);
     return sortDirection === 'asc' ? primaryComparison : -primaryComparison;
   });
@@ -663,20 +691,36 @@ function doesFavoritePhotoEntryMatchSearch(entry: FavoritePhotoEntry, normalized
 
 const PHOTO_VIEWER_CONTROLS_AUTO_HIDE_DELAY_MS = 2000;
 const PHOTO_VIEWER_DEFAULT_SLIDESHOW_DELAY_MS = 5000;
-const PHOTO_VIEWER_SLIDESHOW_DELAY_OPTIONS_SECONDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const PHOTO_VIEWER_MIN_SLIDESHOW_DELAY_MS = 1000;
+const PHOTO_VIEWER_MAX_SLIDESHOW_DELAY_MS = 10000;
+const PHOTO_VIEWER_SLIDESHOW_DELAY_STEP_MS = 500;
+const PHOTO_VIEWER_SLIDESHOW_DELAY_OPTIONS_MS = Array.from(
+  { length: (PHOTO_VIEWER_MAX_SLIDESHOW_DELAY_MS - PHOTO_VIEWER_MIN_SLIDESHOW_DELAY_MS) / PHOTO_VIEWER_SLIDESHOW_DELAY_STEP_MS + 1 },
+  (_, index) => PHOTO_VIEWER_MIN_SLIDESHOW_DELAY_MS + index * PHOTO_VIEWER_SLIDESHOW_DELAY_STEP_MS
+);
 const PHOTO_VIEWER_TRANSITION_DURATION_MS = 720;
 const PHOTO_VIEWER_KEN_BURNS_VARIANTS = ['zoom-in', 'pan-right', 'pan-left', 'pan-down'] as const;
+const PHOTO_VIEWER_FILM_STRIP_KEN_BURNS_VARIANTS = [
+  'zoom-in-drift-left',
+  'zoom-in-drift-right',
+  'zoom-out-drift-left',
+  'zoom-out-drift-right',
+  'zoom-in-drift-down',
+  'zoom-out-drift-up'
+] as const;
+const PHOTO_VIEWER_FILM_STRIP_KEN_BURNS_MIN_DURATION_MS = 3200;
 const PHOTO_VIEWER_LAYOUT_SESSION_STORAGE_KEY = 'photoViewer.layout';
 const PHOTO_VIEWER_FILM_STRIP_SIDE_FRAME_COUNT = 4;
 const PHOTO_VIEWER_FILM_STRIP_MIN_GAP_PX = 6;
 const PHOTO_VIEWER_FILM_STRIP_MAX_GAP_PX = 12;
 
 type PhotoViewerStandardSlideshowMode = 'cut' | 'crossfade' | 'dissolve' | 'slide' | 'ken-burns';
-type PhotoViewerFilmStripSlideshowMode = 'scroll' | 'ken-burns-zoom-in';
+type PhotoViewerFilmStripSlideshowMode = 'scroll' | 'ken-burns';
 type PhotoViewerSlideshowMode = PhotoViewerStandardSlideshowMode | PhotoViewerFilmStripSlideshowMode;
 type PhotoViewerLayoutMode = 'standard' | 'film-strip';
 type PhotoViewerTransitionDirection = 'next' | 'previous';
 type PhotoViewerKenBurnsVariant = (typeof PHOTO_VIEWER_KEN_BURNS_VARIANTS)[number];
+type PhotoViewerFilmStripKenBurnsVariant = (typeof PHOTO_VIEWER_FILM_STRIP_KEN_BURNS_VARIANTS)[number];
 
 type PhotoViewerSlideshowModeOption<TMode extends PhotoViewerSlideshowMode = PhotoViewerSlideshowMode> = {
   value: TMode;
@@ -725,9 +769,9 @@ const PHOTO_VIEWER_FILM_STRIP_SLIDESHOW_MODE_OPTIONS: PhotoViewerSlideshowModeOp
     description: 'Advance through the filmstrip using the existing centered scrolling motion.'
   },
   {
-    value: 'ken-burns-zoom-in',
-    label: 'Ken Burns Zoom-In',
-    description: 'Show the full centered filmstrip photo, then slowly zoom toward the middle before advancing.'
+    value: 'ken-burns',
+    label: 'Ken Burns',
+    description: 'Apply a slow, understated mix of pan, zoom-in, and zoom-out motion to the centered filmstrip photo.'
   }
 ];
 
@@ -809,6 +853,18 @@ function describePhotoViewerSlideDuration(durationMs: number): string {
   return `${roundedSeconds} ${roundedSeconds === 1 ? 'second' : 'seconds'}`;
 }
 
+function clampPhotoViewerSlideshowDelayMs(durationMs: number): number {
+  if (!Number.isFinite(durationMs)) {
+    return PHOTO_VIEWER_DEFAULT_SLIDESHOW_DELAY_MS;
+  }
+
+  const snappedDurationMs = Math.round(durationMs / PHOTO_VIEWER_SLIDESHOW_DELAY_STEP_MS) * PHOTO_VIEWER_SLIDESHOW_DELAY_STEP_MS;
+  return Math.max(
+    PHOTO_VIEWER_MIN_SLIDESHOW_DELAY_MS,
+    Math.min(PHOTO_VIEWER_MAX_SLIDESHOW_DELAY_MS, snappedDurationMs)
+  );
+}
+
 function isPhotoViewerStandardSlideshowMode(value: string): value is PhotoViewerStandardSlideshowMode {
   return PHOTO_VIEWER_STANDARD_SLIDESHOW_MODE_OPTIONS.some((option) => option.value === value);
 }
@@ -884,6 +940,19 @@ function getPhotoViewerKenBurnsVariant(photo: Photo): PhotoViewerKenBurnsVariant
   return PHOTO_VIEWER_KEN_BURNS_VARIANTS[
     getPhotoViewerStableHash(photo.id || photo.originalName) % PHOTO_VIEWER_KEN_BURNS_VARIANTS.length
   ];
+}
+
+function getPhotoViewerFilmStripKenBurnsVariant(photo: Photo): PhotoViewerFilmStripKenBurnsVariant {
+  const hashKey = `${photo.id}:${photo.checksumSha256 || photo.originalName}`;
+  return PHOTO_VIEWER_FILM_STRIP_KEN_BURNS_VARIANTS[
+    getPhotoViewerStableHash(hashKey) % PHOTO_VIEWER_FILM_STRIP_KEN_BURNS_VARIANTS.length
+  ];
+}
+
+function getPhotoViewerFilmStripKenBurnsDurationMs(photo: Photo, baseDurationMs: number): number {
+  const hash = getPhotoViewerStableHash(`${photo.collectionId}:${photo.id}:film-strip-ken-burns-duration`);
+  const durationFactor = 1.06 + (hash % 5) * 0.03;
+  return Math.round(Math.max(PHOTO_VIEWER_FILM_STRIP_KEN_BURNS_MIN_DURATION_MS, baseDurationMs * durationFactor));
 }
 
 function capturePhotoViewerFrameTransformStyle(frameElement: HTMLDivElement | null): CSSProperties {
@@ -1583,6 +1652,8 @@ function comparePhotosForGridSort(
       return getPhotoResolutionPixelCount(left) - getPhotoResolutionPixelCount(right);
     case 'file_size':
       return left.sizeBytes - right.sizeBytes;
+    case 'random':
+      return 0;
     case 'name':
     default:
       return comparePhotosByName(left, right);
@@ -1593,12 +1664,45 @@ function tieBreakPhotosForGridSort(left: Photo, right: Photo): number {
   return comparePhotosByName(left, right) || left.sortOrder - right.sortOrder || left.id.localeCompare(right.id);
 }
 
+function getSeededPhotoGridRandomSortValue(photo: Photo, seed: number): number {
+  const key = `${photo.collectionId}:${photo.id}:${photo.originalName}:${photo.sortOrder}`;
+  let hash = (seed ^ 0x811c9dc5) >>> 0;
+
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+
+  hash = Math.imul(hash ^ (hash >>> 16), 2246822507) >>> 0;
+  hash = Math.imul(hash ^ (hash >>> 13), 3266489909) >>> 0;
+  return (hash ^ (hash >>> 16)) >>> 0;
+}
+
 function sortPhotos(
   photos: Photo[],
   sortCategory: PhotoGridSortCategory,
-  sortDirection: PhotoGridSortDirection
+  sortDirection: PhotoGridSortDirection,
+  randomSeed: number
 ): Photo[] {
-  return [...photos].sort((left, right) => {
+  const nextPhotos = [...photos];
+
+  if (sortCategory === 'random') {
+    return nextPhotos
+      .map((photo) => ({
+        photo,
+        sortValue: getSeededPhotoGridRandomSortValue(photo, randomSeed)
+      }))
+      .sort((left, right) => {
+        if (left.sortValue !== right.sortValue) {
+          return left.sortValue < right.sortValue ? -1 : 1;
+        }
+
+        return tieBreakPhotosForGridSort(left.photo, right.photo);
+      })
+      .map(({ photo }) => photo);
+  }
+
+  return nextPhotos.sort((left, right) => {
     const primaryComparison = comparePhotosForGridSort(left, right, sortCategory);
     const directedComparison = sortDirection === 'asc' ? primaryComparison : -primaryComparison;
     return directedComparison || tieBreakPhotosForGridSort(left, right);
@@ -2782,6 +2886,7 @@ export function PhotoCatalogView({
   const [photoSearch, setPhotoSearch] = useState('');
   const [photoGridSortCategory, setPhotoGridSortCategory] = useState<PhotoGridSortCategory>('name');
   const [photoGridSortDirection, setPhotoGridSortDirection] = useState<PhotoGridSortDirection>('asc');
+  const [photoGridRandomSeed, setPhotoGridRandomSeed] = useState(() => createPhotoGridRandomSeed());
   const [isPhotoFavoritesOnly, setIsPhotoFavoritesOnly] = useState(false);
   const [favoritePhotoIdsByCollection, setFavoritePhotoIdsByCollection] = useState<PhotoFavoriteState>(() =>
     createPhotoFavoriteStateFromCollections(collections)
@@ -2812,6 +2917,7 @@ export function PhotoCatalogView({
   } | null>(null);
   const [arePhotoViewerControlsVisible, setArePhotoViewerControlsVisible] = useState(true);
   const [isPhotoViewerSlideshowActive, setIsPhotoViewerSlideshowActive] = useState(false);
+  const [photoViewerRandomizedSlideshowPhotoIds, setPhotoViewerRandomizedSlideshowPhotoIds] = useState<string[] | null>(null);
   const [photoViewerSlideshowDelayMs, setPhotoViewerSlideshowDelayMs] = useState(
     PHOTO_VIEWER_DEFAULT_SLIDESHOW_DELAY_MS
   );
@@ -2957,6 +3063,7 @@ export function PhotoCatalogView({
       photoViewerDragRef.current = null;
       setPhotoViewerFilmStripVirtualCenter(null);
       setPhotoViewerFitMode('fit');
+      setPhotoViewerRandomizedSlideshowPhotoIds(null);
       setIsPhotoViewerSlideshowActive(false);
       setIsPhotoViewerPanning(false);
       return;
@@ -3108,12 +3215,13 @@ export function PhotoCatalogView({
       }
     }
 
-    return sortFavoritePhotoEntries(entries, photoGridSortCategory, photoGridSortDirection);
+    return sortFavoritePhotoEntries(entries, photoGridSortCategory, photoGridSortDirection, photoGridRandomSeed);
   }, [
     favoriteBrowseCollections,
     favoriteCollectionDetailsById,
     favoritePhotoIdsByCollection,
     isFavoriteBrowserActive,
+    photoGridRandomSeed,
     photoGridSortCategory,
     photoGridSortDirection,
     photoSearch
@@ -3242,9 +3350,18 @@ export function PhotoCatalogView({
         return photo.originalName.toLowerCase().includes(normalizedSearch);
       }),
       photoGridSortCategory,
-      photoGridSortDirection
+      photoGridSortDirection,
+      photoGridRandomSeed
     );
-  }, [detail, isPhotoFavoritesOnly, photoGridSortCategory, photoGridSortDirection, photoSearch, selectedFavoritePhotoIds]);
+  }, [
+    detail,
+    isPhotoFavoritesOnly,
+    photoGridRandomSeed,
+    photoGridSortCategory,
+    photoGridSortDirection,
+    photoSearch,
+    selectedFavoritePhotoIds
+  ]);
 
   const viewerPhoto = useMemo(() => {
     if (!viewerPhotoId) {
@@ -3258,6 +3375,17 @@ export function PhotoCatalogView({
 
     return isFavoriteBrowserActive ? favoriteBrowseLoadedPhotoById.get(viewerPhotoId) ?? null : null;
   }, [detail, favoriteBrowseLoadedPhotoById, isFavoriteBrowserActive, viewerPhotoId]);
+
+  const photoViewerRandomizedSlideshowPhotos = useMemo<Photo[] | null>(() => {
+    if (photoViewerRandomizedSlideshowPhotoIds === null) {
+      return null;
+    }
+
+    const visiblePhotoById = new Map(visiblePhotos.map((photo) => [photo.id, photo]));
+    return uniqueStrings(photoViewerRandomizedSlideshowPhotoIds)
+      .map((photoId) => visiblePhotoById.get(photoId))
+      .filter((photo): photo is Photo => photo !== undefined);
+  }, [photoViewerRandomizedSlideshowPhotoIds, visiblePhotos]);
 
   useEffect(() => {
     if (!viewerPhotoId || !viewerPhoto) {
@@ -3311,9 +3439,11 @@ export function PhotoCatalogView({
       : viewerPhoto
         ? [viewerPhoto]
         : []
-    : visiblePhotos.length > 0
-      ? visiblePhotos
-      : detail?.photos ?? [];
+    : photoViewerRandomizedSlideshowPhotos !== null
+      ? photoViewerRandomizedSlideshowPhotos
+      : visiblePhotos.length > 0
+        ? visiblePhotos
+        : detail?.photos ?? [];
   const viewerOrderedPhotoIds = viewerOrderedPhotos.map((photo) => photo.id).join('|');
   const photoViewerSlideDurationLabel = `${formatPhotoViewerSlideDuration(photoViewerSlideshowDelayMs)} / slide`;
   const photoViewerSlideDurationDescription = describePhotoViewerSlideDuration(photoViewerSlideshowDelayMs);
@@ -3334,12 +3464,12 @@ export function PhotoCatalogView({
   const viewerPhotoIndex = viewerPhoto ? viewerOrderedPhotos.findIndex((photo) => photo.id === viewerPhoto.id) : -1;
   const isPhotoViewerFilmStripLayout =
     isPhotoViewerFilmStripViewMode && viewerPhotoIndex >= 0 && viewerOrderedPhotos.length > 1;
-  const isPhotoViewerFilmStripKenBurnsZoomInActive =
+  const isPhotoViewerFilmStripKenBurnsActive =
     isPhotoViewerFilmStripLayout &&
     viewerPhoto !== null &&
     isPhotoViewerSlideshowActive &&
     canPhotoViewerSlideshowAdvance &&
-    photoViewerFilmStripSlideshowMode === 'ken-burns-zoom-in';
+    photoViewerFilmStripSlideshowMode === 'ken-burns';
 
   useEffect(() => {
     if (!viewerPhoto || viewerPhotoIndex < 0 || viewerOrderedPhotos.length === 0) {
@@ -3444,6 +3574,7 @@ export function PhotoCatalogView({
     : null;
   const isCollectionThumbnailActionAvailable =
     viewerPhoto !== null && detail !== null && detail.collection.id === viewerPhoto.collectionId;
+  const isPhotoGridRandomSortActive = photoGridSortCategory === 'random';
   const photoGridSortDirectionLabel = photoGridSortDirection === 'asc' ? 'ascending' : 'descending';
   const emptyPhotoStateTitle = isPhotoFavoritesOnly ? 'No favorite photos' : 'No matching photos';
   const emptyPhotoStateMessage = isPhotoFavoritesOnly
@@ -3466,8 +3597,8 @@ export function PhotoCatalogView({
       ? photoViewerFilmStripVirtualCenter.virtualIndex
       : viewerPhotoIndex;
 
-  const photoViewerEffectiveFitMode = isPhotoViewerFilmStripKenBurnsZoomInActive ? 'fit' : photoViewerFitMode;
-  const photoViewerEffectiveZoom = isPhotoViewerFilmStripKenBurnsZoomInActive ? 1 : photoViewerZoom;
+  const photoViewerEffectiveFitMode = isPhotoViewerFilmStripKenBurnsActive ? 'fit' : photoViewerFitMode;
+  const photoViewerEffectiveZoom = isPhotoViewerFilmStripKenBurnsActive ? 1 : photoViewerZoom;
 
   const photoViewerRenderedSize = useMemo(
     () =>
@@ -3749,14 +3880,17 @@ export function PhotoCatalogView({
   function handlePhotoViewerSlideshowDelayChange(event: ChangeEvent<HTMLSelectElement>): void {
     notePhotoViewerActivity();
     const nextDelayMs = Number(event.currentTarget.value);
-    const isAllowedDelay = PHOTO_VIEWER_SLIDESHOW_DELAY_OPTIONS_SECONDS.some(
-      (seconds) => seconds * 1000 === nextDelayMs
-    );
-    if (!Number.isFinite(nextDelayMs) || !isAllowedDelay) {
+    if (!PHOTO_VIEWER_SLIDESHOW_DELAY_OPTIONS_MS.includes(nextDelayMs)) {
       return;
     }
 
-    setPhotoViewerSlideshowDelayMs(nextDelayMs);
+    setPhotoViewerSlideshowDelayMs(clampPhotoViewerSlideshowDelayMs(nextDelayMs));
+  }
+
+  function adjustPhotoViewerSlideshowDelay(deltaMs: number): void {
+    setPhotoViewerSlideshowDelayMs((currentDelayMs) =>
+      clampPhotoViewerSlideshowDelayMs(currentDelayMs + deltaMs)
+    );
   }
 
   function handlePhotoViewerSlideshowModeChange(event: ChangeEvent<HTMLSelectElement>): void {
@@ -4032,6 +4166,46 @@ export function PhotoCatalogView({
     notePhotoViewerActivity();
     handleTogglePhotoFavorite(viewerPhoto);
   };
+
+
+  function handlePhotoGridSortCategoryChange(nextSortCategory: PhotoGridSortCategory): void {
+    const wasRandomSortActive = photoGridSortCategory === 'random';
+    setPhotoGridSortCategory(nextSortCategory);
+
+    if (nextSortCategory === 'random' && !wasRandomSortActive) {
+      setPhotoGridRandomSeed((currentSeed) => createNextPhotoGridRandomSeed(currentSeed));
+    }
+  }
+
+  function reshufflePhotoGridSort(): void {
+    setPhotoGridRandomSeed((currentSeed) => createNextPhotoGridRandomSeed(currentSeed));
+  }
+
+  function openPhotoGridPhoto(photoId: string): void {
+    setPhotoViewerRandomizedSlideshowPhotoIds(null);
+    setIsPhotoViewerSlideshowActive(false);
+    onOpenPhoto(photoId);
+  }
+
+  function startRandomizedPhotoGridSlideshow(): void {
+    if (visiblePhotos.length === 0) {
+      return;
+    }
+
+    const shuffledPhotos = sortPhotos(visiblePhotos, 'random', 'asc', createPhotoGridRandomSeed());
+    const firstPhoto = shuffledPhotos[0];
+    if (!firstPhoto) {
+      return;
+    }
+
+    clearPhotoViewerTransitionTimer();
+    setPhotoViewerTransitionState(null);
+    photoViewerPendingNavigationOffsetRef.current = null;
+    setPhotoViewerFilmStripVirtualCenter(null);
+    setPhotoViewerRandomizedSlideshowPhotoIds(shuffledPhotos.map((photo) => photo.id));
+    setIsPhotoViewerSlideshowActive(shuffledPhotos.length > 1);
+    onOpenPhoto(firstPhoto.id);
+  }
 
   function openFavoriteBrowser(tagId: string | null = null, options: { resetSearch?: boolean } = {}): void {
     setFavoriteBrowseTagId(tagId);
@@ -4312,6 +4486,10 @@ export function PhotoCatalogView({
       return;
     }
 
+    if (event.shiftKey && event.key.startsWith('Arrow')) {
+      return;
+    }
+
     if (event.key === 'ArrowLeft') {
       event.preventDefault();
       openViewerPhotoAtOffset(-1);
@@ -4326,6 +4504,18 @@ export function PhotoCatalogView({
 
     const lowerKey = event.key.toLowerCase();
     const hasShortcutModifier = event.altKey || event.ctrlKey || event.metaKey;
+
+    if (!event.shiftKey && !hasShortcutModifier && event.key === 'ArrowUp') {
+      event.preventDefault();
+      adjustPhotoViewerSlideshowDelay(-PHOTO_VIEWER_SLIDESHOW_DELAY_STEP_MS);
+      return;
+    }
+
+    if (!event.shiftKey && !hasShortcutModifier && event.key === 'ArrowDown') {
+      event.preventDefault();
+      adjustPhotoViewerSlideshowDelay(PHOTO_VIEWER_SLIDESHOW_DELAY_STEP_MS);
+      return;
+    }
     const isSpaceKey = !hasShortcutModifier && (event.key === ' ' || event.key === 'Spacebar' || event.code === 'Space');
     const isFavoriteKey = !hasShortcutModifier && (lowerKey === 'l' || event.code === 'KeyL');
     const isFitModeKey = !hasShortcutModifier && (lowerKey === 'f' || event.code === 'KeyF');
@@ -4397,6 +4587,17 @@ export function PhotoCatalogView({
   const photoViewerKenBurnsVariant = viewerPhoto
     ? getPhotoViewerKenBurnsVariant(viewerPhoto)
     : PHOTO_VIEWER_KEN_BURNS_VARIANTS[0];
+  const photoViewerFilmStripKenBurnsVariant = viewerPhoto
+    ? getPhotoViewerFilmStripKenBurnsVariant(viewerPhoto)
+    : PHOTO_VIEWER_FILM_STRIP_KEN_BURNS_VARIANTS[0];
+  const photoViewerFilmStripCurrentFrameStyle = {
+    ...photoViewerFrameStyle,
+    '--photo-viewer-film-strip-ken-burns-duration': `${
+      viewerPhoto
+        ? getPhotoViewerFilmStripKenBurnsDurationMs(viewerPhoto, photoViewerSlideshowDelayMs)
+        : PHOTO_VIEWER_FILM_STRIP_KEN_BURNS_MIN_DURATION_MS
+    }ms`
+  } as CSSProperties;
   const photoViewerCurrentFrameClassName = joinClassNames(
     'photo-viewer-frame',
     'is-current',
@@ -4540,19 +4741,19 @@ export function PhotoCatalogView({
               <div className="photo-viewer-center-controls" role="group" aria-label="Photo slideshow and view controls">
                 <label
                   className="viewer-toolbar-indicator photo-viewer-slide-duration"
-                  title={`Each slide displays for ${photoViewerSlideDurationDescription}`}
+                  title={`Each slide displays for ${photoViewerSlideDurationDescription}. Up/Down arrows adjust by 0.5s.`}
                 >
                   <span className="photo-viewer-slide-duration-label">Pace</span>
                   <select
                     className="photo-viewer-slide-duration-select"
                     value={photoViewerSlideshowDelayMs}
                     onChange={handlePhotoViewerSlideshowDelayChange}
-                    aria-label={`Slideshow slide duration. Current value: ${photoViewerSlideDurationDescription}.`}
-                    title={`Each slide displays for ${photoViewerSlideDurationDescription}`}
+                    aria-label={`Slideshow slide duration. Current value: ${photoViewerSlideDurationDescription}. Up Arrow speeds up; Down Arrow slows down.`}
+                    title={`Each slide displays for ${photoViewerSlideDurationDescription}. Up/Down arrows adjust by 0.5s.`}
                   >
-                    {PHOTO_VIEWER_SLIDESHOW_DELAY_OPTIONS_SECONDS.map((seconds) => (
-                      <option key={seconds} value={seconds * 1000}>
-                        {seconds} {seconds === 1 ? 'second' : 'seconds'}
+                    {PHOTO_VIEWER_SLIDESHOW_DELAY_OPTIONS_MS.map((durationMs) => (
+                      <option key={durationMs} value={durationMs}>
+                        {formatPhotoViewerSlideDuration(durationMs)}
                       </option>
                     ))}
                   </select>
@@ -4672,7 +4873,7 @@ export function PhotoCatalogView({
                   {photoViewerFilmStripFrames.map((filmStripFrame) => {
                     const isCurrentFilmStripFrame = filmStripFrame.offset === 0;
                     const filmStripFrameStyle: CSSProperties = {
-                      ...(isCurrentFilmStripFrame ? photoViewerFrameStyle : {}),
+                      ...(isCurrentFilmStripFrame ? photoViewerFilmStripCurrentFrameStyle : {}),
                       width: `${filmStripFrame.width}px`,
                       height: `${filmStripFrame.height}px`,
                       opacity: filmStripFrame.opacity,
@@ -4683,8 +4884,11 @@ export function PhotoCatalogView({
                       'photo-viewer-film-strip-frame',
                       isCurrentFilmStripFrame ? 'is-current' : 'is-neighbor',
                       isCurrentFilmStripFrame &&
-                        isPhotoViewerFilmStripKenBurnsZoomInActive &&
+                        isPhotoViewerFilmStripKenBurnsActive &&
                         'is-film-strip-ken-burns-active',
+                      isCurrentFilmStripFrame &&
+                        isPhotoViewerFilmStripKenBurnsActive &&
+                        `is-film-strip-ken-burns-${photoViewerFilmStripKenBurnsVariant}`,
                       filmStripFrame.offset < 0 && 'is-before',
                       filmStripFrame.offset > 0 && 'is-after',
                       filmStripFrame.distance > 1 && 'is-distant'
@@ -4888,7 +5092,7 @@ export function PhotoCatalogView({
                 id="photo-favorites-sort-category"
                 value={photoGridSortCategory}
                 onChange={(event: ChangeEvent<HTMLSelectElement>) => {
-                  setPhotoGridSortCategory(event.target.value as PhotoGridSortCategory);
+                  handlePhotoGridSortCategoryChange(event.target.value as PhotoGridSortCategory);
                 }}
               >
                 {Object.entries(PHOTO_GRID_SORT_CATEGORY_LABELS).map(([value, label]) => (
@@ -4898,14 +5102,34 @@ export function PhotoCatalogView({
                 ))}
               </select>
             </label>
+            {isPhotoGridRandomSortActive ? (
+              <button
+                type="button"
+                className="app-button secondary photo-grid-randomize-sort-button"
+                onClick={reshufflePhotoGridSort}
+                aria-label="Shuffle the current randomized photo order again"
+                title="Shuffle the current randomized photo order again"
+              >
+                Shuffle again
+              </button>
+            ) : null}
             <button
               type="button"
-              className="sort-direction-button photo-grid-sort-direction-button"
+              className={`sort-direction-button photo-grid-sort-direction-button${isPhotoGridRandomSortActive ? ' is-random-disabled' : ''}`}
               onClick={() => {
                 setPhotoGridSortDirection((currentValue) => (currentValue === 'asc' ? 'desc' : 'asc'));
               }}
-              aria-label={`Sort order: ${photoGridSortDirectionLabel}. Toggle sort direction.`}
-              title={`Sort ${photoGridSortDirectionLabel}`}
+              disabled={isPhotoGridRandomSortActive}
+              aria-label={
+                isPhotoGridRandomSortActive
+                  ? 'Sort direction is not used while randomized sorting is active.'
+                  : `Sort order: ${photoGridSortDirectionLabel}. Toggle sort direction.`
+              }
+              title={
+                isPhotoGridRandomSortActive
+                  ? 'Sort direction is not used while randomized sorting is active.'
+                  : `Sort ${photoGridSortDirectionLabel}`
+              }
             >
               <span className="sort-direction-icon" aria-hidden="true">
                 {photoGridSortDirection === 'asc' ? '↑' : '↓'}
@@ -4935,7 +5159,7 @@ export function PhotoCatalogView({
                 key={`${collection.id}:${photo.id}`}
                 photo={photo}
                 isFavorite={isFavoritePhoto(photo)}
-                onOpen={onOpenPhoto}
+                onOpen={openPhotoGridPhoto}
                 onToggleFavorite={handleTogglePhotoFavorite}
                 contextLabel={collection.name}
               />
@@ -4978,7 +5202,7 @@ export function PhotoCatalogView({
                   id="photo-grid-sort-category"
                   value={photoGridSortCategory}
                   onChange={(event: ChangeEvent<HTMLSelectElement>) => {
-                    setPhotoGridSortCategory(event.target.value as PhotoGridSortCategory);
+                    handlePhotoGridSortCategoryChange(event.target.value as PhotoGridSortCategory);
                   }}
                 >
                   {Object.entries(PHOTO_GRID_SORT_CATEGORY_LABELS).map(([value, label]) => (
@@ -4988,18 +5212,52 @@ export function PhotoCatalogView({
                   ))}
                 </select>
               </label>
+              {isPhotoGridRandomSortActive ? (
+                <button
+                  type="button"
+                  className="app-button secondary photo-grid-randomize-sort-button"
+                  onClick={reshufflePhotoGridSort}
+                  aria-label="Shuffle the current randomized photo order again"
+                  title="Shuffle the current randomized photo order again"
+                >
+                  Shuffle again
+                </button>
+              ) : null}
               <button
                 type="button"
-                className="sort-direction-button photo-grid-sort-direction-button"
+                className={`sort-direction-button photo-grid-sort-direction-button${isPhotoGridRandomSortActive ? ' is-random-disabled' : ''}`}
                 onClick={() => {
                   setPhotoGridSortDirection((currentValue) => (currentValue === 'asc' ? 'desc' : 'asc'));
                 }}
-                aria-label={`Sort order: ${photoGridSortDirectionLabel}. Toggle sort direction.`}
-                title={`Sort ${photoGridSortDirectionLabel}`}
+                disabled={isPhotoGridRandomSortActive}
+                aria-label={
+                  isPhotoGridRandomSortActive
+                    ? 'Sort direction is not used while randomized sorting is active.'
+                    : `Sort order: ${photoGridSortDirectionLabel}. Toggle sort direction.`
+                }
+                title={
+                  isPhotoGridRandomSortActive
+                    ? 'Sort direction is not used while randomized sorting is active.'
+                    : `Sort ${photoGridSortDirectionLabel}`
+                }
               >
                 <span className="sort-direction-icon" aria-hidden="true">
                   {photoGridSortDirection === 'asc' ? '↑' : '↓'}
                 </span>
+              </button>
+              <button
+                type="button"
+                className="app-button secondary photo-grid-random-slideshow-button"
+                onClick={startRandomizedPhotoGridSlideshow}
+                disabled={visiblePhotos.length < 2}
+                aria-label="Start a randomized slideshow from the currently visible photos"
+                title={
+                  visiblePhotos.length < 2
+                    ? 'At least two visible photos are needed to start a randomized slideshow.'
+                    : 'Start a randomized slideshow from the currently visible photos.'
+                }
+              >
+                Shuffle slideshow
               </button>
               <button
                 type="button"
@@ -5035,7 +5293,7 @@ export function PhotoCatalogView({
                 key={photo.id}
                 photo={photo}
                 isFavorite={selectedFavoritePhotoIds.has(photo.id)}
-                onOpen={onOpenPhoto}
+                onOpen={openPhotoGridPhoto}
                 onToggleFavorite={handleTogglePhotoFavorite}
               />
             ))}

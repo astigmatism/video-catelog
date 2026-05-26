@@ -5690,6 +5690,14 @@ label {
   border-radius: 999px;
 }
 
+.photo-grid-randomize-sort-button,
+.photo-grid-random-slideshow-button {
+  min-height: 2.25rem;
+  padding: 0.55rem 0.92rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
 .photo-grid-favorites-only-toggle {
   min-height: 2.25rem;
   padding: 0.55rem 0.92rem;
@@ -6070,7 +6078,39 @@ label {
 }
 
 .photo-viewer-film-strip-frame.is-current.is-film-strip-ken-burns-active .photo-viewer-film-strip-current-image-shell {
-  animation: photo-viewer-film-strip-ken-burns-zoom-in var(--photo-viewer-ken-burns-duration, 5000ms) ease-in-out both;
+  animation-duration: var(--photo-viewer-film-strip-ken-burns-duration, var(--photo-viewer-ken-burns-duration, 5000ms));
+  animation-fill-mode: both;
+  animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1);
+}
+
+.photo-viewer-film-strip-frame.is-current.is-film-strip-ken-burns-zoom-in-drift-left .photo-viewer-film-strip-current-image-shell {
+  animation-name: photo-viewer-film-strip-ken-burns-zoom-in-drift-left;
+  transform-origin: 58% 44%;
+}
+
+.photo-viewer-film-strip-frame.is-current.is-film-strip-ken-burns-zoom-in-drift-right .photo-viewer-film-strip-current-image-shell {
+  animation-name: photo-viewer-film-strip-ken-burns-zoom-in-drift-right;
+  transform-origin: 42% 46%;
+}
+
+.photo-viewer-film-strip-frame.is-current.is-film-strip-ken-burns-zoom-out-drift-left .photo-viewer-film-strip-current-image-shell {
+  animation-name: photo-viewer-film-strip-ken-burns-zoom-out-drift-left;
+  transform-origin: 54% 58%;
+}
+
+.photo-viewer-film-strip-frame.is-current.is-film-strip-ken-burns-zoom-out-drift-right .photo-viewer-film-strip-current-image-shell {
+  animation-name: photo-viewer-film-strip-ken-burns-zoom-out-drift-right;
+  transform-origin: 46% 42%;
+}
+
+.photo-viewer-film-strip-frame.is-current.is-film-strip-ken-burns-zoom-in-drift-down .photo-viewer-film-strip-current-image-shell {
+  animation-name: photo-viewer-film-strip-ken-burns-zoom-in-drift-down;
+  transform-origin: 48% 40%;
+}
+
+.photo-viewer-film-strip-frame.is-current.is-film-strip-ken-burns-zoom-out-drift-up .photo-viewer-film-strip-current-image-shell {
+  animation-name: photo-viewer-film-strip-ken-burns-zoom-out-drift-up;
+  transform-origin: 52% 60%;
 }
 
 .photo-viewer-frame {
@@ -6313,13 +6353,87 @@ label {
   }
 }
 
-@keyframes photo-viewer-film-strip-ken-burns-zoom-in {
-  from {
-    transform: scale(1);
+@keyframes photo-viewer-film-strip-ken-burns-zoom-in-drift-left {
+  0% {
+    transform: scale(1.008) translate3d(0.18rem, -0.08rem, 0);
   }
 
-  to {
-    transform: scale(1.065);
+  55% {
+    transform: scale(1.023) translate3d(-0.08rem, 0.04rem, 0);
+  }
+
+  100% {
+    transform: scale(1.034) translate3d(-0.24rem, 0.14rem, 0);
+  }
+}
+
+@keyframes photo-viewer-film-strip-ken-burns-zoom-in-drift-right {
+  0% {
+    transform: scale(1.01) translate3d(-0.2rem, 0.1rem, 0);
+  }
+
+  50% {
+    transform: scale(1.022) translate3d(0.04rem, -0.04rem, 0);
+  }
+
+  100% {
+    transform: scale(1.032) translate3d(0.22rem, -0.16rem, 0);
+  }
+}
+
+@keyframes photo-viewer-film-strip-ken-burns-zoom-out-drift-left {
+  0% {
+    transform: scale(1.038) translate3d(0.22rem, 0.16rem, 0);
+  }
+
+  52% {
+    transform: scale(1.026) translate3d(0.02rem, 0.02rem, 0);
+  }
+
+  100% {
+    transform: scale(1.012) translate3d(-0.2rem, -0.12rem, 0);
+  }
+}
+
+@keyframes photo-viewer-film-strip-ken-burns-zoom-out-drift-right {
+  0% {
+    transform: scale(1.04) translate3d(-0.22rem, -0.12rem, 0);
+  }
+
+  48% {
+    transform: scale(1.028) translate3d(-0.02rem, 0.02rem, 0);
+  }
+
+  100% {
+    transform: scale(1.014) translate3d(0.2rem, 0.14rem, 0);
+  }
+}
+
+@keyframes photo-viewer-film-strip-ken-burns-zoom-in-drift-down {
+  0% {
+    transform: scale(1.008) translate3d(-0.1rem, -0.22rem, 0);
+  }
+
+  56% {
+    transform: scale(1.024) translate3d(0.02rem, -0.04rem, 0);
+  }
+
+  100% {
+    transform: scale(1.033) translate3d(0.12rem, 0.18rem, 0);
+  }
+}
+
+@keyframes photo-viewer-film-strip-ken-burns-zoom-out-drift-up {
+  0% {
+    transform: scale(1.036) translate3d(0.12rem, 0.22rem, 0);
+  }
+
+  54% {
+    transform: scale(1.025) translate3d(0.02rem, 0.02rem, 0);
+  }
+
+  100% {
+    transform: scale(1.012) translate3d(-0.1rem, -0.18rem, 0);
   }
 }
 
@@ -6472,6 +6586,8 @@ label {
   }
 
   .photo-grid-sort-direction-button,
+  .photo-grid-randomize-sort-button,
+  .photo-grid-random-slideshow-button,
   .photo-grid-favorites-only-toggle,
   .photo-detail-return-button {
     flex: 1 1 auto;
