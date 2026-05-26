@@ -5196,17 +5196,20 @@ export function PhotoCatalogView({
               {collection.description ? <p className="photo-detail-description">{collection.description}</p> : null}
             </div>
             <div className="photo-detail-action-cluster" aria-label="Photo grid controls">
-              {isPhotoGridRandomSortActive ? (
-                <button
-                  type="button"
-                  className="app-button secondary photo-grid-randomize-sort-button"
-                  onClick={reshufflePhotoGridSort}
-                  aria-label="Shuffle the current randomized photo order again"
-                  title="Shuffle the current randomized photo order again"
-                >
-                  Shuffle again
-                </button>
-              ) : null}
+              <button
+                type="button"
+                className="app-button secondary photo-grid-random-slideshow-button"
+                onClick={startRandomizedPhotoGridSlideshow}
+                disabled={visiblePhotos.length < 2}
+                aria-label="Start a randomized slideshow from the currently visible photos"
+                title={
+                  visiblePhotos.length < 2
+                    ? 'At least two visible photos are needed to start a randomized slideshow.'
+                    : 'Start a randomized slideshow from the currently visible photos.'
+                }
+              >
+                Shuffle slideshow
+              </button>
               <label className="photo-grid-sort-control" htmlFor="photo-grid-sort-category">
                 <span>Sort by</span>
                 <select
@@ -5223,6 +5226,17 @@ export function PhotoCatalogView({
                   ))}
                 </select>
               </label>
+              {isPhotoGridRandomSortActive ? (
+                <button
+                  type="button"
+                  className="app-button secondary photo-grid-randomize-sort-button"
+                  onClick={reshufflePhotoGridSort}
+                  aria-label="Shuffle the current randomized photo order again"
+                  title="Shuffle the current randomized photo order again"
+                >
+                  Shuffle again
+                </button>
+              ) : null}
               <button
                 type="button"
                 className={`sort-direction-button photo-grid-sort-direction-button${isPhotoGridRandomSortActive ? ' is-random-disabled' : ''}`}
@@ -5244,20 +5258,6 @@ export function PhotoCatalogView({
                 <span className="sort-direction-icon" aria-hidden="true">
                   {photoGridSortDirection === 'asc' ? '↑' : '↓'}
                 </span>
-              </button>
-              <button
-                type="button"
-                className="app-button secondary photo-grid-random-slideshow-button"
-                onClick={startRandomizedPhotoGridSlideshow}
-                disabled={visiblePhotos.length < 2}
-                aria-label="Start a randomized slideshow from the currently visible photos"
-                title={
-                  visiblePhotos.length < 2
-                    ? 'At least two visible photos are needed to start a randomized slideshow.'
-                    : 'Start a randomized slideshow from the currently visible photos.'
-                }
-              >
-                Shuffle slideshow
               </button>
               <button
                 type="button"
