@@ -5959,81 +5959,103 @@ label {
 }
 
 .photo-viewer-stage.is-layout-film-strip {
-  --photo-viewer-film-strip-side-width: clamp(7rem, 18vw, 18rem);
-  --photo-viewer-film-strip-side-height: min(62vh, calc(100% - 9rem));
-  --photo-viewer-film-strip-side-offset: clamp(0.65rem, 4vw, 4.4rem);
   background:
     radial-gradient(circle at 50% 50%, rgba(30, 64, 175, 0.16), transparent 54%),
     #02060c;
 }
 
+.photo-viewer-stage.is-layout-film-strip::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(2, 6, 12, 0.92), rgba(2, 6, 12, 0) 14%, rgba(2, 6, 12, 0) 86%, rgba(2, 6, 12, 0.92)),
+    linear-gradient(180deg, rgba(2, 6, 12, 0.52), rgba(2, 6, 12, 0) 22%, rgba(2, 6, 12, 0) 78%, rgba(2, 6, 12, 0.56));
+}
+
+.photo-viewer-film-strip {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: visible;
+  pointer-events: none;
+}
+
 .photo-viewer-film-strip-frame {
   position: absolute;
   top: 50%;
-  z-index: 1;
+  left: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: var(--photo-viewer-film-strip-side-width);
-  height: var(--photo-viewer-film-strip-side-height);
-  min-height: 10rem;
-  padding: 0.34rem;
+  min-width: 3.5rem;
+  min-height: 4rem;
   overflow: hidden;
-  border: 1px solid rgba(191, 219, 254, 0.16);
-  border-radius: 1.35rem;
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.72), rgba(2, 6, 12, 0.82));
-  box-shadow:
-    0 22px 54px rgba(0, 0, 0, 0.42),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  opacity: 0.52;
+  border: 1px solid rgba(191, 219, 254, 0.14);
+  border-radius: 0.78rem;
+  background: rgba(15, 23, 42, 0.42);
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.4);
   pointer-events: none;
-  transform: translateY(-50%) scale(0.94);
-  filter: saturate(0.86) brightness(0.78);
-}
-
-.photo-viewer-film-strip-frame::before,
-.photo-viewer-film-strip-frame::after {
-  content: '';
-  position: absolute;
-  left: 0.72rem;
-  right: 0.72rem;
-  z-index: 2;
-  height: 0.34rem;
-  border-radius: 999px;
-  background: repeating-linear-gradient(
-    90deg,
-    rgba(255, 255, 255, 0.3) 0 0.34rem,
-    transparent 0.34rem 0.72rem
-  );
-  opacity: 0.28;
-  pointer-events: none;
+  transform-origin: center center;
+  transition:
+    transform 560ms cubic-bezier(0.22, 1, 0.36, 1),
+    width 560ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 560ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 420ms ease,
+    filter 420ms ease,
+    box-shadow 420ms ease,
+    border-color 420ms ease;
+  will-change: transform, width, height, opacity;
+  filter: saturate(0.84) brightness(0.76);
 }
 
 .photo-viewer-film-strip-frame::before {
-  top: 0.46rem;
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: inherit;
+  background:
+    linear-gradient(90deg, rgba(2, 6, 12, 0.16), rgba(2, 6, 12, 0) 18%, rgba(2, 6, 12, 0) 82%, rgba(2, 6, 12, 0.16)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0) 16%, rgba(0, 0, 0, 0.1));
 }
 
-.photo-viewer-film-strip-frame::after {
-  bottom: 0.46rem;
+.photo-viewer-film-strip-frame.is-current {
+  border-color: rgba(219, 234, 254, 0.24);
+  background: rgba(2, 6, 12, 0.1);
+  box-shadow:
+    0 30px 96px rgba(0, 0, 0, 0.58),
+    0 0 0 1px rgba(255, 255, 255, 0.04);
+  pointer-events: auto;
+  filter: none;
 }
 
-.photo-viewer-film-strip-frame.is-previous {
-  left: var(--photo-viewer-film-strip-side-offset);
+.photo-viewer-film-strip-frame.is-neighbor {
+  cursor: default;
 }
 
-.photo-viewer-film-strip-frame.is-next {
-  right: var(--photo-viewer-film-strip-side-offset);
+.photo-viewer-film-strip-frame.is-distant {
+  filter: saturate(0.68) brightness(0.58);
 }
 
 .photo-viewer-film-strip-image {
+  position: relative;
+  z-index: 0;
   display: block;
   width: 100%;
   height: 100%;
   max-width: none;
   max-height: none;
-  border-radius: 1rem;
-  object-fit: cover;
+  border-radius: 0.58rem;
+  object-fit: contain;
   user-select: none;
+}
+
+.photo-viewer-stage.is-layout-film-strip .photo-viewer-image {
+  border-radius: 0.58rem;
 }
 
 .photo-viewer-frame {
@@ -6282,6 +6304,10 @@ label {
   .photo-viewer-frame.is-ken-burns-active {
     animation-duration: 1ms !important;
   }
+
+  .photo-viewer-film-strip-frame {
+    transition-duration: 1ms !important;
+  }
 }
 
 .photo-viewer-nav {
@@ -6458,17 +6484,6 @@ label {
     justify-self: end;
     flex-wrap: wrap;
     justify-content: flex-end;
-  }
-
-  .photo-viewer-stage.is-layout-film-strip {
-    --photo-viewer-film-strip-side-width: clamp(5.25rem, 24vw, 7.8rem);
-    --photo-viewer-film-strip-side-height: min(48vh, calc(100% - 11rem));
-    --photo-viewer-film-strip-side-offset: 0.28rem;
-  }
-
-  .photo-viewer-film-strip-frame {
-    opacity: 0.34;
-    transform: translateY(-50%) scale(0.88);
   }
 
   .photo-viewer-nav {

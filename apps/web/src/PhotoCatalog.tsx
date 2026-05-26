@@ -1,6 +1,7 @@
 import type {
   ChangeEvent,
   CSSProperties,
+  DragEvent as ReactDragEvent,
   FormEvent,
   ImgHTMLAttributes,
   JSX,
@@ -665,6 +666,9 @@ const PHOTO_VIEWER_SLIDESHOW_DELAY_OPTIONS_SECONDS = [1, 2, 3, 4, 5, 6, 7, 8, 9,
 const PHOTO_VIEWER_TRANSITION_DURATION_MS = 720;
 const PHOTO_VIEWER_KEN_BURNS_VARIANTS = ['zoom-in', 'pan-right', 'pan-left', 'pan-down'] as const;
 const PHOTO_VIEWER_LAYOUT_SESSION_STORAGE_KEY = 'photoViewer.layout';
+const PHOTO_VIEWER_FILM_STRIP_SIDE_FRAME_COUNT = 4;
+const PHOTO_VIEWER_FILM_STRIP_MIN_GAP_PX = 8;
+const PHOTO_VIEWER_FILM_STRIP_MAX_GAP_PX = 18;
 
 type PhotoViewerSlideshowMode = 'cut' | 'crossfade' | 'dissolve' | 'slide' | 'ken-burns';
 type PhotoViewerLayoutMode = 'standard' | 'film-strip';
@@ -750,6 +754,24 @@ type PhotoViewerTransitionState = {
   outgoingImageStyle: CSSProperties;
   direction: PhotoViewerTransitionDirection;
   mode: PhotoViewerSlideshowMode;
+};
+
+type PhotoViewerFilmStripVirtualCenter = {
+  photoId: string;
+  orderedPhotoIds: string;
+  virtualIndex: number;
+};
+
+type PhotoViewerFilmStripFrame = {
+  key: string;
+  photo: Photo;
+  offset: number;
+  distance: number;
+  x: number;
+  width: number;
+  height: number;
+  opacity: number;
+  zIndex: number;
 };
 
 function formatPhotoViewerSlideDuration(durationMs: number): string {
@@ -1040,6 +1062,201 @@ function calculatePhotoViewerPanLimit(
     y: renderedSize !== null ? Math.max(0, (renderedSize.height - stageSize.height) / 2) : 0
   };
 }
+
+function getPhotoViewerNaturalSizeFromPhoto(photo: Photo): PhotoViewerSize | null {
+  const width = normalizePhotoViewerDimension(photo.width);
+  const height = normalizePhotoViewerDimension(photo.height);
+
+  return width !== null && height !== null ? { width, height } : null;
+}
+
+function calculatePhotoViewerContainedSize(
+  naturalSize: PhotoViewerSize | null,
+  bounds: PhotoViewerSize
+): PhotoViewerSize {
+  if (
+    naturalSize === null ||
+    naturalSize.width <= 0 ||
+    naturalSize.height <= 0 ||
+    bounds.width <= 0 ||
+    bounds.height <= 0
+  ) {
+    return {
+      width: Math.max(1, bounds.width),
+      height: Math.max(1, bounds.height)
+    };
+  }
+
+  const scale = Math.min(bounds.width / naturalSize.width, bounds.height / naturalSize.height);
+  const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+
+  return {
+    width: Math.max(1, naturalSize.width * safeScale),
+    height: Math.max(1, naturalSize.height * safeScale)
+  };
+}
+
+function calculatePhotoViewerFilmStripCurrentViewportSize(
+  naturalSize: PhotoViewerSize | null,
+  stageSize: PhotoViewerSize,
+  fitMode: PhotoViewerFitMode
+): PhotoViewerSize {
+  if (stageSize.width <= 0 || stageSize.height <= 0) {
+    return {
+      width: 0,
+      height: 0
+    };
+  }
+
+  const maxBounds = {
+    width: Math.max(1, stageSize.width * (stageSize.width <= 760 ? 0.76 : 0.7)),
+    height: Math.max(1, stageSize.height * (stageSize.width <= 760 ? 0.74 : 0.86))
+  };
+
+  if (fitMode === 'fill') {
+    return maxBounds;
+  }
+
+  return calculatePhotoViewerContainedSize(naturalSize, maxBounds);
+}
+
+function getPhotoViewerFilmStripNeighborScale(distance: number): number {
+  if (distance <= 1) {
+    return 0.88;
+  }
+
+  if (distance === 2) {
+    return 0.74;
+  }
+
+  if (distance === 3) {
+    return 0.62;
+  }
+
+  return 0.52;
+}
+
+function getPhotoViewerFilmStripFrameOpacity(distance: number): number {
+  if (distance === 0) {
+    return 1;
+  }
+
+  if (distance === 1) {
+    return 0.72;
+  }
+
+  if (distance === 2) {
+    return 0.44;
+  }
+
+  if (distance === 3) {
+    return 0.26;
+  }
+
+  return 0.16;
+}
+
+function getPhotoViewerFilmStripFrameSize(
+  photo: Photo,
+  currentViewportSize: PhotoViewerSize,
+  stageSize: PhotoViewerSize,
+  offset: number
+): PhotoViewerSize {
+  const distance = Math.abs(offset);
+
+  if (distance === 0) {
+    return {
+      width: Math.max(1, currentViewportSize.width),
+      height: Math.max(1, currentViewportSize.height)
+    };
+  }
+
+  const scale = getPhotoViewerFilmStripNeighborScale(distance);
+  const naturalSize = getPhotoViewerNaturalSizeFromPhoto(photo);
+  const neighborBounds = {
+    width: Math.max(72, Math.min(stageSize.width * 0.46, currentViewportSize.width * (0.72 - Math.min(distance - 1, 3) * 0.08))),
+    height: Math.max(72, currentViewportSize.height * scale)
+  };
+
+  return calculatePhotoViewerContainedSize(naturalSize, neighborBounds);
+}
+
+function wrapPhotoViewerFilmStripIndex(index: number, photoCount: number): number {
+  return ((index % photoCount) + photoCount) % photoCount;
+}
+
+function buildPhotoViewerFilmStripFrames(
+  photos: Photo[],
+  currentVirtualIndex: number,
+  currentViewportSize: PhotoViewerSize,
+  stageSize: PhotoViewerSize
+): PhotoViewerFilmStripFrame[] {
+  if (photos.length === 0 || currentViewportSize.width <= 0 || currentViewportSize.height <= 0) {
+    return [];
+  }
+
+  const sideFrameCount = Math.min(PHOTO_VIEWER_FILM_STRIP_SIDE_FRAME_COUNT, Math.max(0, photos.length - 1));
+  const gap = Math.max(
+    PHOTO_VIEWER_FILM_STRIP_MIN_GAP_PX,
+    Math.min(PHOTO_VIEWER_FILM_STRIP_MAX_GAP_PX, stageSize.width * 0.012)
+  );
+  const framesByOffset = new Map<number, Omit<PhotoViewerFilmStripFrame, 'x' | 'opacity' | 'zIndex'>>();
+
+  for (let offset = -sideFrameCount; offset <= sideFrameCount; offset += 1) {
+    const virtualIndex = currentVirtualIndex + offset;
+    const photo = photos[wrapPhotoViewerFilmStripIndex(virtualIndex, photos.length)];
+    if (!photo) {
+      continue;
+    }
+
+    const distance = Math.abs(offset);
+    const frameSize = getPhotoViewerFilmStripFrameSize(photo, currentViewportSize, stageSize, offset);
+
+    framesByOffset.set(offset, {
+      key: `film-strip-${virtualIndex}-${photo.id}`,
+      photo,
+      offset,
+      distance,
+      width: frameSize.width,
+      height: frameSize.height
+    });
+  }
+
+  const getFrame = (offset: number): Omit<PhotoViewerFilmStripFrame, 'x' | 'opacity' | 'zIndex'> | null =>
+    framesByOffset.get(offset) ?? null;
+  const xPositions = new Map<number, number>();
+  xPositions.set(0, 0);
+
+  for (let offset = 1; offset <= sideFrameCount; offset += 1) {
+    const previousFrame = getFrame(offset - 1);
+    const currentFrame = getFrame(offset);
+    const previousX = xPositions.get(offset - 1);
+    if (!previousFrame || !currentFrame || previousX === undefined) {
+      continue;
+    }
+
+    xPositions.set(offset, previousX + previousFrame.width / 2 + gap + currentFrame.width / 2);
+  }
+
+  for (let offset = -1; offset >= -sideFrameCount; offset -= 1) {
+    const previousFrame = getFrame(offset + 1);
+    const currentFrame = getFrame(offset);
+    const previousX = xPositions.get(offset + 1);
+    if (!previousFrame || !currentFrame || previousX === undefined) {
+      continue;
+    }
+
+    xPositions.set(offset, previousX - previousFrame.width / 2 - gap - currentFrame.width / 2);
+  }
+
+  return Array.from(framesByOffset.values()).map((frame) => ({
+    ...frame,
+    x: xPositions.get(frame.offset) ?? 0,
+    opacity: getPhotoViewerFilmStripFrameOpacity(frame.distance),
+    zIndex: Math.max(1, 10 - frame.distance)
+  }));
+}
+
 
 function clampPhotoViewerPan(pan: PhotoViewerPan, limit: PhotoViewerPan): PhotoViewerPan {
   return {
@@ -2499,6 +2716,7 @@ export function PhotoCatalogView({
   const photoViewerTransitionSequenceRef = useRef(0);
   const photoViewerCloseInProgressRef = useRef(false);
   const preserveControlsVisibilityForNextPhotoChangeRef = useRef(false);
+  const photoViewerPendingNavigationOffsetRef = useRef<number | null>(null);
   const photoViewerDragRef = useRef<{
     pointerId: number;
     startClientX: number;
@@ -2514,6 +2732,8 @@ export function PhotoCatalogView({
   const [photoViewerLayoutMode, setPhotoViewerLayoutMode] = useState<PhotoViewerLayoutMode>(() =>
     readPhotoViewerLayoutModeFromSession()
   );
+  const [photoViewerFilmStripVirtualCenter, setPhotoViewerFilmStripVirtualCenter] =
+    useState<PhotoViewerFilmStripVirtualCenter | null>(null);
   const [photoViewerTransitionState, setPhotoViewerTransitionState] = useState<PhotoViewerTransitionState | null>(null);
   const [photoViewerFitMode, setPhotoViewerFitMode] = useState<PhotoViewerFitMode>('fit');
   const [photoViewerZoom, setPhotoViewerZoom] = useState(1);
@@ -2643,7 +2863,9 @@ export function PhotoCatalogView({
       setPhotoViewerTransitionState(null);
       photoViewerCloseInProgressRef.current = false;
       preserveControlsVisibilityForNextPhotoChangeRef.current = false;
+      photoViewerPendingNavigationOffsetRef.current = null;
       photoViewerDragRef.current = null;
+      setPhotoViewerFilmStripVirtualCenter(null);
       setPhotoViewerFitMode('fit');
       setIsPhotoViewerSlideshowActive(false);
       setIsPhotoViewerPanning(false);
@@ -3011,14 +3233,48 @@ export function PhotoCatalogView({
   const photoViewerLayoutModeDescription = photoViewerLayoutModeOption.description;
   const canPhotoViewerSlideshowAdvance = viewerOrderedPhotos.length > 1;
   const viewerPhotoIndex = viewerPhoto ? viewerOrderedPhotos.findIndex((photo) => photo.id === viewerPhoto.id) : -1;
-  const viewerPreviousPhoto = viewerPhotoIndex >= 0 && viewerOrderedPhotos.length > 1
-    ? viewerOrderedPhotos[(viewerPhotoIndex - 1 + viewerOrderedPhotos.length) % viewerOrderedPhotos.length]
-    : null;
-  const viewerNextPhoto = viewerPhotoIndex >= 0 && viewerOrderedPhotos.length > 1
-    ? viewerOrderedPhotos[(viewerPhotoIndex + 1) % viewerOrderedPhotos.length]
-    : null;
   const isPhotoViewerFilmStripLayout =
-    photoViewerLayoutMode === 'film-strip' && viewerPreviousPhoto !== null && viewerNextPhoto !== null;
+    photoViewerLayoutMode === 'film-strip' && viewerPhotoIndex >= 0 && viewerOrderedPhotos.length > 1;
+
+  useEffect(() => {
+    if (!viewerPhoto || viewerPhotoIndex < 0 || viewerOrderedPhotos.length === 0) {
+      photoViewerPendingNavigationOffsetRef.current = null;
+      setPhotoViewerFilmStripVirtualCenter(null);
+      return;
+    }
+
+    setPhotoViewerFilmStripVirtualCenter((currentCenter) => {
+      const pendingOffset = photoViewerPendingNavigationOffsetRef.current;
+      photoViewerPendingNavigationOffsetRef.current = null;
+
+      if (
+        currentCenter !== null &&
+        pendingOffset !== null &&
+        currentCenter.orderedPhotoIds === viewerOrderedPhotoIds &&
+        currentCenter.photoId !== viewerPhoto.id
+      ) {
+        return {
+          photoId: viewerPhoto.id,
+          orderedPhotoIds: viewerOrderedPhotoIds,
+          virtualIndex: currentCenter.virtualIndex + pendingOffset
+        };
+      }
+
+      if (
+        currentCenter !== null &&
+        currentCenter.photoId === viewerPhoto.id &&
+        currentCenter.orderedPhotoIds === viewerOrderedPhotoIds
+      ) {
+        return currentCenter;
+      }
+
+      return {
+        photoId: viewerPhoto.id,
+        orderedPhotoIds: viewerOrderedPhotoIds,
+        virtualIndex: viewerPhotoIndex
+      };
+    });
+  }, [viewerOrderedPhotoIds, viewerOrderedPhotos.length, viewerPhoto?.id, viewerPhotoIndex]);
 
   useEffect(() => {
     if (!viewerPhoto) {
@@ -3097,15 +3353,42 @@ export function PhotoCatalogView({
   }, [photoViewerNaturalSize?.height, photoViewerNaturalSize?.width, viewerPhoto?.height, viewerPhoto?.width]);
 
   const photoViewerPrimaryStageSize = useMemo<PhotoViewerSize>(() => {
-    if (!isPhotoViewerFilmStripLayout || photoViewerStageSize.width <= 0 || photoViewerStageSize.height <= 0) {
+    if (!isPhotoViewerFilmStripLayout) {
       return photoViewerStageSize;
     }
 
-    return {
-      width: Math.max(1, photoViewerStageSize.width * 0.62),
-      height: Math.max(1, photoViewerStageSize.height * 0.88)
-    };
-  }, [isPhotoViewerFilmStripLayout, photoViewerStageSize]);
+    return calculatePhotoViewerFilmStripCurrentViewportSize(
+      photoViewerIntrinsicSize,
+      photoViewerStageSize,
+      photoViewerFitMode
+    );
+  }, [isPhotoViewerFilmStripLayout, photoViewerFitMode, photoViewerIntrinsicSize, photoViewerStageSize]);
+
+  const photoViewerFilmStripVirtualIndex =
+    photoViewerFilmStripVirtualCenter !== null &&
+    photoViewerFilmStripVirtualCenter.photoId === viewerPhoto?.id &&
+    photoViewerFilmStripVirtualCenter.orderedPhotoIds === viewerOrderedPhotoIds
+      ? photoViewerFilmStripVirtualCenter.virtualIndex
+      : viewerPhotoIndex;
+
+  const photoViewerFilmStripFrames = useMemo<PhotoViewerFilmStripFrame[]>(() => {
+    if (!isPhotoViewerFilmStripLayout || photoViewerFilmStripVirtualIndex < 0) {
+      return [];
+    }
+
+    return buildPhotoViewerFilmStripFrames(
+      viewerOrderedPhotos,
+      photoViewerFilmStripVirtualIndex,
+      photoViewerPrimaryStageSize,
+      photoViewerStageSize
+    );
+  }, [
+    isPhotoViewerFilmStripLayout,
+    photoViewerFilmStripVirtualIndex,
+    photoViewerPrimaryStageSize,
+    photoViewerStageSize,
+    viewerOrderedPhotos
+  ]);
 
   const photoViewerRenderedSize = useMemo(
     () =>
@@ -3785,7 +4068,31 @@ export function PhotoCatalogView({
         preserveControlsVisibilityForNextPhotoChangeRef.current = true;
       }
 
-      if (isChangingPhoto && options.useSlideshowTransition === true && photoViewerSlideshowMode !== 'cut') {
+      if (isChangingPhoto) {
+        photoViewerPendingNavigationOffsetRef.current = offset;
+        setPhotoViewerFilmStripVirtualCenter((currentCenter) =>
+          currentCenter !== null &&
+          currentCenter.photoId === viewerPhoto.id &&
+          currentCenter.orderedPhotoIds === viewerOrderedPhotoIds
+            ? {
+                photoId: nextPhoto.id,
+                orderedPhotoIds: viewerOrderedPhotoIds,
+                virtualIndex: currentCenter.virtualIndex + offset
+              }
+            : {
+                photoId: nextPhoto.id,
+                orderedPhotoIds: viewerOrderedPhotoIds,
+                virtualIndex: currentIndex === -1 ? nextIndex : currentIndex + offset
+              }
+        );
+      }
+
+      if (
+        isChangingPhoto &&
+        !isPhotoViewerFilmStripLayout &&
+        options.useSlideshowTransition === true &&
+        photoViewerSlideshowMode !== 'cut'
+      ) {
         clearPhotoViewerTransitionTimer();
         photoViewerTransitionSequenceRef.current += 1;
         const outgoingFrameStyle =
@@ -3831,6 +4138,7 @@ export function PhotoCatalogView({
     };
   }, [
     canPhotoViewerSlideshowAdvance,
+    isPhotoViewerFilmStripLayout,
     isPhotoViewerSlideshowActive,
     photoViewerSlideshowDelayMs,
     photoViewerSlideshowMode,
@@ -3921,6 +4229,7 @@ export function PhotoCatalogView({
   };
 
   const activePhotoViewerTransitionState =
+    !isPhotoViewerFilmStripLayout &&
     photoViewerTransitionState !== null &&
     viewerPhoto !== null &&
     photoViewerTransitionState.incomingPhotoId === viewerPhoto.id
@@ -3930,6 +4239,7 @@ export function PhotoCatalogView({
   const activePhotoViewerTransitionMode = activePhotoViewerTransitionState?.mode ?? null;
   const activePhotoViewerTransitionDirection = activePhotoViewerTransitionState?.direction ?? null;
   const isPhotoViewerKenBurnsActive =
+    !isPhotoViewerFilmStripLayout &&
     viewerPhoto !== null &&
     isPhotoViewerSlideshowActive &&
     canPhotoViewerSlideshowAdvance &&
@@ -4077,7 +4387,51 @@ export function PhotoCatalogView({
                   <span className="viewer-shortcut-key" aria-hidden="true">C</span>
                 </button>
               </div>
-              <div className="photo-viewer-center-controls" role="group" aria-label="Photo slideshow controls">
+              <div className="photo-viewer-center-controls" role="group" aria-label="Photo slideshow and layout controls">
+                <label
+                  className="viewer-toolbar-indicator photo-viewer-slide-duration"
+                  title={`Each slide displays for ${photoViewerSlideDurationDescription}`}
+                >
+                  <span className="photo-viewer-slide-duration-label">Pace</span>
+                  <select
+                    className="photo-viewer-slide-duration-select"
+                    value={photoViewerSlideshowDelayMs}
+                    onChange={handlePhotoViewerSlideshowDelayChange}
+                    aria-label={`Slideshow slide duration. Current value: ${photoViewerSlideDurationDescription}.`}
+                    title={`Each slide displays for ${photoViewerSlideDurationDescription}`}
+                  >
+                    {PHOTO_VIEWER_SLIDESHOW_DELAY_OPTIONS_SECONDS.map((seconds) => (
+                      <option key={seconds} value={seconds * 1000}>
+                        {seconds} {seconds === 1 ? 'second' : 'seconds'}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="sr-only" aria-live="polite">
+                    {photoViewerSlideDurationLabel}
+                  </span>
+                </label>
+                <label
+                  className="viewer-toolbar-indicator photo-viewer-slideshow-style"
+                  title={photoViewerSlideshowModeDescription}
+                >
+                  <span className="photo-viewer-slideshow-style-label">Style</span>
+                  <select
+                    className="photo-viewer-slideshow-style-select"
+                    value={photoViewerSlideshowMode}
+                    onChange={handlePhotoViewerSlideshowModeChange}
+                    aria-label={`Slideshow transition style. Current value: ${photoViewerSlideshowModeOption.label}.`}
+                    title={photoViewerSlideshowModeDescription}
+                  >
+                    {PHOTO_VIEWER_SLIDESHOW_MODE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="sr-only" aria-live="polite">
+                    Slideshow style: {photoViewerSlideshowModeOption.label}
+                  </span>
+                </label>
                 <div
                   className="viewer-toolbar-group viewer-transport-group photo-viewer-slideshow-transport"
                   role="group"
@@ -4145,119 +4499,122 @@ export function PhotoCatalogView({
                     Photo viewer layout: {photoViewerLayoutModeOption.label}
                   </span>
                 </label>
-                <label
-                  className="viewer-toolbar-indicator photo-viewer-slide-duration"
-                  title={`Each slide displays for ${photoViewerSlideDurationDescription}`}
-                >
-                  <span className="photo-viewer-slide-duration-label">Pace</span>
-                  <select
-                    className="photo-viewer-slide-duration-select"
-                    value={photoViewerSlideshowDelayMs}
-                    onChange={handlePhotoViewerSlideshowDelayChange}
-                    aria-label={`Slideshow slide duration. Current value: ${photoViewerSlideDurationDescription}.`}
-                    title={`Each slide displays for ${photoViewerSlideDurationDescription}`}
-                  >
-                    {PHOTO_VIEWER_SLIDESHOW_DELAY_OPTIONS_SECONDS.map((seconds) => (
-                      <option key={seconds} value={seconds * 1000}>
-                        {seconds} {seconds === 1 ? 'second' : 'seconds'}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="sr-only" aria-live="polite">
-                    {photoViewerSlideDurationLabel}
-                  </span>
-                </label>
-                <label
-                  className="viewer-toolbar-indicator photo-viewer-slideshow-style"
-                  title={photoViewerSlideshowModeDescription}
-                >
-                  <span className="photo-viewer-slideshow-style-label">Style</span>
-                  <select
-                    className="photo-viewer-slideshow-style-select"
-                    value={photoViewerSlideshowMode}
-                    onChange={handlePhotoViewerSlideshowModeChange}
-                    aria-label={`Slideshow transition style. Current value: ${photoViewerSlideshowModeOption.label}.`}
-                    title={photoViewerSlideshowModeDescription}
-                  >
-                    {PHOTO_VIEWER_SLIDESHOW_MODE_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="sr-only" aria-live="polite">
-                    Slideshow style: {photoViewerSlideshowModeOption.label}
-                  </span>
-                </label>
               </div>
             </div>
             <button type="button" className="photo-viewer-nav is-previous" onClick={showPreviousViewerPhoto} aria-label="Previous photo">
               ‹
             </button>
             <div ref={photoViewerStageRef} className={photoViewerStageClassName} onWheel={handlePhotoViewerWheel}>
-              {isPhotoViewerFilmStripLayout && viewerPreviousPhoto !== null ? (
-                <div className="photo-viewer-film-strip-frame is-previous" aria-hidden="true">
-                  <PhotoImage
-                    className="photo-viewer-film-strip-image"
-                    photo={viewerPreviousPhoto}
-                    source="original"
-                    alt=""
-                    draggable={false}
-                    onDragStart={(event) => event.preventDefault()}
-                  />
+              {isPhotoViewerFilmStripLayout ? (
+                <div className="photo-viewer-film-strip" aria-label="Film strip photo layout">
+                  {photoViewerFilmStripFrames.map((filmStripFrame) => {
+                    const isCurrentFilmStripFrame = filmStripFrame.offset === 0;
+                    const filmStripFrameStyle: CSSProperties = {
+                      ...(isCurrentFilmStripFrame ? photoViewerFrameStyle : {}),
+                      width: `${filmStripFrame.width}px`,
+                      height: `${filmStripFrame.height}px`,
+                      opacity: filmStripFrame.opacity,
+                      zIndex: filmStripFrame.zIndex,
+                      transform: `translate3d(calc(-50% + ${Number(filmStripFrame.x.toFixed(2))}px), -50%, 0)`
+                    };
+                    const filmStripFrameClassName = joinClassNames(
+                      'photo-viewer-film-strip-frame',
+                      isCurrentFilmStripFrame ? 'is-current' : 'is-neighbor',
+                      filmStripFrame.offset < 0 && 'is-before',
+                      filmStripFrame.offset > 0 && 'is-after',
+                      filmStripFrame.distance > 1 && 'is-distant'
+                    );
+
+                    if (isCurrentFilmStripFrame) {
+                      return (
+                        <div
+                          ref={photoViewerCurrentFrameRef}
+                          key={filmStripFrame.key}
+                          className={filmStripFrameClassName}
+                          style={filmStripFrameStyle}
+                        >
+                          <PhotoImage
+                            className="photo-viewer-image"
+                            photo={viewerPhoto}
+                            source="original"
+                            alt={viewerPhoto.originalName}
+                            draggable={false}
+                            onDragStart={(event: ReactDragEvent<HTMLImageElement>) => event.preventDefault()}
+                            onLoad={handlePhotoViewerImageLoad}
+                            onPointerDown={handlePhotoViewerImagePointerDown}
+                            onPointerMove={handlePhotoViewerImagePointerMove}
+                            onPointerUp={handlePhotoViewerImagePointerUp}
+                            onPointerCancel={handlePhotoViewerImagePointerUp}
+                            style={photoViewerImageStyle}
+                          />
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <div
+                        key={filmStripFrame.key}
+                        className={filmStripFrameClassName}
+                        style={filmStripFrameStyle}
+                        aria-hidden="true"
+                      >
+                        <PhotoImage
+                          className="photo-viewer-film-strip-image"
+                          photo={filmStripFrame.photo}
+                          source="original"
+                          alt=""
+                          loading={filmStripFrame.distance <= 2 ? 'eager' : 'lazy'}
+                          decoding="async"
+                          draggable={false}
+                          onDragStart={(event: ReactDragEvent<HTMLImageElement>) => event.preventDefault()}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
-              ) : null}
-              {activePhotoViewerTransitionState !== null ? (
-                <div
-                  key={`outgoing-${activePhotoViewerTransitionState.id}`}
-                  className={photoViewerOutgoingFrameClassName}
-                  style={photoViewerOutgoingFrameStyle}
-                  aria-hidden="true"
-                >
-                  <PhotoImage
-                    className="photo-viewer-image"
-                    photo={activePhotoViewerTransitionState.outgoingPhoto}
-                    source="original"
-                    alt=""
-                    draggable={false}
-                    onDragStart={(event) => event.preventDefault()}
-                    style={activePhotoViewerTransitionState.outgoingImageStyle}
-                  />
-                </div>
-              ) : null}
-              <div
-                ref={photoViewerCurrentFrameRef}
-                key={`current-${viewerPhoto.id}`}
-                className={photoViewerCurrentFrameClassName}
-                style={photoViewerFrameStyle}
-              >
-                <PhotoImage
-                  className="photo-viewer-image"
-                  photo={viewerPhoto}
-                  source="original"
-                  alt={viewerPhoto.originalName}
-                  draggable={false}
-                  onDragStart={(event) => event.preventDefault()}
-                  onLoad={handlePhotoViewerImageLoad}
-                  onPointerDown={handlePhotoViewerImagePointerDown}
-                  onPointerMove={handlePhotoViewerImagePointerMove}
-                  onPointerUp={handlePhotoViewerImagePointerUp}
-                  onPointerCancel={handlePhotoViewerImagePointerUp}
-                  style={photoViewerImageStyle}
-                />
-              </div>
-              {isPhotoViewerFilmStripLayout && viewerNextPhoto !== null ? (
-                <div className="photo-viewer-film-strip-frame is-next" aria-hidden="true">
-                  <PhotoImage
-                    className="photo-viewer-film-strip-image"
-                    photo={viewerNextPhoto}
-                    source="original"
-                    alt=""
-                    draggable={false}
-                    onDragStart={(event) => event.preventDefault()}
-                  />
-                </div>
-              ) : null}
+              ) : (
+                <>
+                  {activePhotoViewerTransitionState !== null ? (
+                    <div
+                      key={`outgoing-${activePhotoViewerTransitionState.id}`}
+                      className={photoViewerOutgoingFrameClassName}
+                      style={photoViewerOutgoingFrameStyle}
+                      aria-hidden="true"
+                    >
+                      <PhotoImage
+                        className="photo-viewer-image"
+                        photo={activePhotoViewerTransitionState.outgoingPhoto}
+                        source="original"
+                        alt=""
+                        draggable={false}
+                        onDragStart={(event: ReactDragEvent<HTMLImageElement>) => event.preventDefault()}
+                        style={activePhotoViewerTransitionState.outgoingImageStyle}
+                      />
+                    </div>
+                  ) : null}
+                  <div
+                    ref={photoViewerCurrentFrameRef}
+                    key={`current-${viewerPhoto.id}`}
+                    className={photoViewerCurrentFrameClassName}
+                    style={photoViewerFrameStyle}
+                  >
+                    <PhotoImage
+                      className="photo-viewer-image"
+                      photo={viewerPhoto}
+                      source="original"
+                      alt={viewerPhoto.originalName}
+                      draggable={false}
+                      onDragStart={(event: ReactDragEvent<HTMLImageElement>) => event.preventDefault()}
+                      onLoad={handlePhotoViewerImageLoad}
+                      onPointerDown={handlePhotoViewerImagePointerDown}
+                      onPointerMove={handlePhotoViewerImagePointerMove}
+                      onPointerUp={handlePhotoViewerImagePointerUp}
+                      onPointerCancel={handlePhotoViewerImagePointerUp}
+                      style={photoViewerImageStyle}
+                    />
+                  </div>
+                </>
+              )}
             </div>
             <button type="button" className="photo-viewer-nav is-next" onClick={showNextViewerPhoto} aria-label="Next photo">
               ›
