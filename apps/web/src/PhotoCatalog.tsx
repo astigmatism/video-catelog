@@ -2,6 +2,7 @@ import type {
   ChangeEvent,
   CSSProperties,
   DragEvent as ReactDragEvent,
+  FocusEvent as ReactFocusEvent,
   FormEvent,
   ImgHTMLAttributes,
   JSX,
@@ -1243,6 +1244,34 @@ function clampPhotoViewerPan(pan: PhotoViewerPan, limit: PhotoViewerPan): PhotoV
 
 type PhotoImageSource = 'thumbnail' | 'original';
 
+function normalizePhotoMimeType(value: string | null | undefined): string {
+  return value?.split(';')[0]?.trim().toLowerCase() ?? '';
+}
+
+function hasGifFileExtension(value: string | null | undefined): boolean {
+  return (value ?? '').split(/[?#]/, 1)[0].trim().toLowerCase().endsWith('.gif');
+}
+
+function isGifPhoto(photo: Photo): boolean {
+  return (
+    normalizePhotoMimeType(photo.mimeType) === 'image/gif' ||
+    hasGifFileExtension(photo.originalName) ||
+    hasGifFileExtension(photo.storedName) ||
+    hasGifFileExtension(photo.relativePath)
+  );
+}
+
+function isGifThumbnail(photo: Photo): boolean {
+  return (
+    normalizePhotoMimeType(photo.thumbnailMimeType) === 'image/gif' ||
+    hasGifFileExtension(photo.thumbnailRelativePath)
+  );
+}
+
+function shouldUseOriginalGifHoverPreview(photo: Photo): boolean {
+  return isGifPhoto(photo) && !isGifThumbnail(photo);
+}
+
 function getPhotoVersionToken(photo: Photo, source: PhotoImageSource): string {
   if (source === 'thumbnail') {
     return (
@@ -1593,9 +1622,14 @@ function PhotoImage({ photo, alt, onError, source = 'thumbnail', ...imageProps }
   ]);
 
   const imageUrl = urlCandidates[candidateIndex] ?? getPhotoUrl(photo, source);
+  const imageElementKey =
+    source === 'original' && isGifPhoto(photo)
+      ? `original-gif-${photo.id}-${getPhotoVersionToken(photo, 'original')}`
+      : undefined;
 
   return (
     <img
+      key={imageElementKey}
       {...imageProps}
       src={imageUrl}
       alt={alt ?? ''}
@@ -2571,12 +2605,18 @@ function PhotoGridCard({
   contextLabel?: string;
 }): JSX.Element {
   const [isFavoriteControlSuppressed, setIsFavoriteControlSuppressed] = useState(false);
+  const [isOriginalGifPreviewActive, setIsOriginalGifPreviewActive] = useState(false);
+  const canUseOriginalGifPreview = shouldUseOriginalGifHoverPreview(photo);
 
   useEffect(() => {
     if (isFavorite) {
       setIsFavoriteControlSuppressed(false);
     }
   }, [isFavorite]);
+
+  useEffect(() => {
+    setIsOriginalGifPreviewActive(false);
+  }, [photo.id]);
 
   const handleFavoriteClick = (event: ReactMouseEvent<HTMLButtonElement>): void => {
     if (isFavorite && event.detail > 0) {
@@ -2589,16 +2629,41 @@ function PhotoGridCard({
     onToggleFavorite(photo);
   };
 
+  const handlePointerEnter = (event: ReactPointerEvent<HTMLElement>): void => {
+    if (canUseOriginalGifPreview && (event.pointerType === 'mouse' || event.pointerType === 'pen')) {
+      setIsOriginalGifPreviewActive(true);
+    }
+  };
+
   const handlePointerLeave = (): void => {
     setIsFavoriteControlSuppressed(false);
+    setIsOriginalGifPreviewActive(false);
   };
+
+  const handleFocus = (): void => {
+    if (canUseOriginalGifPreview) {
+      setIsOriginalGifPreviewActive(true);
+    }
+  };
+
+  const handleBlur = (event: ReactFocusEvent<HTMLElement>): void => {
+    const nextTarget = event.relatedTarget;
+    if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+      setIsOriginalGifPreviewActive(false);
+    }
+  };
+
+  const showOriginalGifPreview = canUseOriginalGifPreview && isOriginalGifPreviewActive;
 
   return (
     <article
       className={`photo-grid-card${isFavorite ? ' is-favorite' : ''}${
         isFavoriteControlSuppressed ? ' is-favorite-control-suppressed' : ''
       }`}
+      onPointerEnter={handlePointerEnter}
       onPointerLeave={handlePointerLeave}
+      onFocus={handleFocus}
+      onBlur={handleBlur}
     >
       <div className="photo-grid-image-wrap">
         <button
@@ -2608,6 +2673,18 @@ function PhotoGridCard({
           aria-label={`Open ${photo.originalName}`}
         >
           <PhotoImage className="photo-grid-image" photo={photo} source="thumbnail" alt={photo.originalName} loading="lazy" />
+          {showOriginalGifPreview ? (
+            <PhotoImage
+              key={`original-gif-preview-${photo.id}`}
+              className="photo-grid-image photo-grid-image-original-gif-preview"
+              photo={photo}
+              source="original"
+              alt=""
+              loading="eager"
+              decoding="async"
+              aria-hidden="true"
+            />
+          ) : null}
         </button>
         {contextLabel ? (
           <div className="photo-grid-context-label" title={contextLabel}>

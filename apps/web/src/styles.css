@@ -5327,6 +5327,12 @@ label {
   object-position: center;
 }
 
+.photo-grid-image-original-gif-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
 .photo-grid-context-label {
   position: absolute;
   left: 0.5rem;
