@@ -5965,14 +5965,7 @@ label {
 }
 
 .photo-viewer-stage.is-layout-film-strip::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  z-index: 12;
-  pointer-events: none;
-  background:
-    linear-gradient(90deg, rgba(2, 6, 12, 0.92), rgba(2, 6, 12, 0) 14%, rgba(2, 6, 12, 0) 86%, rgba(2, 6, 12, 0.92)),
-    linear-gradient(180deg, rgba(2, 6, 12, 0.52), rgba(2, 6, 12, 0) 22%, rgba(2, 6, 12, 0) 78%, rgba(2, 6, 12, 0.56));
+  display: none;
 }
 
 .photo-viewer-film-strip {
@@ -5992,11 +5985,11 @@ label {
   justify-content: center;
   min-width: 3.5rem;
   min-height: 4rem;
-  overflow: hidden;
-  border: 1px solid rgba(191, 219, 254, 0.14);
-  border-radius: 0.78rem;
-  background: rgba(15, 23, 42, 0.42);
-  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.4);
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   pointer-events: none;
   transform-origin: center center;
   transition:
@@ -6004,31 +5997,16 @@ label {
     width 560ms cubic-bezier(0.22, 1, 0.36, 1),
     height 560ms cubic-bezier(0.22, 1, 0.36, 1),
     opacity 420ms ease,
-    filter 420ms ease,
-    box-shadow 420ms ease,
-    border-color 420ms ease;
+    filter 420ms ease;
   will-change: transform, width, height, opacity;
   filter: saturate(0.84) brightness(0.76);
 }
 
 .photo-viewer-film-strip-frame::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  pointer-events: none;
-  border-radius: inherit;
-  background:
-    linear-gradient(90deg, rgba(2, 6, 12, 0.16), rgba(2, 6, 12, 0) 18%, rgba(2, 6, 12, 0) 82%, rgba(2, 6, 12, 0.16)),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0) 16%, rgba(0, 0, 0, 0.1));
+  display: none;
 }
 
 .photo-viewer-film-strip-frame.is-current {
-  border-color: rgba(219, 234, 254, 0.24);
-  background: rgba(2, 6, 12, 0.1);
-  box-shadow:
-    0 30px 96px rgba(0, 0, 0, 0.58),
-    0 0 0 1px rgba(255, 255, 255, 0.04);
   pointer-events: auto;
   filter: none;
 }
@@ -6049,13 +6027,13 @@ label {
   height: 100%;
   max-width: none;
   max-height: none;
-  border-radius: 0.58rem;
+  border-radius: 0;
   object-fit: contain;
   user-select: none;
 }
 
 .photo-viewer-stage.is-layout-film-strip .photo-viewer-image {
-  border-radius: 0.58rem;
+  border-radius: 0;
 }
 
 .photo-viewer-frame {

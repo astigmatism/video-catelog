@@ -667,8 +667,8 @@ const PHOTO_VIEWER_TRANSITION_DURATION_MS = 720;
 const PHOTO_VIEWER_KEN_BURNS_VARIANTS = ['zoom-in', 'pan-right', 'pan-left', 'pan-down'] as const;
 const PHOTO_VIEWER_LAYOUT_SESSION_STORAGE_KEY = 'photoViewer.layout';
 const PHOTO_VIEWER_FILM_STRIP_SIDE_FRAME_COUNT = 4;
-const PHOTO_VIEWER_FILM_STRIP_MIN_GAP_PX = 8;
-const PHOTO_VIEWER_FILM_STRIP_MAX_GAP_PX = 18;
+const PHOTO_VIEWER_FILM_STRIP_MIN_GAP_PX = 6;
+const PHOTO_VIEWER_FILM_STRIP_MAX_GAP_PX = 12;
 
 type PhotoViewerSlideshowMode = 'cut' | 'crossfade' | 'dissolve' | 'slide' | 'ken-burns';
 type PhotoViewerLayoutMode = 'standard' | 'film-strip';
@@ -1096,30 +1096,6 @@ function calculatePhotoViewerContainedSize(
   };
 }
 
-function calculatePhotoViewerFilmStripCurrentViewportSize(
-  naturalSize: PhotoViewerSize | null,
-  stageSize: PhotoViewerSize,
-  fitMode: PhotoViewerFitMode
-): PhotoViewerSize {
-  if (stageSize.width <= 0 || stageSize.height <= 0) {
-    return {
-      width: 0,
-      height: 0
-    };
-  }
-
-  const maxBounds = {
-    width: Math.max(1, stageSize.width * (stageSize.width <= 760 ? 0.76 : 0.7)),
-    height: Math.max(1, stageSize.height * (stageSize.width <= 760 ? 0.74 : 0.86))
-  };
-
-  if (fitMode === 'fill') {
-    return maxBounds;
-  }
-
-  return calculatePhotoViewerContainedSize(naturalSize, maxBounds);
-}
-
 function getPhotoViewerFilmStripNeighborScale(distance: number): number {
   if (distance <= 1) {
     return 0.88;
@@ -1158,7 +1134,7 @@ function getPhotoViewerFilmStripFrameOpacity(distance: number): number {
 
 function getPhotoViewerFilmStripFrameSize(
   photo: Photo,
-  currentViewportSize: PhotoViewerSize,
+  currentFrameSize: PhotoViewerSize,
   stageSize: PhotoViewerSize,
   offset: number
 ): PhotoViewerSize {
@@ -1166,16 +1142,16 @@ function getPhotoViewerFilmStripFrameSize(
 
   if (distance === 0) {
     return {
-      width: Math.max(1, currentViewportSize.width),
-      height: Math.max(1, currentViewportSize.height)
+      width: Math.max(1, currentFrameSize.width),
+      height: Math.max(1, currentFrameSize.height)
     };
   }
 
   const scale = getPhotoViewerFilmStripNeighborScale(distance);
   const naturalSize = getPhotoViewerNaturalSizeFromPhoto(photo);
   const neighborBounds = {
-    width: Math.max(72, Math.min(stageSize.width * 0.46, currentViewportSize.width * (0.72 - Math.min(distance - 1, 3) * 0.08))),
-    height: Math.max(72, currentViewportSize.height * scale)
+    width: Math.max(72, Math.min(stageSize.width * 0.5, currentFrameSize.width * (0.72 - Math.min(distance - 1, 3) * 0.08))),
+    height: Math.max(72, currentFrameSize.height * scale)
   };
 
   return calculatePhotoViewerContainedSize(naturalSize, neighborBounds);
@@ -1188,10 +1164,10 @@ function wrapPhotoViewerFilmStripIndex(index: number, photoCount: number): numbe
 function buildPhotoViewerFilmStripFrames(
   photos: Photo[],
   currentVirtualIndex: number,
-  currentViewportSize: PhotoViewerSize,
+  currentFrameSize: PhotoViewerSize,
   stageSize: PhotoViewerSize
 ): PhotoViewerFilmStripFrame[] {
-  if (photos.length === 0 || currentViewportSize.width <= 0 || currentViewportSize.height <= 0) {
+  if (photos.length === 0 || currentFrameSize.width <= 0 || currentFrameSize.height <= 0) {
     return [];
   }
 
@@ -1210,7 +1186,7 @@ function buildPhotoViewerFilmStripFrames(
     }
 
     const distance = Math.abs(offset);
-    const frameSize = getPhotoViewerFilmStripFrameSize(photo, currentViewportSize, stageSize, offset);
+    const frameSize = getPhotoViewerFilmStripFrameSize(photo, currentFrameSize, stageSize, offset);
 
     framesByOffset.set(offset, {
       key: `film-strip-${virtualIndex}-${photo.id}`,
@@ -3352,17 +3328,7 @@ export function PhotoCatalogView({
     return width !== null && height !== null ? { width, height } : null;
   }, [photoViewerNaturalSize?.height, photoViewerNaturalSize?.width, viewerPhoto?.height, viewerPhoto?.width]);
 
-  const photoViewerPrimaryStageSize = useMemo<PhotoViewerSize>(() => {
-    if (!isPhotoViewerFilmStripLayout) {
-      return photoViewerStageSize;
-    }
-
-    return calculatePhotoViewerFilmStripCurrentViewportSize(
-      photoViewerIntrinsicSize,
-      photoViewerStageSize,
-      photoViewerFitMode
-    );
-  }, [isPhotoViewerFilmStripLayout, photoViewerFitMode, photoViewerIntrinsicSize, photoViewerStageSize]);
+  const photoViewerPrimaryStageSize = photoViewerStageSize;
 
   const photoViewerFilmStripVirtualIndex =
     photoViewerFilmStripVirtualCenter !== null &&
@@ -3370,25 +3336,6 @@ export function PhotoCatalogView({
     photoViewerFilmStripVirtualCenter.orderedPhotoIds === viewerOrderedPhotoIds
       ? photoViewerFilmStripVirtualCenter.virtualIndex
       : viewerPhotoIndex;
-
-  const photoViewerFilmStripFrames = useMemo<PhotoViewerFilmStripFrame[]>(() => {
-    if (!isPhotoViewerFilmStripLayout || photoViewerFilmStripVirtualIndex < 0) {
-      return [];
-    }
-
-    return buildPhotoViewerFilmStripFrames(
-      viewerOrderedPhotos,
-      photoViewerFilmStripVirtualIndex,
-      photoViewerPrimaryStageSize,
-      photoViewerStageSize
-    );
-  }, [
-    isPhotoViewerFilmStripLayout,
-    photoViewerFilmStripVirtualIndex,
-    photoViewerPrimaryStageSize,
-    photoViewerStageSize,
-    viewerOrderedPhotos
-  ]);
 
   const photoViewerRenderedSize = useMemo(
     () =>
@@ -3400,6 +3347,27 @@ export function PhotoCatalogView({
       ),
     [photoViewerFitMode, photoViewerIntrinsicSize, photoViewerPrimaryStageSize, photoViewerZoom]
   );
+
+  const photoViewerFilmStripCurrentFrameSize = photoViewerRenderedSize ?? photoViewerPrimaryStageSize;
+
+  const photoViewerFilmStripFrames = useMemo<PhotoViewerFilmStripFrame[]>(() => {
+    if (!isPhotoViewerFilmStripLayout || photoViewerFilmStripVirtualIndex < 0) {
+      return [];
+    }
+
+    return buildPhotoViewerFilmStripFrames(
+      viewerOrderedPhotos,
+      photoViewerFilmStripVirtualIndex,
+      photoViewerFilmStripCurrentFrameSize,
+      photoViewerStageSize
+    );
+  }, [
+    isPhotoViewerFilmStripLayout,
+    photoViewerFilmStripCurrentFrameSize,
+    photoViewerFilmStripVirtualIndex,
+    photoViewerStageSize,
+    viewerOrderedPhotos
+  ]);
 
   const photoViewerPanLimit = useMemo(
     () => calculatePhotoViewerPanLimit(photoViewerRenderedSize, photoViewerPrimaryStageSize),
