@@ -5196,6 +5196,17 @@ export function PhotoCatalogView({
               {collection.description ? <p className="photo-detail-description">{collection.description}</p> : null}
             </div>
             <div className="photo-detail-action-cluster" aria-label="Photo grid controls">
+              {isPhotoGridRandomSortActive ? (
+                <button
+                  type="button"
+                  className="app-button secondary photo-grid-randomize-sort-button"
+                  onClick={reshufflePhotoGridSort}
+                  aria-label="Shuffle the current randomized photo order again"
+                  title="Shuffle the current randomized photo order again"
+                >
+                  Shuffle again
+                </button>
+              ) : null}
               <label className="photo-grid-sort-control" htmlFor="photo-grid-sort-category">
                 <span>Sort by</span>
                 <select
@@ -5212,17 +5223,6 @@ export function PhotoCatalogView({
                   ))}
                 </select>
               </label>
-              {isPhotoGridRandomSortActive ? (
-                <button
-                  type="button"
-                  className="app-button secondary photo-grid-randomize-sort-button"
-                  onClick={reshufflePhotoGridSort}
-                  aria-label="Shuffle the current randomized photo order again"
-                  title="Shuffle the current randomized photo order again"
-                >
-                  Shuffle again
-                </button>
-              ) : null}
               <button
                 type="button"
                 className={`sort-direction-button photo-grid-sort-direction-button${isPhotoGridRandomSortActive ? ' is-random-disabled' : ''}`}
