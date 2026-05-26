@@ -33,11 +33,43 @@ import type { SessionStore } from './session-store';
 const SUPPORTED_IMAGE_EXTENSIONS = new Map<string, string>([
   ['.jpg', 'image/jpeg'],
   ['.jpeg', 'image/jpeg'],
+  ['.jpe', 'image/jpeg'],
+  ['.jfif', 'image/jpeg'],
   ['.png', 'image/png'],
+  ['.apng', 'image/png'],
   ['.gif', 'image/gif'],
   ['.webp', 'image/webp'],
   ['.avif', 'image/avif'],
   ['.bmp', 'image/bmp']
+]);
+
+const CANONICAL_IMAGE_EXTENSIONS = new Map<string, string>([
+  ['.jpeg', '.jpg'],
+  ['.jpe', '.jpg'],
+  ['.jfif', '.jpg'],
+  ['.apng', '.png']
+]);
+
+const SUPPORTED_IMAGE_MIME_TYPE_EXTENSIONS = new Map<string, string>([
+  ['image/jpeg', '.jpg'],
+  ['image/pjpeg', '.jpg'],
+  ['image/png', '.png'],
+  ['image/apng', '.png'],
+  ['image/gif', '.gif'],
+  ['image/webp', '.webp'],
+  ['image/avif', '.avif'],
+  ['image/bmp', '.bmp'],
+  ['image/x-bmp', '.bmp'],
+  ['image/x-ms-bmp', '.bmp'],
+  ['image/ms-bmp', '.bmp']
+]);
+
+const CANONICAL_IMAGE_MIME_TYPES = new Map<string, string>([
+  ['image/pjpeg', 'image/jpeg'],
+  ['image/apng', 'image/png'],
+  ['image/x-bmp', 'image/bmp'],
+  ['image/x-ms-bmp', 'image/bmp'],
+  ['image/ms-bmp', 'image/bmp']
 ]);
 
 const MAX_ZIP_ENTRIES = 5000;
@@ -926,6 +958,19 @@ function normalizePathBasename(filename: string): string {
   return path.posix.basename(normalized) || 'photo';
 }
 
+function canonicalizeImageExtension(extension: string): string {
+  return CANONICAL_IMAGE_EXTENSIONS.get(extension) ?? extension;
+}
+
+function normalizeSupportedImageMimeType(mimeType: string | null | undefined): string | null {
+  const normalizedMimeType = mimeType?.split(';')[0]?.trim().toLowerCase() ?? null;
+  if (!normalizedMimeType || !SUPPORTED_IMAGE_MIME_TYPE_EXTENSIONS.has(normalizedMimeType)) {
+    return null;
+  }
+
+  return CANONICAL_IMAGE_MIME_TYPES.get(normalizedMimeType) ?? normalizedMimeType;
+}
+
 function getMimeTypeFromExtension(filename: string): string | null {
   return SUPPORTED_IMAGE_EXTENSIONS.get(path.extname(filename).toLowerCase()) ?? null;
 }
@@ -933,27 +978,19 @@ function getMimeTypeFromExtension(filename: string): string | null {
 function getImageExtension(filename: string, mimeType: string | null): string | null {
   const extension = path.extname(filename).toLowerCase();
   if (SUPPORTED_IMAGE_EXTENSIONS.has(extension)) {
-    return extension === '.jpeg' ? '.jpg' : extension;
+    return canonicalizeImageExtension(extension);
   }
 
-  if (mimeType) {
-    for (const [candidateExtension, candidateMimeType] of SUPPORTED_IMAGE_EXTENSIONS.entries()) {
-      if (candidateMimeType === mimeType) {
-        return candidateExtension === '.jpeg' ? '.jpg' : candidateExtension;
-      }
-    }
+  const normalizedMimeType = normalizeSupportedImageMimeType(mimeType);
+  if (normalizedMimeType) {
+    return SUPPORTED_IMAGE_MIME_TYPE_EXTENSIONS.get(normalizedMimeType) ?? null;
   }
 
   return null;
 }
 
 function normalizeImageMimeType(filename: string, declaredMimeType: string | null | undefined): string | null {
-  const normalizedDeclaredMimeType = declaredMimeType?.split(';')[0]?.trim().toLowerCase() ?? null;
-  if (normalizedDeclaredMimeType && Array.from(SUPPORTED_IMAGE_EXTENSIONS.values()).includes(normalizedDeclaredMimeType)) {
-    return normalizedDeclaredMimeType;
-  }
-
-  return getMimeTypeFromExtension(filename);
+  return normalizeSupportedImageMimeType(declaredMimeType) ?? getMimeTypeFromExtension(filename);
 }
 
 function normalizeImportDetail(value: string | null | undefined): string | null {
