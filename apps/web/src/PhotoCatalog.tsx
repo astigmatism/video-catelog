@@ -5056,9 +5056,8 @@ export function PhotoCatalogView({
   }, [photoViewerTransitionState?.id]);
 
   const handleViewerKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
-    notePhotoViewerActivity();
-
     if (isPhotoViewerSlideDurationSelectTarget(event.target)) {
+      notePhotoViewerActivity();
       return;
     }
 
@@ -5073,6 +5072,7 @@ export function PhotoCatalogView({
     const isCloseKey = !hasShortcutModifier && (lowerKey === 'x' || event.code === 'KeyX');
 
     if (isPhotoThumbnailCropModeActive) {
+      notePhotoViewerActivity();
       if (isThumbnailKey) {
         event.preventDefault();
         if (!event.repeat) {
@@ -5123,20 +5123,23 @@ export function PhotoCatalogView({
     }
 
     if (event.shiftKey && event.key.startsWith('Arrow')) {
+      notePhotoViewerActivity();
       return;
     }
 
     if (event.key === 'ArrowLeft') {
       event.preventDefault();
-      openViewerPhotoAtOffset(-1);
+      openViewerPhotoAtOffset(-1, { preserveControlsVisibility: true });
       return;
     }
 
     if (event.key === 'ArrowRight') {
       event.preventDefault();
-      openViewerPhotoAtOffset(1);
+      openViewerPhotoAtOffset(1, { preserveControlsVisibility: true });
       return;
     }
+
+    notePhotoViewerActivity();
 
     if (!event.shiftKey && !hasShortcutModifier && event.key === 'ArrowUp') {
       event.preventDefault();
