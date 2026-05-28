@@ -808,6 +808,10 @@ const PHOTO_VIEWER_MAX_WHEEL_ZOOM_STEPS = 3;
 const PHOTO_COLLECTION_THUMBNAIL_CROP_MIN_SOURCE_SIZE = 32;
 const PHOTO_COLLECTION_THUMBNAIL_CROP_INITIAL_SCALE = 0.82;
 const PHOTO_COLLECTION_THUMBNAIL_CROP_KEYBOARD_NUDGE_PX = 12;
+const PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_WIDTH = 4;
+const PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_HEIGHT = 3;
+const PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO =
+  PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_WIDTH / PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_HEIGHT;
 
 type PhotoViewerFitMode = 'fit' | 'fill';
 
@@ -824,7 +828,8 @@ type PhotoViewerPan = {
 type PhotoThumbnailCropBox = {
   x: number;
   y: number;
-  size: number;
+  width: number;
+  height: number;
 };
 
 type PhotoThumbnailCropSelectionState = {
@@ -1236,30 +1241,80 @@ function calculatePhotoViewerImageRect(
   };
 }
 
+function getPhotoThumbnailCropMaxWidth(naturalSize: PhotoViewerSize): number {
+  return Math.max(
+    1,
+    Math.min(naturalSize.width, naturalSize.height * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO)
+  );
+}
+
+function getPhotoThumbnailCropMinWidth(naturalSize: PhotoViewerSize): number {
+  const maxWidth = getPhotoThumbnailCropMaxWidth(naturalSize);
+  return Math.min(
+    maxWidth,
+    Math.max(1, PHOTO_COLLECTION_THUMBNAIL_CROP_MIN_SOURCE_SIZE * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO)
+  );
+}
+
 function clampPhotoThumbnailCropBox(crop: PhotoThumbnailCropBox, naturalSize: PhotoViewerSize): PhotoThumbnailCropBox {
-  const maxSquareSize = Math.max(1, Math.min(naturalSize.width, naturalSize.height));
-  const minSquareSize = Math.min(PHOTO_COLLECTION_THUMBNAIL_CROP_MIN_SOURCE_SIZE, maxSquareSize);
-  const size = Math.max(minSquareSize, Math.min(maxSquareSize, Number(crop.size.toFixed(2))));
+  const maxWidth = getPhotoThumbnailCropMaxWidth(naturalSize);
+  const minWidth = getPhotoThumbnailCropMinWidth(naturalSize);
+  const cropWidth = Number.isFinite(crop.width) ? crop.width : crop.height * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO;
+  const width = Math.max(minWidth, Math.min(maxWidth, Number(cropWidth.toFixed(2))));
+  const height = Number((width / PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO).toFixed(2));
 
   return {
-    x: Math.max(0, Math.min(naturalSize.width - size, Number(crop.x.toFixed(2)))),
-    y: Math.max(0, Math.min(naturalSize.height - size, Number(crop.y.toFixed(2)))),
-    size
+    x: Math.max(0, Math.min(naturalSize.width - width, Number(crop.x.toFixed(2)))),
+    y: Math.max(0, Math.min(naturalSize.height - height, Number(crop.y.toFixed(2)))),
+    width,
+    height
+  };
+}
+
+type PhotoThumbnailCropRequest = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+function createPhotoThumbnailCropRequest(
+  crop: PhotoThumbnailCropBox,
+  naturalSize: PhotoViewerSize
+): PhotoThumbnailCropRequest {
+  const clampedCrop = clampPhotoThumbnailCropBox(crop, naturalSize);
+  const aspectScale = Math.max(
+    1,
+    Math.floor(
+      Math.min(
+        clampedCrop.width / PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_WIDTH,
+        clampedCrop.height / PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_HEIGHT
+      )
+    )
+  );
+  const width = aspectScale * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_WIDTH;
+  const height = aspectScale * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_HEIGHT;
+
+  return {
+    left: Math.max(0, Math.min(Math.round(naturalSize.width - width), Math.round(clampedCrop.x + (clampedCrop.width - width) / 2))),
+    top: Math.max(0, Math.min(Math.round(naturalSize.height - height), Math.round(clampedCrop.y + (clampedCrop.height - height) / 2))),
+    width,
+    height
   };
 }
 
 function createInitialPhotoThumbnailCropBox(naturalSize: PhotoViewerSize): PhotoThumbnailCropBox {
-  const maxSquareSize = Math.max(1, Math.min(naturalSize.width, naturalSize.height));
-  const size = Math.max(
-    Math.min(PHOTO_COLLECTION_THUMBNAIL_CROP_MIN_SOURCE_SIZE, maxSquareSize),
-    maxSquareSize * PHOTO_COLLECTION_THUMBNAIL_CROP_INITIAL_SCALE
-  );
+  const maxWidth = getPhotoThumbnailCropMaxWidth(naturalSize);
+  const minWidth = getPhotoThumbnailCropMinWidth(naturalSize);
+  const width = Math.max(minWidth, maxWidth * PHOTO_COLLECTION_THUMBNAIL_CROP_INITIAL_SCALE);
+  const height = width / PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO;
 
   return clampPhotoThumbnailCropBox(
     {
-      x: (naturalSize.width - size) / 2,
-      y: (naturalSize.height - size) / 2,
-      size
+      x: (naturalSize.width - width) / 2,
+      y: (naturalSize.height - height) / 2,
+      width,
+      height
     },
     naturalSize
   );
@@ -1276,38 +1331,51 @@ function resizePhotoThumbnailCropBox(
     return clampPhotoThumbnailCropBox(startCrop, naturalSize);
   }
 
-  const minSquareSize = Math.min(
-    PHOTO_COLLECTION_THUMBNAIL_CROP_MIN_SOURCE_SIZE,
-    Math.max(1, Math.min(naturalSize.width, naturalSize.height))
-  );
+  const minWidth = getPhotoThumbnailCropMinWidth(naturalSize);
 
   if (handle === 'se') {
-    const maxSize = Math.min(naturalSize.width - startCrop.x, naturalSize.height - startCrop.y);
-    const size = Math.max(minSquareSize, Math.min(maxSize, startCrop.size + Math.max(deltaX, deltaY)));
-    return clampPhotoThumbnailCropBox({ ...startCrop, size }, naturalSize);
+    const maxWidth = Math.min(
+      naturalSize.width - startCrop.x,
+      (naturalSize.height - startCrop.y) * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO
+    );
+    const widthDelta = Math.max(deltaX, deltaY * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO);
+    const width = Math.max(minWidth, Math.min(maxWidth, startCrop.width + widthDelta));
+    return clampPhotoThumbnailCropBox(
+      { ...startCrop, width, height: width / PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO },
+      naturalSize
+    );
   }
 
   if (handle === 'nw') {
-    const fixedRight = startCrop.x + startCrop.size;
-    const fixedBottom = startCrop.y + startCrop.size;
-    const maxSize = Math.min(fixedRight, fixedBottom);
-    const size = Math.max(minSquareSize, Math.min(maxSize, startCrop.size + Math.max(-deltaX, -deltaY)));
-    return clampPhotoThumbnailCropBox({ x: fixedRight - size, y: fixedBottom - size, size }, naturalSize);
+    const fixedRight = startCrop.x + startCrop.width;
+    const fixedBottom = startCrop.y + startCrop.height;
+    const maxWidth = Math.min(fixedRight, fixedBottom * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO);
+    const widthDelta = Math.max(-deltaX, -deltaY * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO);
+    const width = Math.max(minWidth, Math.min(maxWidth, startCrop.width + widthDelta));
+    const height = width / PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO;
+    return clampPhotoThumbnailCropBox({ x: fixedRight - width, y: fixedBottom - height, width, height }, naturalSize);
   }
 
   if (handle === 'ne') {
     const fixedLeft = startCrop.x;
-    const fixedBottom = startCrop.y + startCrop.size;
-    const maxSize = Math.min(naturalSize.width - fixedLeft, fixedBottom);
-    const size = Math.max(minSquareSize, Math.min(maxSize, startCrop.size + Math.max(deltaX, -deltaY)));
-    return clampPhotoThumbnailCropBox({ x: fixedLeft, y: fixedBottom - size, size }, naturalSize);
+    const fixedBottom = startCrop.y + startCrop.height;
+    const maxWidth = Math.min(naturalSize.width - fixedLeft, fixedBottom * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO);
+    const widthDelta = Math.max(deltaX, -deltaY * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO);
+    const width = Math.max(minWidth, Math.min(maxWidth, startCrop.width + widthDelta));
+    const height = width / PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO;
+    return clampPhotoThumbnailCropBox({ x: fixedLeft, y: fixedBottom - height, width, height }, naturalSize);
   }
 
-  const fixedRight = startCrop.x + startCrop.size;
+  const fixedRight = startCrop.x + startCrop.width;
   const fixedTop = startCrop.y;
-  const maxSize = Math.min(fixedRight, naturalSize.height - fixedTop);
-  const size = Math.max(minSquareSize, Math.min(maxSize, startCrop.size + Math.max(-deltaX, deltaY)));
-  return clampPhotoThumbnailCropBox({ x: fixedRight - size, y: fixedTop, size }, naturalSize);
+  const maxWidth = Math.min(
+    fixedRight,
+    (naturalSize.height - fixedTop) * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO
+  );
+  const widthDelta = Math.max(-deltaX, deltaY * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO);
+  const width = Math.max(minWidth, Math.min(maxWidth, startCrop.width + widthDelta));
+  const height = width / PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO;
+  return clampPhotoThumbnailCropBox({ x: fixedRight - width, y: fixedTop, width, height }, naturalSize);
 }
 
 function getPhotoViewerNaturalSizeFromPhoto(photo: Photo): PhotoViewerSize | null {
@@ -3896,8 +3964,8 @@ export function PhotoCatalogView({
     return {
       left: `${photoThumbnailCropImageRect.left + crop.x * scaleX}px`,
       top: `${photoThumbnailCropImageRect.top + crop.y * scaleY}px`,
-      width: `${crop.size * scaleX}px`,
-      height: `${crop.size * scaleY}px`
+      width: `${crop.width * scaleX}px`,
+      height: `${crop.height * scaleY}px`
     };
   }, [activePhotoThumbnailCropSelection, photoThumbnailCropImageRect, photoViewerIntrinsicSize]);
 
@@ -4277,7 +4345,7 @@ export function PhotoCatalogView({
       return;
     }
 
-    const crop = clampPhotoThumbnailCropBox(activePhotoThumbnailCropSelection.crop, cropSourceSize);
+    const crop = createPhotoThumbnailCropRequest(activePhotoThumbnailCropSelection.crop, cropSourceSize);
     notePhotoViewerActivity();
     setIsCollectionThumbnailBusy(true);
     setNotice(null);
@@ -4290,12 +4358,7 @@ export function PhotoCatalogView({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             photoId: viewerPhoto.id,
-            crop: {
-              left: Math.round(crop.x),
-              top: Math.round(crop.y),
-              width: Math.round(crop.size),
-              height: Math.round(crop.size)
-            }
+            crop
           })
         },
         onUnauthorized
@@ -5606,7 +5669,7 @@ export function PhotoCatalogView({
                   </div>
                   <div className="photo-thumbnail-crop-instructions" role="status" aria-live="polite">
                     <strong>Choose collection thumbnail crop</strong>
-                    <span>Drag the square to move it. Drag a corner to resize. Press T to confirm, C or Esc to cancel.</span>
+                    <span>Drag the 4:3 frame to move it. Drag a corner to resize. Press T to confirm, C or Esc to cancel.</span>
                   </div>
                 </div>
               ) : null}

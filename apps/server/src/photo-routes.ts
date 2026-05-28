@@ -83,6 +83,10 @@ const PHOTO_HOME_STRIP_NAME_MAX_LENGTH = 120;
 const PHOTO_IMPORT_SKIPPED_FILE_RESPONSE_LIMIT = 25;
 const PHOTO_IMPORT_SKIPPED_FILE_MESSAGE_LIMIT = 6;
 const PHOTO_COLLECTION_THUMBNAIL_MIN_CROP_SIZE = 16;
+const PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_WIDTH = 4;
+const PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_HEIGHT = 3;
+const PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO =
+  PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_WIDTH / PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_HEIGHT;
 const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
 const ZIP64_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06064b50;
 const ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE = 0x07064b50;
@@ -359,23 +363,38 @@ function readPhotoCollectionThumbnailCrop(value: unknown): PhotoThumbnailCrop | 
 
   const roundedWidth = Math.round(width);
   const roundedHeight = Math.round(height);
-  const squareTolerance = Math.max(2, Math.max(roundedWidth, roundedHeight) * 0.015);
+  const aspectTolerance = Math.max(2, Math.max(roundedWidth, roundedHeight) * 0.015);
   if (
     left < 0 ||
     top < 0 ||
     roundedWidth < PHOTO_COLLECTION_THUMBNAIL_MIN_CROP_SIZE ||
     roundedHeight < PHOTO_COLLECTION_THUMBNAIL_MIN_CROP_SIZE ||
-    Math.abs(roundedWidth - roundedHeight) > squareTolerance
+    Math.abs(roundedWidth - roundedHeight * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_RATIO) > aspectTolerance
   ) {
     return null;
   }
 
-  const squareSize = Math.max(PHOTO_COLLECTION_THUMBNAIL_MIN_CROP_SIZE, Math.min(roundedWidth, roundedHeight));
+  const normalizedAspectScale = Math.floor(
+    Math.min(
+      roundedWidth / PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_WIDTH,
+      roundedHeight / PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_HEIGHT
+    )
+  );
+  const normalizedWidth = normalizedAspectScale * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_WIDTH;
+  const normalizedHeight = normalizedAspectScale * PHOTO_COLLECTION_THUMBNAIL_CROP_ASPECT_HEIGHT;
+
+  if (
+    normalizedWidth < PHOTO_COLLECTION_THUMBNAIL_MIN_CROP_SIZE ||
+    normalizedHeight < PHOTO_COLLECTION_THUMBNAIL_MIN_CROP_SIZE
+  ) {
+    return null;
+  }
+
   return {
-    left: Math.max(0, Math.round(left)),
-    top: Math.max(0, Math.round(top)),
-    width: squareSize,
-    height: squareSize
+    left: Math.max(0, Math.round(left) + Math.round((roundedWidth - normalizedWidth) / 2)),
+    top: Math.max(0, Math.round(top) + Math.round((roundedHeight - normalizedHeight) / 2)),
+    width: normalizedWidth,
+    height: normalizedHeight
   };
 }
 
@@ -2596,7 +2615,7 @@ export function registerPhotoRoutes(app: FastifyInstance, options: PhotoRoutesOp
     if (body.crop !== undefined && body.crop !== null) {
       const crop = readPhotoCollectionThumbnailCrop(body.crop);
       if (!crop) {
-        reply.code(400).send({ message: 'A valid square thumbnail crop is required.' });
+        reply.code(400).send({ message: 'A valid 4:3 thumbnail crop is required.' });
         return;
       }
 
