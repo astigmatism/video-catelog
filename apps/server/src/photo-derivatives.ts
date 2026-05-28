@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
@@ -33,6 +34,13 @@ export type GeneratedPhotoThumbnail = {
   sizeBytes: number;
   width: number | null;
   height: number | null;
+};
+
+export type PhotoThumbnailCrop = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 };
 
 type BmpHeader = {
@@ -577,10 +585,24 @@ export function createPhotoThumbnailStoredName(originalStoredName: string): stri
   return `${normalizeStoredNameForDerivative(originalStoredName)}-thumb${PHOTO_THUMBNAIL_EXTENSION}`;
 }
 
+export function createPhotoCollectionThumbnailStoredName(originalStoredName: string): string {
+  return `${normalizeStoredNameForDerivative(originalStoredName)}-collection-thumb-${randomUUID()}${PHOTO_THUMBNAIL_EXTENSION}`;
+}
+
+function normalizePhotoThumbnailCrop(crop: PhotoThumbnailCrop): PhotoThumbnailCrop {
+  const left = Math.max(0, Math.floor(crop.left));
+  const top = Math.max(0, Math.floor(crop.top));
+  const width = Math.max(1, Math.floor(crop.width));
+  const height = Math.max(1, Math.floor(crop.height));
+
+  return { left, top, width, height };
+}
+
 export async function generatePhotoThumbnailFile(input: PhotoThumbnailSourceInput & {
   config: AppConfig;
   collectionId: string;
   thumbnailStoredName: string;
+  crop?: PhotoThumbnailCrop | null;
 }): Promise<GeneratedPhotoThumbnail> {
   const thumbnailRoot = getPhotoThumbnailCollectionStorageRoot(input.config, input.collectionId);
   fs.mkdirSync(thumbnailRoot, { recursive: true });
@@ -595,8 +617,12 @@ export async function generatePhotoThumbnailFile(input: PhotoThumbnailSourceInpu
   let info: sharp.OutputInfo;
 
   try {
-    const thumbnail = await createSharpThumbnailInput(input)
-      .rotate()
+    const thumbnailPipeline = createSharpThumbnailInput(input).rotate();
+    if (input.crop) {
+      thumbnailPipeline.extract(normalizePhotoThumbnailCrop(input.crop));
+    }
+
+    const thumbnail = await thumbnailPipeline
       .resize({
         width: PHOTO_THUMBNAIL_MAX_EDGE,
         height: PHOTO_THUMBNAIL_MAX_EDGE,

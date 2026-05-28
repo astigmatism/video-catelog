@@ -69,12 +69,27 @@ export type UpdatePhotoThumbnailInput = {
   thumbnailHeight?: number | null;
 };
 
+export type UpdatePhotoCollectionThumbnailInput = {
+  thumbnailSourcePhotoId: string;
+  thumbnailRelativePath: string;
+  thumbnailMimeType: string;
+  thumbnailSizeBytes: number;
+  thumbnailWidth?: number | null;
+  thumbnailHeight?: number | null;
+};
+
 type PhotoCollectionRow = {
   id: string;
   name: string;
   normalized_name: string;
   description: string | null;
   cover_photo_id: string | null;
+  thumbnail_source_photo_id: string | null;
+  thumbnail_relative_path: string | null;
+  thumbnail_mime_type: string | null;
+  thumbnail_size_bytes: number | string | null;
+  thumbnail_width: number | string | null;
+  thumbnail_height: number | string | null;
   view_count: number | string;
   last_viewed_at: Date | string | null;
   created_at: Date | string;
@@ -477,6 +492,12 @@ function createCollectionFromInput(input: CreatePhotoCollectionInput): PhotoColl
     description: normalizeCollectionDescription(input.description),
     coverPhotoId: null,
     coverPhoto: null,
+    thumbnailSourcePhotoId: null,
+    thumbnailRelativePath: null,
+    thumbnailMimeType: null,
+    thumbnailSizeBytes: null,
+    thumbnailWidth: null,
+    thumbnailHeight: null,
     photoCount: 0,
     favoritePhotoIds: [],
     totalSizeBytes: 0,
@@ -520,6 +541,15 @@ function hydratePhotoCollectionFromRow(row: PhotoCollectionRow): PhotoCollection
     description: row.description,
     coverPhotoId: row.cover_photo_id,
     coverPhoto: null,
+    thumbnailSourcePhotoId: row.thumbnail_source_photo_id,
+    thumbnailRelativePath: row.thumbnail_relative_path,
+    thumbnailMimeType: row.thumbnail_mime_type,
+    thumbnailSizeBytes:
+      row.thumbnail_size_bytes === null || row.thumbnail_size_bytes === undefined
+        ? null
+        : normalizeNonNegativeInteger(row.thumbnail_size_bytes),
+    thumbnailWidth: normalizeNullablePositiveDimension(row.thumbnail_width),
+    thumbnailHeight: normalizeNullablePositiveDimension(row.thumbnail_height),
     photoCount: 0,
     favoritePhotoIds: [],
     totalSizeBytes: 0,
@@ -767,7 +797,8 @@ export class PhotoCatalogStore {
 
   async setCollectionCoverPhoto(
     collectionId: string,
-    photoId: string
+    photoId: string,
+    thumbnail: UpdatePhotoCollectionThumbnailInput | null = null
   ): Promise<PhotoCollection | undefined> {
     this.assertInitialized();
 
@@ -779,10 +810,23 @@ export class PhotoCatalogStore {
         return undefined;
       }
 
+      if (thumbnail && thumbnail.thumbnailSourcePhotoId !== coverPhoto.id) {
+        return undefined;
+      }
+
       const updatedAt = new Date().toISOString();
       const updatedCollection = this.createCollectionSummary({
         ...currentCollection,
         coverPhotoId: coverPhoto.id,
+        thumbnailSourcePhotoId: thumbnail?.thumbnailSourcePhotoId ?? null,
+        thumbnailRelativePath: thumbnail?.thumbnailRelativePath ?? null,
+        thumbnailMimeType: thumbnail?.thumbnailMimeType ?? null,
+        thumbnailSizeBytes:
+          thumbnail?.thumbnailSizeBytes === null || thumbnail?.thumbnailSizeBytes === undefined
+            ? null
+            : normalizeNonNegativeInteger(thumbnail.thumbnailSizeBytes),
+        thumbnailWidth: normalizeNullablePositiveDimension(thumbnail?.thumbnailWidth),
+        thumbnailHeight: normalizeNullablePositiveDimension(thumbnail?.thumbnailHeight),
         updatedAt
       });
 
@@ -1278,6 +1322,12 @@ export class PhotoCatalogStore {
             normalized_name,
             description,
             cover_photo_id,
+            thumbnail_source_photo_id,
+            thumbnail_relative_path,
+            thumbnail_mime_type,
+            thumbnail_size_bytes,
+            thumbnail_width,
+            thumbnail_height,
             view_count,
             last_viewed_at,
             created_at,
@@ -1671,12 +1721,21 @@ export class PhotoCatalogStore {
           normalized_name,
           description,
           cover_photo_id,
+          thumbnail_source_photo_id,
+          thumbnail_relative_path,
+          thumbnail_mime_type,
+          thumbnail_size_bytes,
+          thumbnail_width,
+          thumbnail_height,
           view_count,
           last_viewed_at,
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::timestamptz)
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+          $12, $13::timestamptz, $14::timestamptz, $15::timestamptz
+        )
       `,
       [
         collection.id,
@@ -1684,6 +1743,12 @@ export class PhotoCatalogStore {
         collection.normalizedName,
         collection.description,
         collection.coverPhotoId,
+        collection.thumbnailSourcePhotoId,
+        collection.thumbnailRelativePath,
+        collection.thumbnailMimeType,
+        collection.thumbnailSizeBytes,
+        collection.thumbnailWidth,
+        collection.thumbnailHeight,
         collection.viewCount,
         collection.lastViewedAt,
         collection.createdAt,
@@ -1711,6 +1776,12 @@ export class PhotoCatalogStore {
           normalized_name,
           description,
           cover_photo_id,
+          thumbnail_source_photo_id,
+          thumbnail_relative_path,
+          thumbnail_mime_type,
+          thumbnail_size_bytes,
+          thumbnail_width,
+          thumbnail_height,
           view_count,
           last_viewed_at,
           created_at,
@@ -1756,7 +1827,13 @@ export class PhotoCatalogStore {
       `
         UPDATE photo_collections pc
         SET cover_photo_id = $2,
-            updated_at = $3::timestamptz
+            thumbnail_source_photo_id = $3,
+            thumbnail_relative_path = $4,
+            thumbnail_mime_type = $5,
+            thumbnail_size_bytes = $6,
+            thumbnail_width = $7,
+            thumbnail_height = $8,
+            updated_at = $9::timestamptz
         WHERE pc.id = $1
           AND EXISTS (
             SELECT 1
@@ -1770,12 +1847,28 @@ export class PhotoCatalogStore {
           normalized_name,
           description,
           cover_photo_id,
+          thumbnail_source_photo_id,
+          thumbnail_relative_path,
+          thumbnail_mime_type,
+          thumbnail_size_bytes,
+          thumbnail_width,
+          thumbnail_height,
           view_count,
           last_viewed_at,
           created_at,
           updated_at
       `,
-      [collection.id, collection.coverPhotoId, collection.updatedAt]
+      [
+        collection.id,
+        collection.coverPhotoId,
+        collection.thumbnailSourcePhotoId,
+        collection.thumbnailRelativePath,
+        collection.thumbnailMimeType,
+        collection.thumbnailSizeBytes,
+        collection.thumbnailWidth,
+        collection.thumbnailHeight,
+        collection.updatedAt
+      ]
     );
 
     return result.rows[0] ? hydratePhotoCollectionFromRow(result.rows[0]) : undefined;

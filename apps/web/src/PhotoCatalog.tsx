@@ -56,6 +56,12 @@ export type PhotoCollection = {
   description: string | null;
   coverPhotoId: string | null;
   coverPhoto: Photo | null;
+  thumbnailSourcePhotoId: string | null;
+  thumbnailRelativePath: string | null;
+  thumbnailMimeType: string | null;
+  thumbnailSizeBytes: number | null;
+  thumbnailWidth: number | null;
+  thumbnailHeight: number | null;
   photoCount: number;
   favoritePhotoIds: string[];
   totalSizeBytes: number;
@@ -340,6 +346,12 @@ export function hydratePhotoCollection(value: unknown): PhotoCollection | null {
     description: readNullableString(value.description),
     coverPhotoId: readNullableString(value.coverPhotoId),
     coverPhoto,
+    thumbnailSourcePhotoId: readNullableString(value.thumbnailSourcePhotoId),
+    thumbnailRelativePath: readNullableString(value.thumbnailRelativePath),
+    thumbnailMimeType: readNullableString(value.thumbnailMimeType),
+    thumbnailSizeBytes: readNullablePositiveNumber(value.thumbnailSizeBytes),
+    thumbnailWidth: readNullablePositiveNumber(value.thumbnailWidth),
+    thumbnailHeight: readNullablePositiveNumber(value.thumbnailHeight),
     photoCount: Math.max(0, Math.floor(readNumber(value.photoCount))),
     favoritePhotoIds: uniqueStrings(
       rawFavoritePhotoIds
@@ -793,6 +805,9 @@ const PHOTO_VIEWER_MAX_ZOOM = 4;
 const PHOTO_VIEWER_WHEEL_ZOOM_FACTOR = 1.12;
 const PHOTO_VIEWER_MIN_WHEEL_ZOOM_STEPS = 0.5;
 const PHOTO_VIEWER_MAX_WHEEL_ZOOM_STEPS = 3;
+const PHOTO_COLLECTION_THUMBNAIL_CROP_MIN_SOURCE_SIZE = 32;
+const PHOTO_COLLECTION_THUMBNAIL_CROP_INITIAL_SCALE = 0.82;
+const PHOTO_COLLECTION_THUMBNAIL_CROP_KEYBOARD_NUDGE_PX = 12;
 
 type PhotoViewerFitMode = 'fit' | 'fill';
 
@@ -804,6 +819,43 @@ type PhotoViewerSize = {
 type PhotoViewerPan = {
   x: number;
   y: number;
+};
+
+type PhotoThumbnailCropBox = {
+  x: number;
+  y: number;
+  size: number;
+};
+
+type PhotoThumbnailCropSelectionState = {
+  photoId: string;
+  crop: PhotoThumbnailCropBox;
+};
+
+type PhotoThumbnailCropResizeHandle = 'nw' | 'ne' | 'sw' | 'se';
+
+type PhotoThumbnailCropDragState = {
+  pointerId: number;
+  action: 'move' | 'resize';
+  handle?: PhotoThumbnailCropResizeHandle;
+  startClientX: number;
+  startClientY: number;
+  startCrop: PhotoThumbnailCropBox;
+};
+
+type PhotoThumbnailCropPreviousViewState = {
+  layoutMode: PhotoViewerLayoutMode;
+  fitMode: PhotoViewerFitMode;
+  zoom: number;
+  pan: PhotoViewerPan;
+  wasSlideshowActive: boolean;
+};
+
+type PhotoViewerImageRect = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 };
 
 type PhotoViewerTransitionState = {
@@ -1167,6 +1219,97 @@ function calculatePhotoViewerPanLimit(
   };
 }
 
+function calculatePhotoViewerImageRect(
+  renderedSize: PhotoViewerSize | null,
+  stageSize: PhotoViewerSize,
+  pan: PhotoViewerPan
+): PhotoViewerImageRect | null {
+  if (!renderedSize || renderedSize.width <= 0 || renderedSize.height <= 0 || stageSize.width <= 0 || stageSize.height <= 0) {
+    return null;
+  }
+
+  return {
+    left: (stageSize.width - renderedSize.width) / 2 + pan.x,
+    top: (stageSize.height - renderedSize.height) / 2 + pan.y,
+    width: renderedSize.width,
+    height: renderedSize.height
+  };
+}
+
+function clampPhotoThumbnailCropBox(crop: PhotoThumbnailCropBox, naturalSize: PhotoViewerSize): PhotoThumbnailCropBox {
+  const maxSquareSize = Math.max(1, Math.min(naturalSize.width, naturalSize.height));
+  const minSquareSize = Math.min(PHOTO_COLLECTION_THUMBNAIL_CROP_MIN_SOURCE_SIZE, maxSquareSize);
+  const size = Math.max(minSquareSize, Math.min(maxSquareSize, Number(crop.size.toFixed(2))));
+
+  return {
+    x: Math.max(0, Math.min(naturalSize.width - size, Number(crop.x.toFixed(2)))),
+    y: Math.max(0, Math.min(naturalSize.height - size, Number(crop.y.toFixed(2)))),
+    size
+  };
+}
+
+function createInitialPhotoThumbnailCropBox(naturalSize: PhotoViewerSize): PhotoThumbnailCropBox {
+  const maxSquareSize = Math.max(1, Math.min(naturalSize.width, naturalSize.height));
+  const size = Math.max(
+    Math.min(PHOTO_COLLECTION_THUMBNAIL_CROP_MIN_SOURCE_SIZE, maxSquareSize),
+    maxSquareSize * PHOTO_COLLECTION_THUMBNAIL_CROP_INITIAL_SCALE
+  );
+
+  return clampPhotoThumbnailCropBox(
+    {
+      x: (naturalSize.width - size) / 2,
+      y: (naturalSize.height - size) / 2,
+      size
+    },
+    naturalSize
+  );
+}
+
+function resizePhotoThumbnailCropBox(
+  dragState: PhotoThumbnailCropDragState,
+  deltaX: number,
+  deltaY: number,
+  naturalSize: PhotoViewerSize
+): PhotoThumbnailCropBox {
+  const { startCrop, handle } = dragState;
+  if (!handle) {
+    return clampPhotoThumbnailCropBox(startCrop, naturalSize);
+  }
+
+  const minSquareSize = Math.min(
+    PHOTO_COLLECTION_THUMBNAIL_CROP_MIN_SOURCE_SIZE,
+    Math.max(1, Math.min(naturalSize.width, naturalSize.height))
+  );
+
+  if (handle === 'se') {
+    const maxSize = Math.min(naturalSize.width - startCrop.x, naturalSize.height - startCrop.y);
+    const size = Math.max(minSquareSize, Math.min(maxSize, startCrop.size + Math.max(deltaX, deltaY)));
+    return clampPhotoThumbnailCropBox({ ...startCrop, size }, naturalSize);
+  }
+
+  if (handle === 'nw') {
+    const fixedRight = startCrop.x + startCrop.size;
+    const fixedBottom = startCrop.y + startCrop.size;
+    const maxSize = Math.min(fixedRight, fixedBottom);
+    const size = Math.max(minSquareSize, Math.min(maxSize, startCrop.size + Math.max(-deltaX, -deltaY)));
+    return clampPhotoThumbnailCropBox({ x: fixedRight - size, y: fixedBottom - size, size }, naturalSize);
+  }
+
+  if (handle === 'ne') {
+    const fixedLeft = startCrop.x;
+    const fixedBottom = startCrop.y + startCrop.size;
+    const maxSize = Math.min(naturalSize.width - fixedLeft, fixedBottom);
+    const size = Math.max(minSquareSize, Math.min(maxSize, startCrop.size + Math.max(deltaX, -deltaY)));
+    return clampPhotoThumbnailCropBox({ x: fixedLeft, y: fixedBottom - size, size }, naturalSize);
+  }
+
+  const fixedRight = startCrop.x + startCrop.size;
+  const fixedTop = startCrop.y;
+  const maxSize = Math.min(fixedRight, naturalSize.height - fixedTop);
+  const size = Math.max(minSquareSize, Math.min(maxSize, startCrop.size + Math.max(-deltaX, deltaY)));
+  return clampPhotoThumbnailCropBox({ x: fixedRight - size, y: fixedTop, size }, naturalSize);
+}
+
 function getPhotoViewerNaturalSizeFromPhoto(photo: Photo): PhotoViewerSize | null {
   const width = normalizePhotoViewerDimension(photo.width);
   const height = normalizePhotoViewerDimension(photo.height);
@@ -1408,6 +1551,20 @@ function getPhotoUrlCandidates(photo: Photo, source: PhotoImageSource): string[]
 
 function getPhotoUrl(photo: Photo, source: PhotoImageSource): string {
   return getPhotoUrlCandidates(photo, source)[0] ?? '';
+}
+
+function getPhotoCollectionThumbnailUrl(collection: PhotoCollection): string | null {
+  if (!collection.thumbnailRelativePath) {
+    return null;
+  }
+
+  const version = encodeURIComponent(
+    collection.thumbnailRelativePath ||
+      (collection.thumbnailSizeBytes ? String(collection.thumbnailSizeBytes) : '') ||
+      collection.updatedAt ||
+      collection.id
+  );
+  return `/api/photos/collections/${encodeURIComponent(collection.id)}/thumbnail?v=${version}`;
 }
 
 function formatDate(value: string | null): string {
@@ -2351,6 +2508,7 @@ function PhotoCollectionCard({
   const tagControlRef = useRef<HTMLDivElement | null>(null);
   const tagPopoverRef = useRef<HTMLDivElement | null>(null);
   const coverPhoto = collection.coverPhoto;
+  const collectionThumbnailUrl = getPhotoCollectionThumbnailUrl(collection);
   const cardSubtitle = `${pluralize(collection.photoCount, 'photo')} · ${formatBytes(collection.totalSizeBytes)} · ${pluralize(
     collection.viewCount,
     'view'
@@ -2399,7 +2557,15 @@ function PhotoCollectionCard({
         title={`Open ${collection.name}`}
       >
         <div className="photo-collection-cover">
-          {coverPhoto ? (
+          {collectionThumbnailUrl ? (
+            <img
+              className="photo-collection-thumbnail-image"
+              src={collectionThumbnailUrl}
+              alt=""
+              loading={thumbnailLoading ?? 'lazy'}
+              decoding="async"
+            />
+          ) : coverPhoto ? (
             <PhotoImage photo={coverPhoto} source="thumbnail" alt="" loading={thumbnailLoading ?? 'lazy'} />
           ) : (
             <EmptyPhotoCover />
@@ -2915,6 +3081,8 @@ export function PhotoCatalogView({
     startClientY: number;
     startPan: PhotoViewerPan;
   } | null>(null);
+  const photoThumbnailCropDragRef = useRef<PhotoThumbnailCropDragState | null>(null);
+  const photoThumbnailCropPreviousViewRef = useRef<PhotoThumbnailCropPreviousViewState | null>(null);
   const [arePhotoViewerControlsVisible, setArePhotoViewerControlsVisible] = useState(true);
   const [isPhotoViewerSlideshowActive, setIsPhotoViewerSlideshowActive] = useState(false);
   const [photoViewerRandomizedSlideshowPhotoIds, setPhotoViewerRandomizedSlideshowPhotoIds] = useState<string[] | null>(null);
@@ -2943,6 +3111,8 @@ export function PhotoCatalogView({
   });
   const [photoViewerNaturalSize, setPhotoViewerNaturalSize] = useState<PhotoViewerSize | null>(null);
   const [isPhotoViewerPanning, setIsPhotoViewerPanning] = useState(false);
+  const [photoThumbnailCropSelection, setPhotoThumbnailCropSelection] =
+    useState<PhotoThumbnailCropSelectionState | null>(null);
   const [isCollectionThumbnailBusy, setIsCollectionThumbnailBusy] = useState(false);
   const [infoCollectionId, setInfoCollectionId] = useState<string | null>(null);
   const [photoHomeStripRandomSeed, setPhotoHomeStripRandomSeed] = useState(() => createPhotoCollectionRandomSeed());
@@ -3056,11 +3226,16 @@ export function PhotoCatalogView({
       clearPhotoViewerControlsHideTimer();
       clearPhotoViewerSlideshowTimer();
       clearPhotoViewerTransitionTimer();
+      photoThumbnailCropDragRef.current = null;
       setPhotoViewerTransitionState(null);
       photoViewerCloseInProgressRef.current = false;
       preserveControlsVisibilityForNextPhotoChangeRef.current = false;
       photoViewerPendingNavigationOffsetRef.current = null;
       photoViewerDragRef.current = null;
+      photoThumbnailCropDragRef.current = null;
+      restorePhotoThumbnailCropPreviousView();
+      photoThumbnailCropPreviousViewRef.current = null;
+      setPhotoThumbnailCropSelection(null);
       setPhotoViewerFilmStripVirtualCenter(null);
       setPhotoViewerFitMode('fit');
       setPhotoViewerRandomizedSlideshowPhotoIds(null);
@@ -3070,6 +3245,11 @@ export function PhotoCatalogView({
     }
 
     photoViewerCloseInProgressRef.current = false;
+    photoThumbnailCropDragRef.current = null;
+    photoThumbnailCropPreviousViewRef.current = null;
+    setPhotoThumbnailCropSelection((currentSelection) =>
+      currentSelection?.photoId === viewerPhotoId ? currentSelection : null
+    );
     const shouldPreserveControlsVisibility = preserveControlsVisibilityForNextPhotoChangeRef.current;
     preserveControlsVisibilityForNextPhotoChangeRef.current = false;
 
@@ -3082,6 +3262,7 @@ export function PhotoCatalogView({
     return () => {
       clearPhotoViewerSlideshowTimer();
       photoViewerDragRef.current = null;
+      photoThumbnailCropDragRef.current = null;
       setIsPhotoViewerPanning(false);
     };
   }, [viewerPhotoId]);
@@ -3535,6 +3716,10 @@ export function PhotoCatalogView({
       clearPhotoViewerTransitionTimer();
       setPhotoViewerTransitionState(null);
       photoViewerDragRef.current = null;
+      photoThumbnailCropDragRef.current = null;
+      restorePhotoThumbnailCropPreviousView();
+      photoThumbnailCropPreviousViewRef.current = null;
+      setPhotoThumbnailCropSelection(null);
       setIsPhotoViewerSlideshowActive(false);
       setIsPhotoViewerPanning(false);
 
@@ -3574,6 +3759,11 @@ export function PhotoCatalogView({
     : null;
   const isCollectionThumbnailActionAvailable =
     viewerPhoto !== null && detail !== null && detail.collection.id === viewerPhoto.collectionId;
+  const activePhotoThumbnailCropSelection =
+    photoThumbnailCropSelection !== null && photoThumbnailCropSelection.photoId === viewerPhoto?.id
+      ? photoThumbnailCropSelection
+      : null;
+  const isPhotoThumbnailCropModeActive = activePhotoThumbnailCropSelection !== null;
   const isPhotoGridRandomSortActive = photoGridSortCategory === 'random';
   const photoGridSortDirectionLabel = photoGridSortDirection === 'asc' ? 'ascending' : 'descending';
   const emptyPhotoStateTitle = isPhotoFavoritesOnly ? 'No favorite photos' : 'No matching photos';
@@ -3655,11 +3845,18 @@ export function PhotoCatalogView({
       objectFit: photoViewerRenderedSize ? 'fill' : photoViewerEffectiveFitMode === 'fit' ? 'contain' : 'cover',
       transform,
       transformOrigin: 'center center',
-      cursor: isPhotoViewerPanning ? 'grabbing' : isPhotoViewerPanAvailable ? 'grab' : 'default',
-      touchAction: isPhotoViewerPanAvailable ? 'none' : 'auto',
+      cursor: isPhotoThumbnailCropModeActive
+        ? 'default'
+        : isPhotoViewerPanning
+          ? 'grabbing'
+          : isPhotoViewerPanAvailable
+            ? 'grab'
+            : 'default',
+      touchAction: isPhotoThumbnailCropModeActive ? 'none' : isPhotoViewerPanAvailable ? 'none' : 'auto',
       willChange: 'transform, width, height'
     };
   }, [
+    isPhotoThumbnailCropModeActive,
     isPhotoViewerPanAvailable,
     isPhotoViewerPanning,
     photoViewerEffectiveFitMode,
@@ -3668,6 +3865,41 @@ export function PhotoCatalogView({
     photoViewerPanOffset.y,
     photoViewerRenderedSize
   ]);
+
+  const photoThumbnailCropImageRect = useMemo(
+    () => calculatePhotoViewerImageRect(photoViewerRenderedSize, photoViewerPrimaryStageSize, photoViewerPanOffset),
+    [photoViewerPanOffset, photoViewerPrimaryStageSize, photoViewerRenderedSize]
+  );
+
+  const photoThumbnailCropImageBoundsStyle = useMemo<CSSProperties | null>(() => {
+    if (!photoThumbnailCropImageRect) {
+      return null;
+    }
+
+    return {
+      left: `${photoThumbnailCropImageRect.left}px`,
+      top: `${photoThumbnailCropImageRect.top}px`,
+      width: `${photoThumbnailCropImageRect.width}px`,
+      height: `${photoThumbnailCropImageRect.height}px`
+    };
+  }, [photoThumbnailCropImageRect]);
+
+  const photoThumbnailCropBoxStyle = useMemo<CSSProperties | null>(() => {
+    if (!activePhotoThumbnailCropSelection || !photoViewerIntrinsicSize || !photoThumbnailCropImageRect) {
+      return null;
+    }
+
+    const crop = clampPhotoThumbnailCropBox(activePhotoThumbnailCropSelection.crop, photoViewerIntrinsicSize);
+    const scaleX = photoThumbnailCropImageRect.width / photoViewerIntrinsicSize.width;
+    const scaleY = photoThumbnailCropImageRect.height / photoViewerIntrinsicSize.height;
+
+    return {
+      left: `${photoThumbnailCropImageRect.left + crop.x * scaleX}px`,
+      top: `${photoThumbnailCropImageRect.top + crop.y * scaleY}px`,
+      width: `${crop.size * scaleX}px`,
+      height: `${crop.size * scaleY}px`
+    };
+  }, [activePhotoThumbnailCropSelection, photoThumbnailCropImageRect, photoViewerIntrinsicSize]);
 
   const photoViewerFrameStyle = useMemo<CSSProperties>(
     () =>
@@ -3769,6 +4001,11 @@ export function PhotoCatalogView({
 
   function schedulePhotoViewerControlsHide(): void {
     clearPhotoViewerControlsHideTimer();
+    if (isPhotoThumbnailCropModeActive) {
+      setArePhotoViewerControlsVisible(true);
+      return;
+    }
+
     photoViewerControlsHideTimerRef.current = window.setTimeout(() => {
       const activeElement = document.activeElement;
       const isFocusWithinHeader =
@@ -3785,7 +4022,9 @@ export function PhotoCatalogView({
 
   function notePhotoViewerActivity(): void {
     setArePhotoViewerControlsVisible((currentValue) => (currentValue ? currentValue : true));
-    schedulePhotoViewerControlsHide();
+    if (!isPhotoThumbnailCropModeActive) {
+      schedulePhotoViewerControlsHide();
+    }
   }
 
   function focusPhotoViewerOverlay(): void {
@@ -3802,6 +4041,10 @@ export function PhotoCatalogView({
   }
 
   function applyPhotoViewerLayoutMode(nextMode: PhotoViewerLayoutMode): void {
+    if (isPhotoThumbnailCropModeActive) {
+      return;
+    }
+
     clearPhotoViewerTransitionTimer();
     setPhotoViewerTransitionState(null);
     setPhotoViewerLayoutMode(nextMode);
@@ -3809,6 +4052,10 @@ export function PhotoCatalogView({
   }
 
   function cyclePhotoViewerViewMode(): void {
+    if (isPhotoThumbnailCropModeActive) {
+      return;
+    }
+
     notePhotoViewerActivity();
     clearPhotoViewerTransitionTimer();
     setPhotoViewerTransitionState(null);
@@ -3827,6 +4074,10 @@ export function PhotoCatalogView({
     clearPhotoViewerTransitionTimer();
     setPhotoViewerTransitionState(null);
     photoViewerDragRef.current = null;
+    photoThumbnailCropDragRef.current = null;
+    restorePhotoThumbnailCropPreviousView();
+    photoThumbnailCropPreviousViewRef.current = null;
+    setPhotoThumbnailCropSelection(null);
     setIsPhotoViewerSlideshowActive(false);
     setIsPhotoViewerPanning(false);
 
@@ -3852,11 +4103,19 @@ export function PhotoCatalogView({
   }
 
   function togglePhotoViewerFitMode(): void {
+    if (isPhotoThumbnailCropModeActive) {
+      return;
+    }
+
     notePhotoViewerActivity();
     setPhotoViewerFitMode((currentValue) => (currentValue === 'fit' ? 'fill' : 'fit'));
   }
 
   function togglePhotoViewerSlideshow(): void {
+    if (isPhotoThumbnailCropModeActive) {
+      return;
+    }
+
     notePhotoViewerActivity();
     if (!canPhotoViewerSlideshowAdvance) {
       clearPhotoViewerSlideshowTimer();
@@ -3868,11 +4127,19 @@ export function PhotoCatalogView({
   }
 
   function showPreviousViewerPhoto(): void {
+    if (isPhotoThumbnailCropModeActive) {
+      return;
+    }
+
     notePhotoViewerActivity();
     openViewerPhotoAtOffset(-1, { useSlideshowTransition: isPhotoViewerSlideshowActive });
   }
 
   function showNextViewerPhoto(): void {
+    if (isPhotoThumbnailCropModeActive) {
+      return;
+    }
+
     notePhotoViewerActivity();
     openViewerPhotoAtOffset(1, { useSlideshowTransition: isPhotoViewerSlideshowActive });
   }
@@ -3918,6 +4185,11 @@ export function PhotoCatalogView({
   }
 
   function handlePhotoViewerLayoutModeChange(event: ChangeEvent<HTMLSelectElement>): void {
+    if (isPhotoThumbnailCropModeActive) {
+      event.currentTarget.value = photoViewerLayoutMode;
+      return;
+    }
+
     notePhotoViewerActivity();
     event.currentTarget.blur();
     const nextMode = event.currentTarget.value;
@@ -3928,11 +4200,84 @@ export function PhotoCatalogView({
     applyPhotoViewerLayoutMode(nextMode);
   }
 
-  async function handleSetCollectionThumbnail(): Promise<void> {
+  function restorePhotoThumbnailCropPreviousView(): void {
+    const previousView = photoThumbnailCropPreviousViewRef.current;
+    photoThumbnailCropPreviousViewRef.current = null;
+
+    if (!previousView) {
+      return;
+    }
+
+    setPhotoViewerLayoutMode(previousView.layoutMode);
+    setPhotoViewerFitMode(previousView.fitMode);
+    setPhotoViewerZoom(previousView.zoom);
+    setPhotoViewerPan(previousView.pan);
+    setIsPhotoViewerSlideshowActive(previousView.wasSlideshowActive && canPhotoViewerSlideshowAdvance);
+  }
+
+  function exitPhotoThumbnailCropSelection(options: { restoreView?: boolean } = {}): void {
+    photoThumbnailCropDragRef.current = null;
+    setPhotoThumbnailCropSelection(null);
+    setIsPhotoViewerPanning(false);
+    setArePhotoViewerControlsVisible(true);
+
+    if (options.restoreView !== false) {
+      restorePhotoThumbnailCropPreviousView();
+    } else {
+      photoThumbnailCropPreviousViewRef.current = null;
+    }
+
+    focusPhotoViewerOverlay();
+  }
+
+  function beginPhotoThumbnailCropSelection(): void {
     if (!detail || !viewerPhoto || isCollectionThumbnailBusy) {
       return;
     }
 
+    if (!photoViewerNaturalSize) {
+      setNotice({ tone: 'error', text: 'The full-resolution photo is still loading and cannot be cropped yet.' });
+      return;
+    }
+
+    notePhotoViewerActivity();
+    setNotice(null);
+    clearPhotoViewerControlsHideTimer();
+    clearPhotoViewerSlideshowTimer();
+    clearPhotoViewerTransitionTimer();
+    photoViewerDragRef.current = null;
+    photoThumbnailCropDragRef.current = null;
+    setPhotoViewerTransitionState(null);
+    setIsPhotoViewerPanning(false);
+
+    photoThumbnailCropPreviousViewRef.current = {
+      layoutMode: photoViewerLayoutMode,
+      fitMode: photoViewerFitMode,
+      zoom: photoViewerZoom,
+      pan: photoViewerPanOffset,
+      wasSlideshowActive: isPhotoViewerSlideshowActive
+    };
+
+    setIsPhotoViewerSlideshowActive(false);
+    setPhotoViewerLayoutMode('standard');
+    setPhotoViewerFitMode('fit');
+    setPhotoViewerZoom(1);
+    setPhotoViewerPan({ x: 0, y: 0 });
+    setArePhotoViewerControlsVisible(true);
+    setPhotoThumbnailCropSelection({
+      photoId: viewerPhoto.id,
+      crop: createInitialPhotoThumbnailCropBox(photoViewerNaturalSize)
+    });
+    focusPhotoViewerOverlay();
+  }
+
+  async function confirmPhotoThumbnailCropSelection(): Promise<void> {
+    const cropSourceSize = photoViewerNaturalSize ?? photoViewerIntrinsicSize;
+    if (!detail || !viewerPhoto || !activePhotoThumbnailCropSelection || !cropSourceSize || isCollectionThumbnailBusy) {
+      return;
+    }
+
+    const crop = clampPhotoThumbnailCropBox(activePhotoThumbnailCropSelection.crop, cropSourceSize);
     notePhotoViewerActivity();
     setIsCollectionThumbnailBusy(true);
     setNotice(null);
@@ -3943,7 +4288,15 @@ export function PhotoCatalogView({
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ photoId: viewerPhoto.id })
+          body: JSON.stringify({
+            photoId: viewerPhoto.id,
+            crop: {
+              left: Math.round(crop.x),
+              top: Math.round(crop.y),
+              width: Math.round(crop.size),
+              height: Math.round(crop.size)
+            }
+          })
         },
         onUnauthorized
       );
@@ -3958,7 +4311,8 @@ export function PhotoCatalogView({
           : current
       );
       onCollectionUpdated(updatedCollection);
-      setNotice({ tone: 'success', text: `Set “${viewerPhoto.originalName}” as the collection thumbnail.` });
+      exitPhotoThumbnailCropSelection();
+      setNotice({ tone: 'success', text: `Set the selected crop of “${viewerPhoto.originalName}” as the collection thumbnail.` });
     } catch (error) {
       setNotice({
         tone: 'error',
@@ -3967,6 +4321,15 @@ export function PhotoCatalogView({
     } finally {
       setIsCollectionThumbnailBusy(false);
     }
+  }
+
+  async function handleSetCollectionThumbnail(): Promise<void> {
+    if (isPhotoThumbnailCropModeActive) {
+      await confirmPhotoThumbnailCropSelection();
+      return;
+    }
+
+    beginPhotoThumbnailCropSelection();
   }
 
   function handlePhotoViewerImageLoad(event: SyntheticEvent<HTMLImageElement>): void {
@@ -3993,6 +4356,10 @@ export function PhotoCatalogView({
   function handlePhotoViewerWheel(event: ReactWheelEvent<HTMLDivElement>): void {
     notePhotoViewerActivity();
     event.preventDefault();
+
+    if (isPhotoThumbnailCropModeActive) {
+      return;
+    }
 
     const stageElement = photoViewerStageRef.current;
     const stageRect = stageElement?.getBoundingClientRect() ?? null;
@@ -4034,7 +4401,7 @@ export function PhotoCatalogView({
 
   function handlePhotoViewerImagePointerDown(event: ReactPointerEvent<HTMLImageElement>): void {
     notePhotoViewerActivity();
-    if (event.button !== 0 || !isPhotoViewerPanAvailable) {
+    if (isPhotoThumbnailCropModeActive || event.button !== 0 || !isPhotoViewerPanAvailable) {
       return;
     }
 
@@ -4092,6 +4459,135 @@ export function PhotoCatalogView({
 
     photoViewerDragRef.current = null;
     setIsPhotoViewerPanning(false);
+  }
+
+  function updatePhotoThumbnailCropSelection(updater: (crop: PhotoThumbnailCropBox) => PhotoThumbnailCropBox): void {
+    if (!viewerPhoto || !photoViewerIntrinsicSize) {
+      return;
+    }
+
+    setPhotoThumbnailCropSelection((currentSelection) => {
+      if (!currentSelection || currentSelection.photoId !== viewerPhoto.id) {
+        return currentSelection;
+      }
+
+      return {
+        ...currentSelection,
+        crop: clampPhotoThumbnailCropBox(updater(currentSelection.crop), photoViewerIntrinsicSize)
+      };
+    });
+  }
+
+  function nudgePhotoThumbnailCropSelection(deltaX: number, deltaY: number): void {
+    updatePhotoThumbnailCropSelection((crop) => ({
+      ...crop,
+      x: crop.x + deltaX,
+      y: crop.y + deltaY
+    }));
+  }
+
+  function handlePhotoThumbnailCropBoxPointerDown(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (event.button !== 0 || !activePhotoThumbnailCropSelection) {
+      return;
+    }
+
+    notePhotoViewerActivity();
+    event.preventDefault();
+    event.stopPropagation();
+
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is best-effort; dragging still works while the pointer remains over the overlay.
+    }
+
+    photoThumbnailCropDragRef.current = {
+      pointerId: event.pointerId,
+      action: 'move',
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startCrop: activePhotoThumbnailCropSelection.crop
+    };
+  }
+
+  function handlePhotoThumbnailCropHandlePointerDown(
+    handle: PhotoThumbnailCropResizeHandle,
+    event: ReactPointerEvent<HTMLButtonElement>
+  ): void {
+    if (event.button !== 0 || !activePhotoThumbnailCropSelection) {
+      return;
+    }
+
+    notePhotoViewerActivity();
+    event.preventDefault();
+    event.stopPropagation();
+
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is best-effort; dragging still works while the pointer remains over the overlay.
+    }
+
+    photoThumbnailCropDragRef.current = {
+      pointerId: event.pointerId,
+      action: 'resize',
+      handle,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startCrop: activePhotoThumbnailCropSelection.crop
+    };
+  }
+
+  function handlePhotoThumbnailCropPointerMove(event: ReactPointerEvent<HTMLDivElement>): void {
+    const dragState = photoThumbnailCropDragRef.current;
+    if (dragState === null || dragState.pointerId !== event.pointerId || !photoViewerIntrinsicSize || !photoThumbnailCropImageRect) {
+      return;
+    }
+
+    const scaleX = photoThumbnailCropImageRect.width / photoViewerIntrinsicSize.width;
+    const scaleY = photoThumbnailCropImageRect.height / photoViewerIntrinsicSize.height;
+    if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY) || scaleX <= 0 || scaleY <= 0) {
+      return;
+    }
+
+    notePhotoViewerActivity();
+    event.preventDefault();
+    event.stopPropagation();
+
+    const deltaX = (event.clientX - dragState.startClientX) / scaleX;
+    const deltaY = (event.clientY - dragState.startClientY) / scaleY;
+
+    updatePhotoThumbnailCropSelection(() =>
+      dragState.action === 'move'
+        ? {
+            ...dragState.startCrop,
+            x: dragState.startCrop.x + deltaX,
+            y: dragState.startCrop.y + deltaY
+          }
+        : resizePhotoThumbnailCropBox(dragState, deltaX, deltaY, photoViewerIntrinsicSize)
+    );
+  }
+
+  function handlePhotoThumbnailCropPointerUp(event: ReactPointerEvent<HTMLDivElement>): void {
+    const dragState = photoThumbnailCropDragRef.current;
+    if (dragState === null || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+
+    notePhotoViewerActivity();
+    event.preventDefault();
+    event.stopPropagation();
+
+    const pointerTarget = event.target;
+    if (pointerTarget instanceof HTMLElement) {
+      try {
+        pointerTarget.releasePointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture may already be released by the browser.
+      }
+    }
+
+    photoThumbnailCropDragRef.current = null;
   }
 
   function applyPhotoFavoriteUpdate(updatedPhoto: Photo, updatedCollection: PhotoCollection | null = null): void {
@@ -4370,7 +4866,7 @@ export function PhotoCatalogView({
     offset: number,
     options: { preserveControlsVisibility?: boolean; useSlideshowTransition?: boolean } = {}
   ): void {
-    if (!viewerPhoto || viewerOrderedPhotos.length === 0) {
+    if (isPhotoThumbnailCropModeActive || !viewerPhoto || viewerOrderedPhotos.length === 0) {
       return;
     }
 
@@ -4486,6 +4982,66 @@ export function PhotoCatalogView({
       return;
     }
 
+    const lowerKey = event.key.toLowerCase();
+    const hasShortcutModifier = event.altKey || event.ctrlKey || event.metaKey;
+    const isSpaceKey = !hasShortcutModifier && (event.key === ' ' || event.key === 'Spacebar' || event.code === 'Space');
+    const isFavoriteKey = !hasShortcutModifier && (lowerKey === 'l' || event.code === 'KeyL');
+    const isFitModeKey = !hasShortcutModifier && (lowerKey === 'f' || event.code === 'KeyF');
+    const isThumbnailKey = !hasShortcutModifier && (lowerKey === 't' || event.code === 'KeyT');
+    const isViewModeKey = !hasShortcutModifier && (lowerKey === 'v' || event.code === 'KeyV');
+    const isCancelCropKey = !hasShortcutModifier && (event.key === 'Escape' || lowerKey === 'c' || event.code === 'KeyC');
+    const isCloseKey = !hasShortcutModifier && (lowerKey === 'x' || event.code === 'KeyX');
+
+    if (isPhotoThumbnailCropModeActive) {
+      if (isThumbnailKey) {
+        event.preventDefault();
+        if (!event.repeat) {
+          void confirmPhotoThumbnailCropSelection();
+        }
+        return;
+      }
+
+      if (isCancelCropKey) {
+        event.preventDefault();
+        if (!event.repeat) {
+          exitPhotoThumbnailCropSelection();
+        }
+        return;
+      }
+
+      if (isCloseKey) {
+        event.preventDefault();
+        requestClosePhotoViewer();
+        return;
+      }
+
+      if (event.key.startsWith('Arrow')) {
+        event.preventDefault();
+        if (!event.repeat) {
+          const nudgeAmount = event.shiftKey
+            ? PHOTO_COLLECTION_THUMBNAIL_CROP_KEYBOARD_NUDGE_PX * 4
+            : PHOTO_COLLECTION_THUMBNAIL_CROP_KEYBOARD_NUDGE_PX;
+          if (event.key === 'ArrowLeft') {
+            nudgePhotoThumbnailCropSelection(-nudgeAmount, 0);
+          } else if (event.key === 'ArrowRight') {
+            nudgePhotoThumbnailCropSelection(nudgeAmount, 0);
+          } else if (event.key === 'ArrowUp') {
+            nudgePhotoThumbnailCropSelection(0, -nudgeAmount);
+          } else if (event.key === 'ArrowDown') {
+            nudgePhotoThumbnailCropSelection(0, nudgeAmount);
+          }
+        }
+        return;
+      }
+
+      if (isSpaceKey || isFavoriteKey || isFitModeKey || isViewModeKey) {
+        event.preventDefault();
+        return;
+      }
+
+      return;
+    }
+
     if (event.shiftKey && event.key.startsWith('Arrow')) {
       return;
     }
@@ -4502,9 +5058,6 @@ export function PhotoCatalogView({
       return;
     }
 
-    const lowerKey = event.key.toLowerCase();
-    const hasShortcutModifier = event.altKey || event.ctrlKey || event.metaKey;
-
     if (!event.shiftKey && !hasShortcutModifier && event.key === 'ArrowUp') {
       event.preventDefault();
       adjustPhotoViewerSlideshowDelay(-PHOTO_VIEWER_SLIDESHOW_DELAY_STEP_MS);
@@ -4516,11 +5069,6 @@ export function PhotoCatalogView({
       adjustPhotoViewerSlideshowDelay(PHOTO_VIEWER_SLIDESHOW_DELAY_STEP_MS);
       return;
     }
-    const isSpaceKey = !hasShortcutModifier && (event.key === ' ' || event.key === 'Spacebar' || event.code === 'Space');
-    const isFavoriteKey = !hasShortcutModifier && (lowerKey === 'l' || event.code === 'KeyL');
-    const isFitModeKey = !hasShortcutModifier && (lowerKey === 'f' || event.code === 'KeyF');
-    const isThumbnailKey = !hasShortcutModifier && (lowerKey === 't' || event.code === 'KeyT');
-    const isViewModeKey = !hasShortcutModifier && (lowerKey === 'v' || event.code === 'KeyV');
 
     if (isSpaceKey && !isKeyboardEventFromInteractiveElement(event.target)) {
       event.preventDefault();
@@ -4624,13 +5172,19 @@ export function PhotoCatalogView({
     : photoViewerFrameStyle;
   const photoViewerStageClassName = joinClassNames(
     'photo-viewer-stage',
-    isPhotoViewerFilmStripLayout ? 'is-layout-film-strip' : 'is-layout-standard'
+    isPhotoViewerFilmStripLayout ? 'is-layout-film-strip' : 'is-layout-standard',
+    isPhotoThumbnailCropModeActive && 'is-thumbnail-crop-mode'
+  );
+
+  const photoViewerOverlayClassName = joinClassNames(
+    'photo-viewer-overlay',
+    isPhotoThumbnailCropModeActive && 'is-thumbnail-crop-mode'
   );
 
   const photoViewerOverlay = viewerPhoto ? (
           <div
             ref={viewerOverlayRef}
-            className="photo-viewer-overlay"
+            className={photoViewerOverlayClassName}
             role="dialog"
             aria-modal="true"
             aria-label={viewerPhoto.originalName}
@@ -4683,6 +5237,7 @@ export function PhotoCatalogView({
                     isViewerPhotoFavorite ? ' is-favorite' : ''
                   }`}
                   onClick={handleToggleViewerPhotoFavorite}
+                  disabled={isPhotoThumbnailCropModeActive}
                   aria-pressed={isViewerPhotoFavorite}
                   aria-label={
                     isViewerPhotoFavorite
@@ -4699,6 +5254,7 @@ export function PhotoCatalogView({
                   type="button"
                   className="viewer-toolbar-button viewer-toolbar-button-text"
                   onClick={togglePhotoViewerFitMode}
+                  disabled={isPhotoThumbnailCropModeActive}
                   aria-pressed={photoViewerFitMode === 'fill'}
                   aria-label={
                     photoViewerFitMode === 'fit'
@@ -4717,25 +5273,50 @@ export function PhotoCatalogView({
                 {isCollectionThumbnailActionAvailable ? (
                   <button
                     type="button"
-                    className="viewer-toolbar-button viewer-toolbar-button-text"
+                    className={joinClassNames(
+                      'viewer-toolbar-button',
+                      'viewer-toolbar-button-text',
+                      isPhotoThumbnailCropModeActive && 'is-crop-confirm'
+                    )}
                     onClick={() => void handleSetCollectionThumbnail()}
                     disabled={isCollectionThumbnailBusy}
-                    aria-label="Set this photo as the collection thumbnail. Shortcut: T"
-                    title="Set this photo as the collection thumbnail. Shortcut: T"
+                    aria-label={
+                      isPhotoThumbnailCropModeActive
+                        ? 'Confirm the selected collection thumbnail crop. Shortcut: T'
+                        : 'Choose a crop for this photo as the collection thumbnail. Shortcut: T'
+                    }
+                    title={
+                      isPhotoThumbnailCropModeActive
+                        ? 'Confirm the selected collection thumbnail crop. Shortcut: T'
+                        : 'Choose a crop for this photo as the collection thumbnail. Shortcut: T'
+                    }
                   >
-                    <span>Set thumbnail</span>
+                    <span>{isPhotoThumbnailCropModeActive ? 'Confirm crop' : 'Set thumbnail'}</span>
                     <span className="viewer-shortcut-key" aria-hidden="true">T</span>
+                  </button>
+                ) : null}
+                {isPhotoThumbnailCropModeActive ? (
+                  <button
+                    type="button"
+                    className="viewer-toolbar-button viewer-toolbar-button-text"
+                    onClick={() => exitPhotoThumbnailCropSelection()}
+                    disabled={isCollectionThumbnailBusy}
+                    aria-label="Cancel collection thumbnail crop selection. Shortcut: C or Escape"
+                    title="Cancel collection thumbnail crop selection. Shortcut: C or Escape"
+                  >
+                    <span>Cancel crop</span>
+                    <span className="viewer-shortcut-key" aria-hidden="true">C</span>
                   </button>
                 ) : null}
                 <button
                   type="button"
                   className="viewer-toolbar-button viewer-toolbar-button-text viewer-toolbar-button-close"
                   onClick={requestClosePhotoViewer}
-                  aria-label="Close photo viewer. Shortcuts: C or X"
-                  title="Close photo viewer. Shortcuts: C or X"
+                  aria-label={isPhotoThumbnailCropModeActive ? 'Close photo viewer. Shortcut: X' : 'Close photo viewer. Shortcuts: C or X'}
+                  title={isPhotoThumbnailCropModeActive ? 'Close photo viewer. Shortcut: X' : 'Close photo viewer. Shortcuts: C or X'}
                 >
                   <span>Close</span>
-                  <span className="viewer-shortcut-key" aria-hidden="true">C</span>
+                  <span className="viewer-shortcut-key" aria-hidden="true">{isPhotoThumbnailCropModeActive ? 'X' : 'C'}</span>
                 </button>
               </div>
               <div className="photo-viewer-center-controls" role="group" aria-label="Photo slideshow and view controls">
@@ -4748,6 +5329,7 @@ export function PhotoCatalogView({
                     className="photo-viewer-slide-duration-select"
                     value={photoViewerSlideshowDelayMs}
                     onChange={handlePhotoViewerSlideshowDelayChange}
+                    disabled={isPhotoThumbnailCropModeActive}
                     aria-label={`Slideshow slide duration. Current value: ${photoViewerSlideDurationDescription}. Up Arrow speeds up; Down Arrow slows down.`}
                     title={`Each slide displays for ${photoViewerSlideDurationDescription}. Up/Down arrows adjust by 0.5s.`}
                   >
@@ -4770,6 +5352,7 @@ export function PhotoCatalogView({
                     className="photo-viewer-slideshow-style-select"
                     value={photoViewerSlideshowMode}
                     onChange={handlePhotoViewerSlideshowModeChange}
+                    disabled={isPhotoThumbnailCropModeActive}
                     aria-label={`Slideshow style for ${photoViewerLayoutModeOption.label} view. Current value: ${photoViewerSlideshowModeOption.label}.`}
                     title={photoViewerSlideshowModeDescription}
                   >
@@ -4792,7 +5375,7 @@ export function PhotoCatalogView({
                     type="button"
                     className="viewer-toolbar-button viewer-toolbar-button-icon viewer-toolbar-button-transport photo-viewer-slideshow-button"
                     onClick={showPreviousViewerPhoto}
-                    disabled={!canPhotoViewerSlideshowAdvance}
+                    disabled={!canPhotoViewerSlideshowAdvance || isPhotoThumbnailCropModeActive}
                     aria-label="Previous photo"
                     title="Previous photo"
                   >
@@ -4802,7 +5385,7 @@ export function PhotoCatalogView({
                     type="button"
                     className="viewer-toolbar-button viewer-toolbar-button-icon viewer-toolbar-button-primary viewer-toolbar-button-transport photo-viewer-slideshow-button photo-viewer-slideshow-play-button"
                     onClick={togglePhotoViewerSlideshow}
-                    disabled={!canPhotoViewerSlideshowAdvance}
+                    disabled={!canPhotoViewerSlideshowAdvance || isPhotoThumbnailCropModeActive}
                     aria-pressed={isPhotoViewerSlideshowActive}
                     aria-label={
                       isPhotoViewerSlideshowActive
@@ -4821,7 +5404,7 @@ export function PhotoCatalogView({
                     type="button"
                     className="viewer-toolbar-button viewer-toolbar-button-icon viewer-toolbar-button-transport photo-viewer-slideshow-button"
                     onClick={showNextViewerPhoto}
-                    disabled={!canPhotoViewerSlideshowAdvance}
+                    disabled={!canPhotoViewerSlideshowAdvance || isPhotoThumbnailCropModeActive}
                     aria-label="Next photo"
                     title="Next photo"
                   >
@@ -4838,6 +5421,7 @@ export function PhotoCatalogView({
                       className="photo-viewer-layout-select"
                       value={photoViewerLayoutMode}
                       onChange={handlePhotoViewerLayoutModeChange}
+                      disabled={isPhotoThumbnailCropModeActive}
                       aria-label={`Photo viewer view mode. Current value: ${photoViewerLayoutModeOption.label}. Shortcut: V cycles view modes.`}
                       title={`${photoViewerLayoutModeDescription} Shortcut: V cycles view modes.`}
                     >
@@ -4855,6 +5439,7 @@ export function PhotoCatalogView({
                     type="button"
                     className="viewer-toolbar-button viewer-toolbar-button-text photo-viewer-view-cycle-button"
                     onClick={cyclePhotoViewerViewMode}
+                    disabled={isPhotoThumbnailCropModeActive}
                     aria-label={`Cycle photo viewer view mode. Current view: ${photoViewerLayoutModeOption.label}. Shortcut: V`}
                     title={`Cycle photo viewer view mode. Current view: ${photoViewerLayoutModeOption.label}. Shortcut: V`}
                   >
@@ -4864,7 +5449,13 @@ export function PhotoCatalogView({
                 </div>
               </div>
             </div>
-            <button type="button" className="photo-viewer-nav is-previous" onClick={showPreviousViewerPhoto} aria-label="Previous photo">
+            <button
+              type="button"
+              className="photo-viewer-nav is-previous"
+              onClick={showPreviousViewerPhoto}
+              disabled={isPhotoThumbnailCropModeActive}
+              aria-label="Previous photo"
+            >
               ‹
             </button>
             <div ref={photoViewerStageRef} className={photoViewerStageClassName} onWheel={handlePhotoViewerWheel}>
@@ -4986,8 +5577,47 @@ export function PhotoCatalogView({
                   </div>
                 </>
               )}
+              {isPhotoThumbnailCropModeActive && photoThumbnailCropBoxStyle ? (
+                <div
+                  className="photo-thumbnail-crop-layer"
+                  onPointerMove={handlePhotoThumbnailCropPointerMove}
+                  onPointerUp={handlePhotoThumbnailCropPointerUp}
+                  onPointerCancel={handlePhotoThumbnailCropPointerUp}
+                >
+                  {photoThumbnailCropImageBoundsStyle ? (
+                    <div className="photo-thumbnail-crop-image-bounds" style={photoThumbnailCropImageBoundsStyle} />
+                  ) : null}
+                  <div
+                    className="photo-thumbnail-crop-box"
+                    style={photoThumbnailCropBoxStyle}
+                    role="presentation"
+                    onPointerDown={handlePhotoThumbnailCropBoxPointerDown}
+                  >
+                    {(['nw', 'ne', 'sw', 'se'] as const).map((handle) => (
+                      <button
+                        key={handle}
+                        type="button"
+                        className={`photo-thumbnail-crop-handle is-${handle}`}
+                        onPointerDown={(event) => handlePhotoThumbnailCropHandlePointerDown(handle, event)}
+                        aria-label={`Resize thumbnail crop from the ${handle.toUpperCase()} corner`}
+                        title="Drag to resize crop"
+                      />
+                    ))}
+                  </div>
+                  <div className="photo-thumbnail-crop-instructions" role="status" aria-live="polite">
+                    <strong>Choose collection thumbnail crop</strong>
+                    <span>Drag the square to move it. Drag a corner to resize. Press T to confirm, C or Esc to cancel.</span>
+                  </div>
+                </div>
+              ) : null}
             </div>
-            <button type="button" className="photo-viewer-nav is-next" onClick={showNextViewerPhoto} aria-label="Next photo">
+            <button
+              type="button"
+              className="photo-viewer-nav is-next"
+              onClick={showNextViewerPhoto}
+              disabled={isPhotoThumbnailCropModeActive}
+              aria-label="Next photo"
+            >
               ›
             </button>
           </div>

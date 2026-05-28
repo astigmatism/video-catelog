@@ -7,12 +7,14 @@ import { createInflateRaw } from 'node:zlib';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppConfig } from './config';
 import {
+  createPhotoCollectionThumbnailStoredName,
   createPhotoThumbnailStoredName,
   generatePhotoThumbnailFile,
   readPhotoImageDimensions,
   getPhotoCollectionStorageRootsForCleanup,
   getPhotoOriginalCollectionStorageRoot,
-  isUnsupportedPhotoThumbnailSourceError
+  isUnsupportedPhotoThumbnailSourceError,
+  type PhotoThumbnailCrop
 } from './photo-derivatives';
 import type { AddPhotoInput, PhotoCatalogStore } from './photo-store';
 import type {
@@ -80,6 +82,7 @@ const PHOTO_COLLECTION_NAME_MAX_LENGTH = 160;
 const PHOTO_HOME_STRIP_NAME_MAX_LENGTH = 120;
 const PHOTO_IMPORT_SKIPPED_FILE_RESPONSE_LIMIT = 25;
 const PHOTO_IMPORT_SKIPPED_FILE_MESSAGE_LIMIT = 6;
+const PHOTO_COLLECTION_THUMBNAIL_MIN_CROP_SIZE = 16;
 const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
 const ZIP64_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06064b50;
 const ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE = 0x07064b50;
@@ -328,6 +331,52 @@ function readPositiveInteger(value: unknown, fallback: number, max: number): num
   }
 
   return Math.max(1, Math.min(max, Math.floor(parsed)));
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isPhotoThumbnailCropRangeError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error ?? '').toLowerCase();
+  return message.includes('extract_area') || message.includes('bad extract area') || message.includes('outside the image');
+}
+
+function readPhotoCollectionThumbnailCrop(value: unknown): PhotoThumbnailCrop | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const left = readFiniteNumber(value.left ?? value.x);
+  const top = readFiniteNumber(value.top ?? value.y);
+  const width = readFiniteNumber(value.width);
+  const height = readFiniteNumber(value.height);
+
+  if (left === null || top === null || width === null || height === null) {
+    return null;
+  }
+
+  const roundedWidth = Math.round(width);
+  const roundedHeight = Math.round(height);
+  const squareTolerance = Math.max(2, Math.max(roundedWidth, roundedHeight) * 0.015);
+  if (
+    left < 0 ||
+    top < 0 ||
+    roundedWidth < PHOTO_COLLECTION_THUMBNAIL_MIN_CROP_SIZE ||
+    roundedHeight < PHOTO_COLLECTION_THUMBNAIL_MIN_CROP_SIZE ||
+    Math.abs(roundedWidth - roundedHeight) > squareTolerance
+  ) {
+    return null;
+  }
+
+  const squareSize = Math.max(PHOTO_COLLECTION_THUMBNAIL_MIN_CROP_SIZE, Math.min(roundedWidth, roundedHeight));
+  return {
+    left: Math.max(0, Math.round(left)),
+    top: Math.max(0, Math.round(top)),
+    width: squareSize,
+    height: squareSize
+  };
 }
 
 function readQueryValue(value: unknown): string | null {
@@ -857,6 +906,68 @@ function getPhotoThumbnailFileAbsolutePath(config: AppConfig, photo: Photo): str
   }
 
   return null;
+}
+
+function resolvePhotoCollectionThumbnailFileCandidates(config: AppConfig, collection: PhotoCollection): string[] {
+  if (!collection.thumbnailRelativePath) {
+    return [];
+  }
+
+  const thumbnailPathSegments = normalizeStoredRelativePathSegments(collection.thumbnailRelativePath);
+  const photoStoreSegment = path.basename(config.photoStoreRoot);
+  const photoStoreRelativeSegments = stripLeadingPathSegment(thumbnailPathSegments, photoStoreSegment);
+  const thumbnailBasename = path.posix.basename(normalizeStoredPathForResolution(collection.thumbnailRelativePath));
+  const candidates: Array<string | null> = [
+    resolveStoredPathUnderRoot(config.mediaRoot, collection.thumbnailRelativePath),
+    resolvePathSegmentsUnderRoot(config.mediaRoot, thumbnailPathSegments),
+    resolvePathSegmentsUnderRoot(config.photoStoreRoot, photoStoreRelativeSegments)
+  ];
+
+  if (thumbnailBasename && thumbnailBasename !== '.' && thumbnailBasename !== '..') {
+    candidates.push(
+      resolvePathSegmentsUnderRoot(config.photoStoreRoot, [
+        'derivatives',
+        'thumbnails',
+        'collections',
+        collection.id,
+        thumbnailBasename
+      ])
+    );
+  }
+
+  return uniquePhotoPathCandidates(candidates).filter((candidate) => isPathInsideRoot(config.mediaRoot, candidate));
+}
+
+function getPhotoCollectionThumbnailFileAbsolutePath(config: AppConfig, collection: PhotoCollection): string | null {
+  for (const candidate of resolvePhotoCollectionThumbnailFileCandidates(config, collection)) {
+    try {
+      const stats = fs.statSync(candidate);
+      if (stats.isFile()) {
+        return candidate;
+      }
+    } catch {
+      // Try the next collection-thumbnail-specific candidate.
+    }
+  }
+
+  return null;
+}
+
+function cleanupCollectionThumbnailFile(config: AppConfig, thumbnailRelativePath: string | null | undefined): void {
+  if (!thumbnailRelativePath) {
+    return;
+  }
+
+  const candidate = resolveStoredPathUnderRoot(config.mediaRoot, thumbnailRelativePath);
+  if (!candidate || !isPathInsideRoot(config.mediaRoot, candidate)) {
+    return;
+  }
+
+  try {
+    fs.rmSync(candidate, { force: true });
+  } catch {
+    // Best-effort cleanup only.
+  }
 }
 
 async function ensurePhotoThumbnailFile(
@@ -2414,6 +2525,45 @@ export function registerPhotoRoutes(app: FastifyInstance, options: PhotoRoutesOp
     reply.send({ collection: updated });
   });
 
+  app.get('/api/photos/collections/:id/thumbnail', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!getAuthenticatedSessionId(request, reply, options)) {
+      return;
+    }
+
+    const collectionId = getRequestParam(request, 'id');
+    if (!collectionId) {
+      sendNotFound(reply, 'Photo collection not found.');
+      return;
+    }
+
+    const collection = photoStore.findCollectionById(collectionId);
+    if (!collection || !collection.thumbnailRelativePath) {
+      sendNotFound(reply, 'Photo collection thumbnail is not available.');
+      return;
+    }
+
+    const thumbnailAbsolutePath = getPhotoCollectionThumbnailFileAbsolutePath(config, collection);
+    if (!thumbnailAbsolutePath) {
+      request.log.warn(
+        {
+          event: 'photo.collection.thumbnail.file_missing',
+          collectionId,
+          thumbnailRelativePath: collection.thumbnailRelativePath
+        },
+        'Photo collection thumbnail request could not resolve the thumbnail file.'
+      );
+      sendNotFound(reply, 'Photo collection thumbnail is not available.');
+      return;
+    }
+
+    sendPhotoFileResponse(
+      request,
+      reply,
+      thumbnailAbsolutePath,
+      collection.thumbnailMimeType || getMimeTypeFromExtension(thumbnailAbsolutePath) || 'image/webp'
+    );
+  });
+
   app.post('/api/photos/collections/:id/thumbnail', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!getAuthenticatedSessionId(request, reply, options)) {
       return;
@@ -2432,10 +2582,87 @@ export function registerPhotoRoutes(app: FastifyInstance, options: PhotoRoutesOp
       return;
     }
 
-    const updated = await photoStore.setCollectionCoverPhoto(collectionId, photoId);
-    if (!updated) {
+    const sourcePhoto = photoStore.findPhotoById(photoId);
+    if (!sourcePhoto || sourcePhoto.collectionId !== collectionId) {
       sendNotFound(reply, 'Photo collection or photo not found.');
       return;
+    }
+
+    const previousCollection = photoStore.findCollectionById(collectionId);
+    let generatedThumbnail:
+      | Awaited<ReturnType<typeof generatePhotoThumbnailFile>>
+      | null = null;
+
+    if (body.crop !== undefined && body.crop !== null) {
+      const crop = readPhotoCollectionThumbnailCrop(body.crop);
+      if (!crop) {
+        reply.code(400).send({ message: 'A valid square thumbnail crop is required.' });
+        return;
+      }
+
+      const originalAbsolutePath = getPhotoFileAbsolutePath(config, sourcePhoto);
+      if (!originalAbsolutePath) {
+        sendNotFound(reply, 'Photo file is not available.');
+        return;
+      }
+
+      try {
+        generatedThumbnail = await generatePhotoThumbnailFile({
+          config,
+          collectionId,
+          sourcePath: originalAbsolutePath,
+          thumbnailStoredName: createPhotoCollectionThumbnailStoredName(sourcePhoto.storedName),
+          crop
+        });
+      } catch (error) {
+        if (isUnsupportedPhotoThumbnailSourceError(error)) {
+          reply.code(400).send({ message: 'Photo thumbnail crop could not be generated from this image.' });
+          return;
+        }
+
+        if (isPhotoThumbnailCropRangeError(error)) {
+          reply.code(400).send({ message: 'Thumbnail crop is outside the source image.' });
+          return;
+        }
+
+        request.log.error(
+          { err: error, event: 'photo.collection.thumbnail.generate_failed', collectionId, photoId },
+          'Photo collection thumbnail generation failed.'
+        );
+        reply.code(500).send({ message: 'Photo collection thumbnail could not be generated.' });
+        return;
+      }
+    }
+
+    const updated = await photoStore.setCollectionCoverPhoto(
+      collectionId,
+      photoId,
+      generatedThumbnail
+        ? {
+            thumbnailSourcePhotoId: sourcePhoto.id,
+            thumbnailRelativePath: generatedThumbnail.relativePath,
+            thumbnailMimeType: generatedThumbnail.mimeType,
+            thumbnailSizeBytes: generatedThumbnail.sizeBytes,
+            thumbnailWidth: generatedThumbnail.width,
+            thumbnailHeight: generatedThumbnail.height
+          }
+        : null
+    );
+
+    if (!updated) {
+      if (generatedThumbnail) {
+        cleanupCollectionThumbnailFile(config, generatedThumbnail.relativePath);
+      }
+      sendNotFound(reply, 'Photo collection or photo not found.');
+      return;
+    }
+
+    if (
+      generatedThumbnail &&
+      previousCollection?.thumbnailRelativePath &&
+      previousCollection.thumbnailRelativePath !== generatedThumbnail.relativePath
+    ) {
+      cleanupCollectionThumbnailFile(config, previousCollection.thumbnailRelativePath);
     }
 
     reply.send({ collection: updated });

@@ -159,6 +159,12 @@ export type PhotoCollection = {
   description: string | null;
   coverPhotoId: string | null;
   coverPhoto: Photo | null;
+  thumbnailSourcePhotoId: string | null;
+  thumbnailRelativePath: string | null;
+  thumbnailMimeType: string | null;
+  thumbnailSizeBytes: number | null;
+  thumbnailWidth: number | null;
+  thumbnailHeight: number | null;
   photoCount: number;
   favoritePhotoIds: string[];
   totalSizeBytes: number;
