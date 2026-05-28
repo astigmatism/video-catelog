@@ -3872,7 +3872,7 @@ export function PhotoCatalogView({
   const photoViewerFilmStripCurrentFrameSize = photoViewerRenderedSize ?? photoViewerPrimaryStageSize;
 
   const photoViewerFilmStripFrames = useMemo<PhotoViewerFilmStripFrame[]>(() => {
-    if (!isPhotoViewerFilmStripLayout || photoViewerFilmStripVirtualIndex < 0) {
+    if (!isPhotoViewerFilmStripLayout || !Number.isFinite(photoViewerFilmStripVirtualIndex)) {
       return [];
     }
 
@@ -4210,6 +4210,23 @@ export function PhotoCatalogView({
 
     notePhotoViewerActivity();
     openViewerPhotoAtOffset(1, { useSlideshowTransition: isPhotoViewerSlideshowActive });
+  }
+
+  function stopPhotoViewerSideNavActivityPropagation(event: SyntheticEvent<HTMLButtonElement>): void {
+    event.stopPropagation();
+  }
+
+  function preventPhotoViewerSideNavMouseActivity(event: ReactMouseEvent<HTMLButtonElement>): void {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function handlePhotoViewerSideNavClick(offset: number, event: ReactMouseEvent<HTMLButtonElement>): void {
+    event.stopPropagation();
+    openViewerPhotoAtOffset(offset, {
+      preserveControlsVisibility: true,
+      useSlideshowTransition: isPhotoViewerSlideshowActive
+    });
   }
 
   function handlePhotoViewerSlideshowDelayChange(event: ChangeEvent<HTMLSelectElement>): void {
@@ -5514,9 +5531,17 @@ export function PhotoCatalogView({
             </div>
             <button
               type="button"
-              className="photo-viewer-nav is-previous"
-              onClick={showPreviousViewerPhoto}
+              className={joinClassNames(
+                'photo-viewer-nav',
+                'is-previous',
+                !arePhotoViewerControlsVisible && 'is-hidden'
+              )}
+              onClick={(event) => handlePhotoViewerSideNavClick(-1, event)}
+              onPointerDown={stopPhotoViewerSideNavActivityPropagation}
+              onMouseDown={preventPhotoViewerSideNavMouseActivity}
+              onTouchStart={stopPhotoViewerSideNavActivityPropagation}
               disabled={isPhotoThumbnailCropModeActive}
+              tabIndex={arePhotoViewerControlsVisible ? undefined : -1}
               aria-label="Previous photo"
             >
               ‹
@@ -5676,9 +5701,17 @@ export function PhotoCatalogView({
             </div>
             <button
               type="button"
-              className="photo-viewer-nav is-next"
-              onClick={showNextViewerPhoto}
+              className={joinClassNames(
+                'photo-viewer-nav',
+                'is-next',
+                !arePhotoViewerControlsVisible && 'is-hidden'
+              )}
+              onClick={(event) => handlePhotoViewerSideNavClick(1, event)}
+              onPointerDown={stopPhotoViewerSideNavActivityPropagation}
+              onMouseDown={preventPhotoViewerSideNavMouseActivity}
+              onTouchStart={stopPhotoViewerSideNavActivityPropagation}
               disabled={isPhotoThumbnailCropModeActive}
+              tabIndex={arePhotoViewerControlsVisible ? undefined : -1}
               aria-label="Next photo"
             >
               ›

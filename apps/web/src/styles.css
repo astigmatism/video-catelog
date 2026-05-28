@@ -6621,6 +6621,12 @@ label {
   transform: translateY(-50%) scale(1.03);
 }
 
+.photo-viewer-nav.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%) scale(0.97);
+}
+
 .photo-viewer-nav.is-previous {
   left: 1rem;
 }
