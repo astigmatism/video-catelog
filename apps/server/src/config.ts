@@ -16,6 +16,7 @@ export type AppConfig = {
   mediaStoreRoot: string;
   photoStoreRoot: string;
   photoTempRoot: string;
+  photoSlideshowMusicRoot: string;
   thumbsRoot: string;
   previewsRoot: string;
   dbConnectionString: string | null;
@@ -277,6 +278,12 @@ export function loadConfig(): AppConfig {
   const mediaStoreRoot = path.join(mediaRoot, 'media');
   const photoStoreRoot = path.join(mediaRoot, 'photos');
   const photoTempRoot = path.join(tmpRoot, 'photos');
+  const photoSlideshowMusicRoot = path.resolve(
+    repoRoot,
+    readSetting(env, dotEnv, 'PHOTO_SLIDESHOW_MUSIC_ROOT') ??
+      readSetting(env, dotEnv, 'SLIDESHOW_MUSIC_ROOT') ??
+      path.join(mediaRoot, 'photo-slideshow-music')
+  );
   const thumbsRoot = path.join(mediaRoot, 'thumbs');
   const previewsRoot = path.join(mediaRoot, 'previews');
   const webDistRoot = path.resolve(repoRoot, 'apps', 'web', 'dist');
@@ -299,6 +306,7 @@ export function loadConfig(): AppConfig {
     mediaStoreRoot,
     photoStoreRoot,
     photoTempRoot,
+    photoSlideshowMusicRoot,
     thumbsRoot,
     previewsRoot,
     dbConnectionString: readSetting(env, dotEnv, 'DATABASE_URL') ?? null,

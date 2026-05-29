@@ -1079,6 +1079,216 @@ function sendPhotoFileResponse(
   stream.pipe(reply.raw);
 }
 
+
+function ensurePhotoSlideshowMusicDirectory(config: AppConfig, request?: FastifyRequest): boolean {
+  try {
+    fs.mkdirSync(config.photoSlideshowMusicRoot, { recursive: true });
+    return true;
+  } catch (error) {
+    request?.log.error(
+      { err: error, event: 'photo.slideshow_music.directory_unavailable', directory: config.photoSlideshowMusicRoot },
+      'Photo slideshow music directory could not be created or accessed.'
+    );
+    return false;
+  }
+}
+
+function normalizePhotoSlideshowMusicFileName(value: string | null | undefined): string | null {
+  if (typeof value !== 'string' || value === '' || value.includes('\0')) {
+    return null;
+  }
+
+  if (value.includes('/') || value.includes('\\')) {
+    return null;
+  }
+
+  const basename = path.basename(value);
+  if (basename !== value || basename === '.' || basename === '..') {
+    return null;
+  }
+
+  return path.extname(basename).toLowerCase() === '.mp3' ? basename : null;
+}
+
+function getRawRequestParam(request: FastifyRequest, name: string): string | null {
+  const params = isRecord(request.params) ? request.params : {};
+  const value = params[name];
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+function getPhotoSlideshowMusicFilePath(config: AppConfig, fileName: string | null | undefined): string | null {
+  const safeFileName = normalizePhotoSlideshowMusicFileName(fileName);
+  if (!safeFileName) {
+    return null;
+  }
+
+  const musicRoot = path.resolve(config.photoSlideshowMusicRoot);
+  const candidatePath = path.resolve(musicRoot, safeFileName);
+  return isPathInsideRoot(musicRoot, candidatePath) ? candidatePath : null;
+}
+
+function getPhotoSlideshowMusicFileStats(filePath: string): fs.Stats | null {
+  try {
+    const linkStats = fs.lstatSync(filePath);
+    if (!linkStats.isFile()) {
+      return null;
+    }
+
+    const stats = fs.statSync(filePath);
+    return stats.isFile() ? stats : null;
+  } catch {
+    return null;
+  }
+}
+
+function listPhotoSlideshowMusicFileNames(config: AppConfig, request: FastifyRequest): string[] | null {
+  if (!ensurePhotoSlideshowMusicDirectory(config, request)) {
+    return null;
+  }
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(config.photoSlideshowMusicRoot, { withFileTypes: true });
+  } catch (error) {
+    request.log.error(
+      { err: error, event: 'photo.slideshow_music.list_failed', directory: config.photoSlideshowMusicRoot },
+      'Photo slideshow music directory could not be read.'
+    );
+    return null;
+  }
+
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => normalizePhotoSlideshowMusicFileName(entry.name))
+    .filter((fileName): fileName is string => fileName !== null)
+    .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+function parsePhotoSlideshowMusicByteRange(
+  rangeHeader: string,
+  sizeBytes: number
+): { start: number; end: number } | null {
+  const trimmed = rangeHeader.trim();
+  if (!trimmed.startsWith('bytes=') || trimmed.includes(',')) {
+    return null;
+  }
+
+  const rangeValue = trimmed.slice('bytes='.length);
+  const dashIndex = rangeValue.indexOf('-');
+  if (dashIndex === -1) {
+    return null;
+  }
+
+  const rawStart = rangeValue.slice(0, dashIndex).trim();
+  const rawEnd = rangeValue.slice(dashIndex + 1).trim();
+  if (rawStart === '' && rawEnd === '') {
+    return null;
+  }
+
+  if (rawStart === '') {
+    const suffixLength = Number(rawEnd);
+    if (!Number.isInteger(suffixLength) || suffixLength <= 0) {
+      return null;
+    }
+
+    return {
+      start: Math.max(0, sizeBytes - suffixLength),
+      end: sizeBytes - 1
+    };
+  }
+
+  const start = Number(rawStart);
+  const parsedEnd = rawEnd === '' ? sizeBytes - 1 : Number(rawEnd);
+  if (!Number.isInteger(start) || !Number.isInteger(parsedEnd) || start < 0 || parsedEnd < start) {
+    return null;
+  }
+
+  if (start >= sizeBytes) {
+    return null;
+  }
+
+  return {
+    start,
+    end: Math.min(parsedEnd, sizeBytes - 1)
+  };
+}
+
+function sendPhotoSlideshowMusicFileResponse(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  filePath: string
+): void {
+  const stats = getPhotoSlideshowMusicFileStats(filePath);
+  if (!stats) {
+    sendNotFound(reply, 'Slideshow music file is not available.');
+    return;
+  }
+
+  const rangeHeader = Array.isArray(request.headers.range) ? request.headers.range[0] : request.headers.range;
+  const responseHeaders: Record<string, string> = {
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'private, max-age=3600',
+    'Content-Type': 'audio/mpeg',
+    'X-Content-Type-Options': 'nosniff'
+  };
+
+  const applyHijackedRawResponse = (statusCode: number, extraHeaders: Record<string, string>): void => {
+    reply.hijack();
+    reply.raw.statusCode = statusCode;
+
+    for (const [headerName, headerValue] of Object.entries({ ...responseHeaders, ...extraHeaders })) {
+      reply.raw.setHeader(headerName, headerValue);
+    }
+  };
+
+  if (typeof rangeHeader === 'string' && rangeHeader.trim() !== '') {
+    const byteRange = parsePhotoSlideshowMusicByteRange(rangeHeader, stats.size);
+    if (!byteRange) {
+      reply.code(416).header('Content-Range', `bytes */${stats.size}`).send('');
+      return;
+    }
+
+    const contentLength = byteRange.end - byteRange.start + 1;
+    const stream = fs.createReadStream(filePath, {
+      start: byteRange.start,
+      end: byteRange.end
+    });
+
+    stream.on('error', (error) => {
+      request.log.error({ err: error, filePath }, 'Failed to stream ranged photo slideshow music file.');
+      if (!reply.raw.headersSent) {
+        reply.raw.statusCode = 500;
+        reply.raw.end();
+      } else {
+        reply.raw.destroy(error);
+      }
+    });
+
+    applyHijackedRawResponse(206, {
+      'Content-Length': String(contentLength),
+      'Content-Range': `bytes ${byteRange.start}-${byteRange.end}/${stats.size}`
+    });
+    stream.pipe(reply.raw);
+    return;
+  }
+
+  const stream = fs.createReadStream(filePath);
+  stream.on('error', (error) => {
+    request.log.error({ err: error, filePath }, 'Failed to stream photo slideshow music file.');
+    if (!reply.raw.headersSent) {
+      reply.raw.statusCode = 500;
+      reply.raw.end();
+    } else {
+      reply.raw.destroy(error);
+    }
+  });
+
+  applyHijackedRawResponse(200, {
+    'Content-Length': String(stats.size)
+  });
+  stream.pipe(reply.raw);
+}
+
 function sendNotFound(reply: FastifyReply, message = 'Not found.'): void {
   reply.code(404).send({ message });
 }
@@ -2950,6 +3160,40 @@ export function registerPhotoRoutes(app: FastifyInstance, options: PhotoRoutesOp
     reply.send({ photo: updated });
   });
 
+
+  app.get('/api/photos/slideshow-music', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!getAuthenticatedSessionId(request, reply, options)) {
+      return;
+    }
+
+    const files = listPhotoSlideshowMusicFileNames(config, request);
+    if (!files) {
+      reply.code(500).send({ files: [], message: 'Slideshow music files could not be listed.' });
+      return;
+    }
+
+    reply.send({ files });
+  });
+
+  async function sendPhotoSlideshowMusicMediaResponse(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    if (!getAuthenticatedSessionId(request, reply, options)) {
+      return;
+    }
+
+    if (!ensurePhotoSlideshowMusicDirectory(config, request)) {
+      reply.code(500).send({ message: 'Slideshow music directory is not available.' });
+      return;
+    }
+
+    const filePath = getPhotoSlideshowMusicFilePath(config, getRawRequestParam(request, 'fileName'));
+    if (!filePath) {
+      sendNotFound(reply, 'Slideshow music file is not available.');
+      return;
+    }
+
+    sendPhotoSlideshowMusicFileResponse(request, reply, filePath);
+  }
+
   async function sendPhotoMediaResponse(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     if (!getAuthenticatedSessionId(request, reply, options)) {
       return;
@@ -3028,6 +3272,7 @@ export function registerPhotoRoutes(app: FastifyInstance, options: PhotoRoutesOp
     sendPhotoFileResponse(request, reply, thumbnail.absolutePath, thumbnail.mimeType);
   }
 
+  app.get('/media/photos/slideshow-music/:fileName', sendPhotoSlideshowMusicMediaResponse);
   app.get('/api/photos/:id/thumbnail', sendPhotoThumbnailMediaResponse);
   app.get('/media/photos/:id/thumbnail', sendPhotoThumbnailMediaResponse);
   app.get('/api/photos/:id/media', sendPhotoMediaResponse);
