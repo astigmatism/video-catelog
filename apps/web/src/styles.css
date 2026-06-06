@@ -1997,6 +1997,11 @@ label {
   box-shadow: var(--shadow-lg);
 }
 
+.viewer-shell.is-cursor-hidden,
+.viewer-shell.is-cursor-hidden * {
+  cursor: none !important;
+}
+
 .viewer-header,
 .viewer-footer {
   position: absolute;
@@ -5792,6 +5797,11 @@ label {
   padding: 0;
   color: #fff;
   background: #02060c;
+}
+
+.photo-viewer-overlay.is-cursor-hidden,
+.photo-viewer-overlay.is-cursor-hidden * {
+  cursor: none !important;
 }
 
 .photo-viewer-overlay:focus,

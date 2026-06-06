@@ -5808,7 +5808,8 @@ export function PhotoCatalogView({
 
   const photoViewerOverlayClassName = joinClassNames(
     'photo-viewer-overlay',
-    isPhotoThumbnailCropModeActive && 'is-thumbnail-crop-mode'
+    isPhotoThumbnailCropModeActive && 'is-thumbnail-crop-mode',
+    !arePhotoViewerControlsVisible && 'is-cursor-hidden'
   );
 
   const photoViewerOverlay = viewerPhoto ? (

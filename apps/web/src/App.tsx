@@ -7427,8 +7427,6 @@ function ViewerOverlay({
       }
 
       setBookmarks((currentBookmarks) => upsertCatalogBookmark(currentBookmarks, createdBookmark));
-      isBookmarksDrawerOpenRef.current = true;
-      setIsBookmarksDrawerOpen(true);
     } finally {
       if (!hasClosedRef.current) {
         bookmarkCreateInProgressRef.current = false;
@@ -8361,7 +8359,7 @@ function ViewerOverlay({
   return (
     <div className="viewer-backdrop" role="presentation">
       <div
-        className="viewer-shell"
+        className={`viewer-shell${areControlsVisible ? '' : ' is-cursor-hidden'}`}
         ref={overlayRef}
         role="dialog"
         aria-modal="true"
