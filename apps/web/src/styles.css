@@ -5826,7 +5826,7 @@ label {
 .photo-viewer-slide-duration,
 .photo-viewer-slideshow-style,
 .photo-viewer-slideshow-music-controls,
-.photo-viewer-slideshow-music,
+.photo-viewer-slideshow-music-track-buttons,
 .photo-viewer-view-controls,
 .photo-viewer-layout {
   flex: 0 0 auto;
@@ -5868,6 +5868,17 @@ label {
 .photo-viewer-slideshow-music-controls {
   gap: 0.42rem;
   padding-inline: 0.36rem;
+}
+
+.photo-viewer-slideshow-music-track-buttons {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.28rem;
+}
+
+.photo-viewer-slideshow-music-track-button {
+  min-width: 2.05rem;
 }
 
 .photo-viewer-slideshow-music-toggle {
@@ -5915,7 +5926,6 @@ label {
 
 .photo-viewer-slide-duration,
 .photo-viewer-slideshow-style,
-.photo-viewer-slideshow-music,
 .photo-viewer-layout {
   position: relative;
   gap: 0.42rem;
@@ -5924,7 +5934,6 @@ label {
 
 .photo-viewer-slide-duration::after,
 .photo-viewer-slideshow-style::after,
-.photo-viewer-slideshow-music::after,
 .photo-viewer-layout::after {
   content: '';
   position: absolute;
@@ -5941,7 +5950,6 @@ label {
 
 .photo-viewer-slide-duration-label,
 .photo-viewer-slideshow-style-label,
-.photo-viewer-slideshow-music-label,
 .photo-viewer-layout-label {
   color: rgba(191, 219, 254, 0.78);
   font-size: 0.68rem;
@@ -5953,7 +5961,6 @@ label {
 
 .photo-viewer-slide-duration-select,
 .photo-viewer-slideshow-style-select,
-.photo-viewer-slideshow-music-select,
 .photo-viewer-layout-select {
   width: auto;
   min-width: 6.15rem;
@@ -5975,12 +5982,6 @@ label {
   min-width: 9.35rem;
 }
 
-.photo-viewer-slideshow-music-select {
-  max-width: 13.5rem;
-  min-width: 10.25rem;
-  text-overflow: ellipsis;
-}
-
 .photo-viewer-layout-select {
   min-width: 7rem;
 }
@@ -5989,8 +5990,6 @@ label {
 .photo-viewer-slide-duration-select:focus,
 .photo-viewer-slideshow-style-select:hover,
 .photo-viewer-slideshow-style-select:focus,
-.photo-viewer-slideshow-music-select:hover,
-.photo-viewer-slideshow-music-select:focus,
 .photo-viewer-layout-select:hover,
 .photo-viewer-layout-select:focus {
   border-color: rgba(147, 197, 253, 0.44);
@@ -5999,7 +5998,6 @@ label {
 
 .photo-viewer-slide-duration-select:focus-visible,
 .photo-viewer-slideshow-style-select:focus-visible,
-.photo-viewer-slideshow-music-select:focus-visible,
 .photo-viewer-layout-select:focus-visible {
   outline: 2px solid rgba(96, 165, 250, 0.72);
   outline-offset: 2px;
@@ -6007,7 +6005,6 @@ label {
 
 .photo-viewer-slide-duration-select option,
 .photo-viewer-slideshow-style-select option,
-.photo-viewer-slideshow-music-select option,
 .photo-viewer-layout-select option {
   background: #0f172a;
   color: #f8fafc;
@@ -6837,10 +6834,6 @@ label {
   .photo-viewer-slideshow-music-controls {
     flex-wrap: wrap;
     justify-content: center;
-  }
-
-  .photo-viewer-slideshow-music-select {
-    max-width: 12rem;
   }
 
   .photo-viewer-toolbar-actions {

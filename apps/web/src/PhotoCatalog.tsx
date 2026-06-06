@@ -563,6 +563,10 @@ function uniqueStrings(values: string[]): string[] {
   return result;
 }
 
+function areStringArraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 type PhotoFavoriteState = Record<string, string[]>;
 
 type PhotoFavoriteTagSummary = {
@@ -723,7 +727,7 @@ const PHOTO_VIEWER_FILM_STRIP_KEN_BURNS_VARIANTS = [
 const PHOTO_VIEWER_FILM_STRIP_KEN_BURNS_MIN_DURATION_MS = 3200;
 const PHOTO_VIEWER_LAYOUT_SESSION_STORAGE_KEY = 'photoViewer.layout';
 const PHOTO_VIEWER_MUSIC_ENABLED_SESSION_STORAGE_KEY = 'photoViewer.slideshowMusic.enabled';
-const PHOTO_VIEWER_MUSIC_FILE_SESSION_STORAGE_KEY = 'photoViewer.slideshowMusic.fileName';
+const PHOTO_VIEWER_MUSIC_PREVIOUS_RESTART_THRESHOLD_SECONDS = 5;
 const PHOTO_VIEWER_FILM_STRIP_SIDE_FRAME_COUNT = 4;
 const PHOTO_VIEWER_FILM_STRIP_MIN_GAP_PX = 6;
 const PHOTO_VIEWER_FILM_STRIP_MAX_GAP_PX = 12;
@@ -735,6 +739,13 @@ type PhotoViewerLayoutMode = 'standard' | 'film-strip';
 type PhotoViewerTransitionDirection = 'next' | 'previous';
 type PhotoViewerKenBurnsVariant = (typeof PHOTO_VIEWER_KEN_BURNS_VARIANTS)[number];
 type PhotoViewerFilmStripKenBurnsVariant = (typeof PHOTO_VIEWER_FILM_STRIP_KEN_BURNS_VARIANTS)[number];
+
+type PhotoViewerSlideshowMusicPlaylistState = {
+  history: string[];
+  historyIndex: number;
+  playedFileNames: string[];
+  playbackRequestId: number;
+};
 
 type PhotoViewerSlideshowModeOption<TMode extends PhotoViewerSlideshowMode = PhotoViewerSlideshowMode> = {
   value: TMode;
@@ -1035,38 +1046,138 @@ function writePhotoViewerSlideshowMusicEnabledToSession(enabled: boolean): void 
   }
 }
 
-function readPhotoViewerSlideshowMusicFileNameFromSession(): string {
-  if (typeof window === 'undefined') {
-    return '';
-  }
-
-  try {
-    const storedFileName = window.sessionStorage.getItem(PHOTO_VIEWER_MUSIC_FILE_SESSION_STORAGE_KEY) ?? '';
-    return isValidPhotoSlideshowMusicFileName(storedFileName) ? storedFileName : '';
-  } catch {
-    return '';
-  }
-}
-
-function writePhotoViewerSlideshowMusicFileNameToSession(fileName: string): void {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  try {
-    if (fileName === '') {
-      window.sessionStorage.removeItem(PHOTO_VIEWER_MUSIC_FILE_SESSION_STORAGE_KEY);
-      return;
-    }
-
-    window.sessionStorage.setItem(PHOTO_VIEWER_MUSIC_FILE_SESSION_STORAGE_KEY, fileName);
-  } catch {
-    // Ignore storage failures, such as private browsing or disabled session storage.
-  }
-}
-
 function getPhotoViewerSlideshowMusicUrl(fileName: string): string {
   return `/media/photos/slideshow-music/${encodeURIComponent(fileName)}`;
+}
+
+function createEmptyPhotoViewerSlideshowMusicPlaylistState(): PhotoViewerSlideshowMusicPlaylistState {
+  return {
+    history: [],
+    historyIndex: -1,
+    playedFileNames: [],
+    playbackRequestId: 0
+  };
+}
+
+function getCurrentPhotoViewerSlideshowMusicFileName(state: PhotoViewerSlideshowMusicPlaylistState): string {
+  return state.historyIndex >= 0 ? state.history[state.historyIndex] ?? '' : '';
+}
+
+function arePhotoViewerSlideshowMusicPlaylistStatesEqual(
+  left: PhotoViewerSlideshowMusicPlaylistState,
+  right: PhotoViewerSlideshowMusicPlaylistState
+): boolean {
+  return (
+    left.historyIndex === right.historyIndex &&
+    left.playbackRequestId === right.playbackRequestId &&
+    areStringArraysEqual(left.history, right.history) &&
+    areStringArraysEqual(left.playedFileNames, right.playedFileNames)
+  );
+}
+
+function reconcilePhotoViewerSlideshowMusicPlaylistState(
+  state: PhotoViewerSlideshowMusicPlaylistState,
+  fileNames: string[]
+): PhotoViewerSlideshowMusicPlaylistState {
+  const availableFileNames = uniqueStrings(fileNames.filter(isValidPhotoSlideshowMusicFileName));
+  if (availableFileNames.length === 0) {
+    return createEmptyPhotoViewerSlideshowMusicPlaylistState();
+  }
+
+  const availableFileNameSet = new Set(availableFileNames);
+  const filteredHistoryItems = state.history
+    .map((fileName, index) => ({ fileName, index }))
+    .filter((item) => availableFileNameSet.has(item.fileName));
+  const nextHistory = filteredHistoryItems.map((item) => item.fileName);
+  const nextHistoryIndex = filteredHistoryItems.findIndex((item) => item.index === state.historyIndex);
+  const nextPlayedFileNames = uniqueStrings(
+    state.playedFileNames.filter((fileName) => availableFileNameSet.has(fileName))
+  );
+
+  const nextState: PhotoViewerSlideshowMusicPlaylistState = {
+    history: nextHistory,
+    historyIndex: nextHistoryIndex,
+    playedFileNames: nextPlayedFileNames,
+    playbackRequestId: state.playbackRequestId
+  };
+
+  return arePhotoViewerSlideshowMusicPlaylistStatesEqual(state, nextState) ? state : nextState;
+}
+
+function getRandomPhotoViewerSlideshowMusicFileName(fileNames: string[]): string {
+  if (fileNames.length === 0) {
+    return '';
+  }
+
+  return fileNames[Math.floor(Math.random() * fileNames.length)] ?? '';
+}
+
+function getNextPhotoViewerSlideshowMusicPlaylistState(
+  state: PhotoViewerSlideshowMusicPlaylistState,
+  fileNames: string[],
+  options: { avoidCurrentFileName?: boolean; markCurrentAsPlayed?: boolean } = {}
+): PhotoViewerSlideshowMusicPlaylistState {
+  const availableFileNames = uniqueStrings(fileNames.filter(isValidPhotoSlideshowMusicFileName));
+  if (availableFileNames.length === 0) {
+    return createEmptyPhotoViewerSlideshowMusicPlaylistState();
+  }
+
+  const reconciledState = reconcilePhotoViewerSlideshowMusicPlaylistState(state, availableFileNames);
+  const currentFileName = getCurrentPhotoViewerSlideshowMusicFileName(reconciledState);
+  const playedFileNameSet = new Set(reconciledState.playedFileNames);
+  if (options.markCurrentAsPlayed === true && currentFileName !== '') {
+    playedFileNameSet.add(currentFileName);
+  }
+
+  let isNewCycle = false;
+  let candidateFileNames = availableFileNames.filter((fileName) => !playedFileNameSet.has(fileName));
+  if (candidateFileNames.length === 0) {
+    isNewCycle = true;
+    candidateFileNames = availableFileNames;
+  }
+
+  if (options.avoidCurrentFileName === true && currentFileName !== '' && candidateFileNames.length > 1) {
+    const nonCurrentCandidateFileNames = candidateFileNames.filter((fileName) => fileName !== currentFileName);
+    if (nonCurrentCandidateFileNames.length > 0) {
+      candidateFileNames = nonCurrentCandidateFileNames;
+    }
+  }
+
+  const nextFileName = getRandomPhotoViewerSlideshowMusicFileName(candidateFileNames);
+  if (nextFileName === '') {
+    return reconciledState;
+  }
+
+  const historyPrefix =
+    reconciledState.historyIndex >= 0
+      ? reconciledState.history.slice(0, reconciledState.historyIndex + 1)
+      : [];
+  const nextPlayedFileNames = isNewCycle
+    ? [nextFileName]
+    : uniqueStrings([...Array.from(playedFileNameSet), nextFileName]);
+
+  return {
+    history: [...historyPrefix, nextFileName],
+    historyIndex: historyPrefix.length,
+    playedFileNames: nextPlayedFileNames,
+    playbackRequestId: reconciledState.playbackRequestId + 1
+  };
+}
+
+function getPreviousPhotoViewerSlideshowMusicPlaylistState(
+  state: PhotoViewerSlideshowMusicPlaylistState,
+  fileNames: string[]
+): PhotoViewerSlideshowMusicPlaylistState {
+  const reconciledState = reconcilePhotoViewerSlideshowMusicPlaylistState(state, fileNames);
+  if (reconciledState.historyIndex <= 0) {
+    return reconciledState;
+  }
+
+  return {
+    ...reconciledState,
+    historyIndex: reconciledState.historyIndex - 1,
+    playbackRequestId: reconciledState.playbackRequestId + 1
+  };
 }
 
 function getPhotoViewerStableHash(value: string): number {
@@ -1158,8 +1269,7 @@ function isPhotoViewerSlideDurationSelectTarget(target: EventTarget | null): boo
     target instanceof HTMLSelectElement &&
     (target.classList.contains('photo-viewer-slide-duration-select') ||
       target.classList.contains('photo-viewer-slideshow-style-select') ||
-      target.classList.contains('photo-viewer-layout-select') ||
-      target.classList.contains('photo-viewer-slideshow-music-select'))
+      target.classList.contains('photo-viewer-layout-select'))
   );
 }
 
@@ -3226,6 +3336,7 @@ export function PhotoCatalogView({
   const photoViewerSlideshowTimerRef = useRef<number | null>(null);
   const photoViewerTransitionTimerRef = useRef<number | null>(null);
   const photoViewerSlideshowMusicAudioRef = useRef<HTMLAudioElement | null>(null);
+  const photoViewerSlideshowMusicLastPlaybackRequestIdRef = useRef<number | null>(null);
   const photoViewerTransitionSequenceRef = useRef(0);
   const photoViewerCloseInProgressRef = useRef(false);
   const preserveControlsVisibilityForNextPhotoChangeRef = useRef(false);
@@ -3257,9 +3368,9 @@ export function PhotoCatalogView({
   const [isPhotoViewerSlideshowMusicEnabled, setIsPhotoViewerSlideshowMusicEnabled] = useState(() =>
     readPhotoViewerSlideshowMusicEnabledFromSession()
   );
-  const [photoViewerSlideshowMusicFileName, setPhotoViewerSlideshowMusicFileName] = useState(() =>
-    readPhotoViewerSlideshowMusicFileNameFromSession()
-  );
+  const [photoViewerSlideshowMusicPlaylistState, setPhotoViewerSlideshowMusicPlaylistState] =
+    useState<PhotoViewerSlideshowMusicPlaylistState>(() => createEmptyPhotoViewerSlideshowMusicPlaylistState());
+  const photoViewerSlideshowMusicPlaylistStateRef = useRef(photoViewerSlideshowMusicPlaylistState);
   const [photoViewerFilmStripVirtualCenter, setPhotoViewerFilmStripVirtualCenter] =
     useState<PhotoViewerFilmStripVirtualCenter | null>(null);
   const [photoViewerTransitionState, setPhotoViewerTransitionState] = useState<PhotoViewerTransitionState | null>(null);
@@ -3391,6 +3502,7 @@ export function PhotoCatalogView({
       clearPhotoViewerSlideshowTimer();
       clearPhotoViewerTransitionTimer();
       pausePhotoViewerSlideshowMusic(true);
+      resetPhotoViewerSlideshowMusicPlaylist();
       photoThumbnailCropDragRef.current = null;
       setPhotoViewerTransitionState(null);
       photoViewerCloseInProgressRef.current = false;
@@ -3450,8 +3562,8 @@ export function PhotoCatalogView({
   }, [isPhotoViewerSlideshowMusicEnabled]);
 
   useEffect(() => {
-    writePhotoViewerSlideshowMusicFileNameToSession(photoViewerSlideshowMusicFileName);
-  }, [photoViewerSlideshowMusicFileName]);
+    photoViewerSlideshowMusicPlaylistStateRef.current = photoViewerSlideshowMusicPlaylistState;
+  }, [photoViewerSlideshowMusicPlaylistState]);
 
   const filteredCollections = useMemo(
     () => filterAndSortPhotoCollections(collections, filters),
@@ -3807,9 +3919,6 @@ export function PhotoCatalogView({
         }
 
         setPhotoViewerSlideshowMusicFiles(files);
-        setPhotoViewerSlideshowMusicFileName((currentFileName) =>
-          currentFileName !== '' && files.includes(currentFileName) ? currentFileName : ''
-        );
       })
       .catch((error: unknown) => {
         if (cancelled) {
@@ -3933,6 +4042,7 @@ export function PhotoCatalogView({
       clearPhotoViewerSlideshowTimer();
       clearPhotoViewerTransitionTimer();
       pausePhotoViewerSlideshowMusic(true);
+      resetPhotoViewerSlideshowMusicPlaylist();
       setPhotoViewerTransitionState(null);
       photoViewerDragRef.current = null;
       photoThumbnailCropDragRef.current = null;
@@ -3983,15 +4093,23 @@ export function PhotoCatalogView({
       ? photoThumbnailCropSelection
       : null;
   const isPhotoThumbnailCropModeActive = activePhotoThumbnailCropSelection !== null;
+  const photoViewerSlideshowMusicFilesKey = photoViewerSlideshowMusicFiles.join('\0');
+  const photoViewerSlideshowMusicFileName = getCurrentPhotoViewerSlideshowMusicFileName(
+    photoViewerSlideshowMusicPlaylistState
+  );
   const isPhotoViewerSlideshowMusicFileAvailable =
     photoViewerSlideshowMusicFileName !== '' && photoViewerSlideshowMusicFiles.includes(photoViewerSlideshowMusicFileName);
   const photoViewerSlideshowMusicSourceUrl = isPhotoViewerSlideshowMusicFileAvailable
     ? getPhotoViewerSlideshowMusicUrl(photoViewerSlideshowMusicFileName)
     : '';
-  const shouldPlayPhotoViewerSlideshowMusic =
+  const canPlayPhotoViewerSlideshowMusicNow =
     isPhotoViewerOpen &&
     isPhotoViewerSlideshowActive &&
     isPhotoViewerSlideshowMusicEnabled &&
+    photoViewerSlideshowMusicFiles.length > 0 &&
+    !isPhotoThumbnailCropModeActive;
+  const shouldPlayPhotoViewerSlideshowMusic =
+    canPlayPhotoViewerSlideshowMusicNow &&
     isPhotoViewerSlideshowMusicFileAvailable &&
     !isPhotoThumbnailCropModeActive;
   const photoViewerSlideshowMusicStatusText = photoViewerSlideshowMusicLoadError
@@ -4000,19 +4118,46 @@ export function PhotoCatalogView({
       ? 'Loading MP3s...'
       : photoViewerSlideshowMusicFiles.length === 0
         ? 'No MP3 files'
-        : photoViewerSlideshowMusicFileName === ''
-          ? 'Choose MP3'
-          : photoViewerSlideshowMusicFileName;
+        : !isPhotoViewerSlideshowMusicEnabled
+          ? 'Music off'
+          : photoViewerSlideshowMusicFileName === ''
+            ? 'Ready'
+            : photoViewerSlideshowMusicFileName;
   const isPhotoViewerSlideshowMusicToggleDisabled =
     isPhotoThumbnailCropModeActive || photoViewerSlideshowMusicFiles.length === 0;
-  const isPhotoViewerSlideshowMusicSelectDisabled =
-    isPhotoThumbnailCropModeActive || isPhotoViewerSlideshowMusicLoading || photoViewerSlideshowMusicFiles.length === 0;
+  const isPhotoViewerSlideshowMusicTrackButtonDisabled =
+    isPhotoThumbnailCropModeActive || !isPhotoViewerSlideshowMusicEnabled || photoViewerSlideshowMusicFiles.length === 0;
+  const isPhotoViewerSlideshowMusicPreviousDisabled =
+    isPhotoViewerSlideshowMusicTrackButtonDisabled || photoViewerSlideshowMusicPlaylistState.historyIndex <= 0;
+  const isPhotoViewerSlideshowMusicNextDisabled = isPhotoViewerSlideshowMusicTrackButtonDisabled;
+  const photoViewerSlideshowMusicPreviousTitle = isPhotoViewerSlideshowMusicPreviousDisabled
+    ? 'Previous music track is not available.'
+    : 'Restart the current music track, or go to the previous track if it just started.';
+  const photoViewerSlideshowMusicNextTitle = isPhotoViewerSlideshowMusicNextDisabled
+    ? photoViewerSlideshowMusicLoadError ?? 'Next music track is not available.'
+    : 'Play another random music track.';
   const isPhotoGridRandomSortActive = photoGridSortCategory === 'random';
   const photoGridSortDirectionLabel = photoGridSortDirection === 'asc' ? 'ascending' : 'descending';
   const emptyPhotoStateTitle = isPhotoFavoritesOnly ? 'No favorite photos' : 'No matching photos';
   const emptyPhotoStateMessage = isPhotoFavoritesOnly
     ? 'Turn off Favorites only or mark photos in this collection as favorites.'
     : 'Try a different filename search or add photos to this collection.';
+
+  useEffect(() => {
+    const nextPlaylistState = reconcilePhotoViewerSlideshowMusicPlaylistState(
+      photoViewerSlideshowMusicPlaylistStateRef.current,
+      photoViewerSlideshowMusicFiles
+    );
+    applyPhotoViewerSlideshowMusicPlaylistState(nextPlaylistState);
+  }, [photoViewerSlideshowMusicFilesKey]);
+
+  useEffect(() => {
+    if (!canPlayPhotoViewerSlideshowMusicNow || isPhotoViewerSlideshowMusicFileAvailable) {
+      return;
+    }
+
+    advancePhotoViewerSlideshowMusic({ playImmediately: true });
+  }, [canPlayPhotoViewerSlideshowMusicNow, isPhotoViewerSlideshowMusicFileAvailable, photoViewerSlideshowMusicFilesKey]);
 
   useEffect(() => {
     const audioElement = photoViewerSlideshowMusicAudioRef.current;
@@ -4032,8 +4177,17 @@ export function PhotoCatalogView({
       return;
     }
 
-    playPhotoViewerSlideshowMusic();
-  }, [photoViewerSlideshowMusicSourceUrl, shouldPlayPhotoViewerSlideshowMusic]);
+    const shouldRestartTrack =
+      photoViewerSlideshowMusicLastPlaybackRequestIdRef.current !==
+      photoViewerSlideshowMusicPlaylistState.playbackRequestId;
+    playPhotoViewerSlideshowMusic(photoViewerSlideshowMusicFileName, { restart: shouldRestartTrack });
+    photoViewerSlideshowMusicLastPlaybackRequestIdRef.current = photoViewerSlideshowMusicPlaylistState.playbackRequestId;
+  }, [
+    photoViewerSlideshowMusicFileName,
+    photoViewerSlideshowMusicPlaylistState.playbackRequestId,
+    photoViewerSlideshowMusicSourceUrl,
+    shouldPlayPhotoViewerSlideshowMusic
+  ]);
 
   const photoViewerIntrinsicSize = useMemo<PhotoViewerSize | null>(() => {
     const width = normalizePhotoViewerDimension(photoViewerNaturalSize?.width ?? viewerPhoto?.width);
@@ -4263,6 +4417,80 @@ export function PhotoCatalogView({
     }
   }
 
+  function applyPhotoViewerSlideshowMusicPlaylistState(nextState: PhotoViewerSlideshowMusicPlaylistState): void {
+    if (arePhotoViewerSlideshowMusicPlaylistStatesEqual(photoViewerSlideshowMusicPlaylistStateRef.current, nextState)) {
+      return;
+    }
+
+    photoViewerSlideshowMusicPlaylistStateRef.current = nextState;
+    setPhotoViewerSlideshowMusicPlaylistState(nextState);
+  }
+
+  function resetPhotoViewerSlideshowMusicPlaylist(): void {
+    photoViewerSlideshowMusicLastPlaybackRequestIdRef.current = null;
+    applyPhotoViewerSlideshowMusicPlaylistState(createEmptyPhotoViewerSlideshowMusicPlaylistState());
+  }
+
+  function advancePhotoViewerSlideshowMusic(
+    options: { avoidCurrentFileName?: boolean; markCurrentAsPlayed?: boolean; playImmediately?: boolean } = {}
+  ): string {
+    const nextPlaylistState = getNextPhotoViewerSlideshowMusicPlaylistState(
+      photoViewerSlideshowMusicPlaylistStateRef.current,
+      photoViewerSlideshowMusicFiles,
+      {
+        avoidCurrentFileName: options.avoidCurrentFileName,
+        markCurrentAsPlayed: options.markCurrentAsPlayed
+      }
+    );
+    applyPhotoViewerSlideshowMusicPlaylistState(nextPlaylistState);
+
+    const nextFileName = getCurrentPhotoViewerSlideshowMusicFileName(nextPlaylistState);
+    if (options.playImmediately === true && nextFileName !== '') {
+      photoViewerSlideshowMusicLastPlaybackRequestIdRef.current = nextPlaylistState.playbackRequestId;
+      playPhotoViewerSlideshowMusic(nextFileName, { restart: true });
+    }
+
+    return nextFileName;
+  }
+
+  function restartCurrentPhotoViewerSlideshowMusic(): void {
+    const currentFileName = getCurrentPhotoViewerSlideshowMusicFileName(photoViewerSlideshowMusicPlaylistStateRef.current);
+    if (!isValidPhotoSlideshowMusicFileName(currentFileName) || !photoViewerSlideshowMusicFiles.includes(currentFileName)) {
+      return;
+    }
+
+    const audioElement = photoViewerSlideshowMusicAudioRef.current;
+    if (audioElement) {
+      try {
+        audioElement.currentTime = 0;
+      } catch {
+        // Some browsers may reject currentTime changes before metadata is loaded.
+      }
+    }
+
+    if (shouldPlayPhotoViewerSlideshowMusic) {
+      photoViewerSlideshowMusicLastPlaybackRequestIdRef.current =
+        photoViewerSlideshowMusicPlaylistStateRef.current.playbackRequestId;
+      playPhotoViewerSlideshowMusic(currentFileName, { restart: true });
+    }
+  }
+
+  function goToPreviousPhotoViewerSlideshowMusicTrack(options: { playImmediately?: boolean } = {}): string {
+    const nextPlaylistState = getPreviousPhotoViewerSlideshowMusicPlaylistState(
+      photoViewerSlideshowMusicPlaylistStateRef.current,
+      photoViewerSlideshowMusicFiles
+    );
+    applyPhotoViewerSlideshowMusicPlaylistState(nextPlaylistState);
+
+    const nextFileName = getCurrentPhotoViewerSlideshowMusicFileName(nextPlaylistState);
+    if (options.playImmediately === true && nextFileName !== '') {
+      photoViewerSlideshowMusicLastPlaybackRequestIdRef.current = nextPlaylistState.playbackRequestId;
+      playPhotoViewerSlideshowMusic(nextFileName, { restart: true });
+    }
+
+    return nextFileName;
+  }
+
   function pausePhotoViewerSlideshowMusic(resetPosition = false): void {
     const audioElement = photoViewerSlideshowMusicAudioRef.current;
     if (!audioElement) {
@@ -4279,7 +4507,10 @@ export function PhotoCatalogView({
     }
   }
 
-  function playPhotoViewerSlideshowMusic(fileName = photoViewerSlideshowMusicFileName): void {
+  function playPhotoViewerSlideshowMusic(
+    fileName = photoViewerSlideshowMusicFileName,
+    options: { restart?: boolean } = {}
+  ): void {
     if (!isValidPhotoSlideshowMusicFileName(fileName) || !photoViewerSlideshowMusicFiles.includes(fileName)) {
       return;
     }
@@ -4293,6 +4524,12 @@ export function PhotoCatalogView({
     if (audioElement.getAttribute('src') !== sourceUrl) {
       audioElement.setAttribute('src', sourceUrl);
       audioElement.load();
+    } else if (options.restart === true) {
+      try {
+        audioElement.currentTime = 0;
+      } catch {
+        // Some browsers may reject currentTime changes before metadata is loaded.
+      }
     }
 
     void audioElement.play().catch((error: unknown) => {
@@ -4377,6 +4614,7 @@ export function PhotoCatalogView({
     clearPhotoViewerSlideshowTimer();
     clearPhotoViewerTransitionTimer();
     pausePhotoViewerSlideshowMusic(true);
+    resetPhotoViewerSlideshowMusicPlaylist();
     setPhotoViewerTransitionState(null);
     photoViewerDragRef.current = null;
     photoThumbnailCropDragRef.current = null;
@@ -4431,7 +4669,11 @@ export function PhotoCatalogView({
 
     const nextSlideshowActive = !isPhotoViewerSlideshowActive;
     if (nextSlideshowActive && isPhotoViewerSlideshowMusicEnabled) {
-      playPhotoViewerSlideshowMusic();
+      if (isPhotoViewerSlideshowMusicFileAvailable) {
+        playPhotoViewerSlideshowMusic(photoViewerSlideshowMusicFileName);
+      } else {
+        advancePhotoViewerSlideshowMusic({ playImmediately: true });
+      }
     } else {
       pausePhotoViewerSlideshowMusic(false);
     }
@@ -4480,32 +4722,55 @@ export function PhotoCatalogView({
 
     if (!nextEnabled) {
       pausePhotoViewerSlideshowMusic(true);
+      resetPhotoViewerSlideshowMusicPlaylist();
       return;
     }
 
     if (isPhotoViewerSlideshowActive) {
-      playPhotoViewerSlideshowMusic();
+      advancePhotoViewerSlideshowMusic({ playImmediately: true });
     }
   }
 
-  function handlePhotoViewerSlideshowMusicFileChange(event: ChangeEvent<HTMLSelectElement>): void {
+  function handlePhotoViewerSlideshowMusicPreviousClick(): void {
     notePhotoViewerActivity();
-    const nextFileName = event.currentTarget.value;
-    if (nextFileName !== '' && !photoViewerSlideshowMusicFiles.includes(nextFileName)) {
-      event.currentTarget.value = photoViewerSlideshowMusicFileName;
+
+    if (isPhotoViewerSlideshowMusicPreviousDisabled) {
       return;
     }
 
-    setPhotoViewerSlideshowMusicFileName(nextFileName);
-    if (nextFileName === '') {
-      pausePhotoViewerSlideshowMusic(true);
+    const audioElement = photoViewerSlideshowMusicAudioRef.current;
+    if (audioElement && audioElement.currentTime > PHOTO_VIEWER_MUSIC_PREVIOUS_RESTART_THRESHOLD_SECONDS) {
+      restartCurrentPhotoViewerSlideshowMusic();
       return;
     }
 
-    pausePhotoViewerSlideshowMusic(true);
-    if (isPhotoViewerSlideshowActive && isPhotoViewerSlideshowMusicEnabled) {
-      playPhotoViewerSlideshowMusic(nextFileName);
+    goToPreviousPhotoViewerSlideshowMusicTrack({ playImmediately: shouldPlayPhotoViewerSlideshowMusic });
+  }
+
+  function handlePhotoViewerSlideshowMusicNextClick(): void {
+    notePhotoViewerActivity();
+
+    if (isPhotoViewerSlideshowMusicNextDisabled) {
+      return;
     }
+
+    advancePhotoViewerSlideshowMusic({
+      avoidCurrentFileName: true,
+      markCurrentAsPlayed: true,
+      playImmediately: shouldPlayPhotoViewerSlideshowMusic
+    });
+  }
+
+  function handlePhotoViewerSlideshowMusicEnded(): void {
+    if (!shouldPlayPhotoViewerSlideshowMusic) {
+      return;
+    }
+
+    advancePhotoViewerSlideshowMusic({
+      avoidCurrentFileName: true,
+      markCurrentAsPlayed: true,
+      playImmediately: true
+    });
   }
 
   function handlePhotoViewerSlideshowDelayChange(event: ChangeEvent<HTMLSelectElement>): void {
@@ -5040,6 +5305,7 @@ export function PhotoCatalogView({
   function openPhotoGridPhoto(photoId: string): void {
     setPhotoViewerRandomizedSlideshowPhotoIds(null);
     pausePhotoViewerSlideshowMusic(true);
+    resetPhotoViewerSlideshowMusicPlaylist();
     setIsPhotoViewerSlideshowActive(false);
     onOpenPhoto(photoId);
   }
@@ -5565,7 +5831,7 @@ export function PhotoCatalogView({
               ref={photoViewerSlideshowMusicAudioRef}
               className="photo-viewer-slideshow-audio"
               src={photoViewerSlideshowMusicSourceUrl || undefined}
-              loop
+              onEnded={handlePhotoViewerSlideshowMusicEnded}
               preload="auto"
             />
             <div
@@ -5754,30 +6020,36 @@ export function PhotoCatalogView({
                     />
                     <span>Music During Slideshow</span>
                   </label>
-                  <label
-                    className="viewer-toolbar-indicator photo-viewer-slideshow-music"
-                    title={photoViewerSlideshowMusicLoadError ?? 'Choose an MP3 file for the active photo slideshow.'}
+                  <div
+                    className="photo-viewer-slideshow-music-track-buttons"
+                    role="group"
+                    aria-label={`Slideshow music track controls. ${photoViewerSlideshowMusicStatusText}.`}
+                    title={photoViewerSlideshowMusicLoadError ?? `Slideshow music: ${photoViewerSlideshowMusicStatusText}`}
                   >
-                    <span className="photo-viewer-slideshow-music-label">Track</span>
-                    <select
-                      className="photo-viewer-slideshow-music-select"
-                      value={isPhotoViewerSlideshowMusicFileAvailable ? photoViewerSlideshowMusicFileName : ''}
-                      onChange={handlePhotoViewerSlideshowMusicFileChange}
-                      disabled={isPhotoViewerSlideshowMusicSelectDisabled}
-                      aria-label="Slideshow music MP3 file"
-                      title={photoViewerSlideshowMusicLoadError ?? 'Choose an MP3 file for the active photo slideshow.'}
+                    <button
+                      type="button"
+                      className="viewer-toolbar-button viewer-toolbar-button-icon photo-viewer-slideshow-music-track-button"
+                      onClick={handlePhotoViewerSlideshowMusicPreviousClick}
+                      disabled={isPhotoViewerSlideshowMusicPreviousDisabled}
+                      aria-label="Previous slideshow music track"
+                      title={photoViewerSlideshowMusicPreviousTitle}
                     >
-                      <option value="">{photoViewerSlideshowMusicStatusText}</option>
-                      {photoViewerSlideshowMusicFiles.map((fileName) => (
-                        <option key={fileName} value={fileName}>
-                          {fileName}
-                        </option>
-                      ))}
-                    </select>
+                      <PhotoViewerPreviousIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className="viewer-toolbar-button viewer-toolbar-button-icon photo-viewer-slideshow-music-track-button"
+                      onClick={handlePhotoViewerSlideshowMusicNextClick}
+                      disabled={isPhotoViewerSlideshowMusicNextDisabled}
+                      aria-label="Next slideshow music track"
+                      title={photoViewerSlideshowMusicNextTitle}
+                    >
+                      <PhotoViewerNextIcon />
+                    </button>
                     <span className="sr-only" aria-live="polite">
                       Slideshow music: {photoViewerSlideshowMusicStatusText}
                     </span>
-                  </label>
+                  </div>
                 </div>
                 <div
                   className="viewer-toolbar-group viewer-transport-group photo-viewer-slideshow-transport"
