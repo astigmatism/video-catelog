@@ -564,6 +564,13 @@ type ViewerLoopRange = {
 
 type ViewerLoopShortcutPhase = 'start' | 'end' | 'reset';
 
+type NativeFullscreenVideoElement = HTMLVideoElement & {
+  webkitEnterFullscreen?: () => void;
+  webkitEnterFullScreen?: () => void;
+  webkitRequestFullscreen?: () => Promise<void> | void;
+  msRequestFullscreen?: () => Promise<void> | void;
+};
+
 type PipelineStepState = 'complete' | 'active' | 'waiting' | 'failed';
 
 type ProcessingPipelineStep = {
@@ -4221,6 +4228,21 @@ function LongSeekForwardIcon(): JSX.Element {
   );
 }
 
+function NativeFullscreenIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8.5 4.75H4.75V8.5" />
+      <path d="M4.75 4.75 9.25 9.25" />
+      <path d="M15.5 4.75h3.75V8.5" />
+      <path d="M19.25 4.75 14.75 9.25" />
+      <path d="M8.5 19.25H4.75V15.5" />
+      <path d="M4.75 19.25 9.25 14.75" />
+      <path d="M15.5 19.25h3.75V15.5" />
+      <path d="M19.25 19.25 14.75 14.75" />
+    </svg>
+  );
+}
+
 function PencilIcon(): JSX.Element {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -5826,6 +5848,8 @@ function ViewerOverlay({
   const watchTelemetryFlushInProgressRef = useRef(false);
   const loopEnforcementFrameRef = useRef<number | null>(null);
   const focusRestoreFrameRef = useRef<number | null>(null);
+  const nativeVideoFullscreenRequestInProgressRef = useRef(false);
+  const nativeVideoControlsRestoreRef = useRef<boolean | null>(null);
   const isTimelineScrubbingRef = useRef(false);
   const lastNonZeroVolumeRef = useRef(VIEWER_MUTED_RESTORE_VOLUME);
   const closeInProgressRef = useRef(false);
@@ -5874,6 +5898,8 @@ function ViewerOverlay({
   });
   const [videoNaturalSize, setVideoNaturalSize] = useState<ViewerSize | null>(null);
   const [areControlsVisible, setAreControlsVisible] = useState(true);
+  const [hasViewerCursorPosition, setHasViewerCursorPosition] = useState(false);
+  const [isViewerCursorVisible, setIsViewerCursorVisible] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState<number | null>(item.probe?.durationSeconds ?? null);
   const [viewerLoopState, setViewerLoopState] = useState<ViewerLoopState>(() => createEmptyViewerLoopState());
@@ -6749,12 +6775,35 @@ function ViewerOverlay({
       }
 
       setAreControlsVisible(false);
+      setIsViewerCursorVisible(false);
     }, VIEWER_TOOLBAR_AUTO_HIDE_DELAY_MS);
   }
 
   function noteViewerActivity(): void {
     setAreControlsVisible((currentValue) => (currentValue ? currentValue : true));
     scheduleControlsHide();
+  }
+
+  function updateViewerCursorFromMouseEvent(event: MouseEvent<HTMLDivElement>): void {
+    const shellElement = overlayRef.current;
+    if (!shellElement) {
+      return;
+    }
+
+    const shellRect = shellElement.getBoundingClientRect();
+    shellElement.style.setProperty('--viewer-cursor-x', `${event.clientX - shellRect.left}px`);
+    shellElement.style.setProperty('--viewer-cursor-y', `${event.clientY - shellRect.top}px`);
+    setHasViewerCursorPosition((currentValue) => (currentValue ? currentValue : true));
+    setIsViewerCursorVisible((currentValue) => (currentValue ? currentValue : true));
+  }
+
+  function handleViewerMouseMove(event: MouseEvent<HTMLDivElement>): void {
+    updateViewerCursorFromMouseEvent(event);
+    noteViewerActivity();
+  }
+
+  function handleViewerMouseLeave(): void {
+    setIsViewerCursorVisible(false);
   }
 
   function setVideoPlaybackRate(nextPlaybackRate: number): void {
@@ -7843,6 +7892,10 @@ function ViewerOverlay({
     setVolume(VIEWER_DEFAULT_VOLUME);
     setVideoNaturalSize(null);
     setAreControlsVisible(true);
+    setHasViewerCursorPosition(false);
+    setIsViewerCursorVisible(false);
+    overlayRef.current?.style.removeProperty('--viewer-cursor-x');
+    overlayRef.current?.style.removeProperty('--viewer-cursor-y');
     setCurrentTime(0);
     setDuration(item.probe?.durationSeconds ?? null);
     setIsTimelineScrubbing(false);
@@ -7993,13 +8046,28 @@ function ViewerOverlay({
 
     const handleFullscreenChange = (): void => {
       const overlayElement = overlayRef.current;
+      const videoElement = videoRef.current;
       const currentFullscreenElement = document.fullscreenElement;
       const viewerWasFullscreen = overlayElement !== null && previousFullscreenElement === overlayElement;
       const viewerIsFullscreen = overlayElement !== null && currentFullscreenElement === overlayElement;
+      const nativeVideoIsFullscreen = videoElement !== null && currentFullscreenElement === videoElement;
+
+      if (
+        videoElement !== null &&
+        !nativeVideoIsFullscreen &&
+        !nativeVideoFullscreenRequestInProgressRef.current
+      ) {
+        restoreNativeVideoControls(videoElement);
+      }
 
       previousFullscreenElement = currentFullscreenElement;
 
-      if (viewerIsFullscreen || !viewerWasFullscreen) {
+      if (
+        viewerIsFullscreen ||
+        !viewerWasFullscreen ||
+        nativeVideoIsFullscreen ||
+        nativeVideoFullscreenRequestInProgressRef.current
+      ) {
         return;
       }
 
@@ -8017,6 +8085,27 @@ function ViewerOverlay({
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
     };
   }, [item.id]);
+
+  useEffect(() => {
+    const videoElement = videoRef.current;
+
+    if (!videoElement) {
+      return;
+    }
+
+    const handleWebKitEndFullscreen = (): void => {
+      restoreNativeVideoControls(videoElement);
+      setIsVideoPlaying(!videoElement.paused && !videoElement.ended);
+      syncPlaybackTimeFromVideo(videoElement);
+      scheduleVideoFocusRestore();
+    };
+
+    videoElement.addEventListener('webkitendfullscreen', handleWebKitEndFullscreen);
+    return () => {
+      videoElement.removeEventListener('webkitendfullscreen', handleWebKitEndFullscreen);
+      restoreNativeVideoControls(videoElement);
+    };
+  }, [videoUrl]);
 
   useEffect(() => {
     const activeLoopRange = getViewerLoopRange(viewerLoopStateRef.current, resolvedDuration);
@@ -8334,6 +8423,116 @@ function ViewerOverlay({
     viewerStageSize.width
   ]);
 
+  function prepareNativeVideoControls(videoElement: HTMLVideoElement): void {
+    if (nativeVideoControlsRestoreRef.current === null) {
+      nativeVideoControlsRestoreRef.current = videoElement.controls;
+    }
+
+    videoElement.controls = true;
+  }
+
+  function restoreNativeVideoControls(videoElement: HTMLVideoElement | null = videoRef.current): void {
+    const shouldRestoreControls = nativeVideoControlsRestoreRef.current;
+
+    if (videoElement === null || shouldRestoreControls === null) {
+      return;
+    }
+
+    videoElement.controls = shouldRestoreControls;
+    nativeVideoControlsRestoreRef.current = null;
+  }
+
+  async function requestNativeVideoFullscreen(): Promise<void> {
+    noteViewerActivity();
+
+    const videoElement = videoRef.current as NativeFullscreenVideoElement | null;
+
+    if (!videoElement || videoUrl === null) {
+      setViewerError('Native video fullscreen is not available until the video is loaded.');
+      return;
+    }
+
+    const canRequestNativeFullscreen =
+      typeof videoElement.requestFullscreen === 'function' ||
+      typeof videoElement.webkitRequestFullscreen === 'function' ||
+      typeof videoElement.webkitEnterFullscreen === 'function' ||
+      typeof videoElement.webkitEnterFullScreen === 'function' ||
+      typeof videoElement.msRequestFullscreen === 'function';
+
+    if (!canRequestNativeFullscreen) {
+      setViewerError('Native video fullscreen is not available in this browser.');
+      return;
+    }
+
+    const shouldResumePlayback = !videoElement.paused && !videoElement.ended;
+    nativeVideoFullscreenRequestInProgressRef.current = true;
+    prepareNativeVideoControls(videoElement);
+
+    try {
+      let fullscreenRequestError: unknown = null;
+      let didRequestNativeFullscreen = false;
+
+      if (typeof videoElement.requestFullscreen === 'function') {
+        try {
+          await videoElement.requestFullscreen();
+          didRequestNativeFullscreen = true;
+        } catch (error) {
+          fullscreenRequestError = error;
+        }
+      }
+
+      if (!didRequestNativeFullscreen && typeof videoElement.webkitRequestFullscreen === 'function') {
+        try {
+          await videoElement.webkitRequestFullscreen();
+          didRequestNativeFullscreen = true;
+        } catch (error) {
+          fullscreenRequestError = error;
+        }
+      }
+
+      if (!didRequestNativeFullscreen && typeof videoElement.webkitEnterFullscreen === 'function') {
+        videoElement.webkitEnterFullscreen();
+        didRequestNativeFullscreen = true;
+      } else if (!didRequestNativeFullscreen && typeof videoElement.webkitEnterFullScreen === 'function') {
+        videoElement.webkitEnterFullScreen();
+        didRequestNativeFullscreen = true;
+      } else if (!didRequestNativeFullscreen && typeof videoElement.msRequestFullscreen === 'function') {
+        try {
+          await videoElement.msRequestFullscreen();
+          didRequestNativeFullscreen = true;
+        } catch (error) {
+          fullscreenRequestError = error;
+        }
+      }
+
+      if (!didRequestNativeFullscreen) {
+        throw fullscreenRequestError ?? new Error('Native video fullscreen request failed.');
+      }
+
+      if (shouldResumePlayback && videoElement.paused && !videoElement.ended) {
+        try {
+          await videoElement.play();
+          setViewerError('');
+        } catch (error) {
+          console.warn('viewer.video.nativeFullscreen.playbackResume.error', error);
+          setViewerError('Native fullscreen opened. Press Play if playback did not resume automatically.');
+        }
+      } else {
+        setViewerError('');
+      }
+
+      scheduleVideoFocusRestore();
+    } catch (error) {
+      restoreNativeVideoControls(videoElement);
+      console.warn('viewer.video.nativeFullscreen.error', error);
+      setViewerError('Native video fullscreen is unavailable in this browser or was blocked.');
+    } finally {
+      window.setTimeout(() => {
+        nativeVideoFullscreenRequestInProgressRef.current = false;
+      }, 0);
+    }
+  }
+
   const handleVideoError = (): void => {
     const videoElement = videoRef.current;
     console.error('viewer.video.error', {
@@ -8357,14 +8556,16 @@ function ViewerOverlay({
   };
 
   return (
-    <div className="viewer-backdrop" role="presentation">
+    <div className="viewer-backdrop video-viewer-backdrop" role="presentation">
       <div
-        className={`viewer-shell${areControlsVisible ? '' : ' is-cursor-hidden'}`}
+        className={`viewer-shell${hasViewerCursorPosition ? ' is-video-cursor-managed' : ''}${areControlsVisible ? '' : ' is-cursor-hidden'}`}
         ref={overlayRef}
         role="dialog"
         aria-modal="true"
         aria-label={getCatalogItemDisplayName(item)}
-        onMouseMove={noteViewerActivity}
+        onMouseEnter={handleViewerMouseMove}
+        onMouseMove={handleViewerMouseMove}
+        onMouseLeave={handleViewerMouseLeave}
         onMouseDown={noteViewerActivity}
         onPointerDown={noteViewerActivity}
         onTouchStart={noteViewerActivity}
@@ -8377,6 +8578,10 @@ function ViewerOverlay({
           maybeRestoreVideoFocusFromInteractionTarget(event.target);
         }}
       >
+        <span
+          className={`viewer-custom-cursor${hasViewerCursorPosition && isViewerCursorVisible ? ' is-visible' : ''}`}
+          aria-hidden="true"
+        />
         <div
           ref={viewerHeaderRef}
           className={`viewer-header${areControlsVisible ? '' : ' is-hidden'}`}
@@ -9035,6 +9240,20 @@ function ViewerOverlay({
                 </button>
               </span>
             </div>
+          </div>
+          <div className="viewer-toolbar-group viewer-native-fullscreen-actions" aria-label="Native video fullscreen">
+            <button
+              type="button"
+              className="viewer-toolbar-button viewer-toolbar-button-icon"
+              onClick={() => {
+                void requestNativeVideoFullscreen();
+              }}
+              disabled={videoUrl === null}
+              aria-label="Open video in native browser fullscreen"
+              title="Open the video itself in native browser fullscreen"
+            >
+              <NativeFullscreenIcon />
+            </button>
           </div>
         </div>
       </div>
